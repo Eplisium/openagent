@@ -1,0 +1,60 @@
+{
+  "name": "openagent",
+  "version": "2.0.0",
+  "description": "🚀 OpenAgent - Production-grade AI agent with 400+ models. On par with Claude Code, Cursor, and Codex.",
+  "main": "src/index.js",
+  "type": "module",
+  "bin": {
+    "openagent": "src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "cli": "node src/cli.js",
+    "demo": "node examples/demo.js",
+    "chat": "node examples/interactive-chat.js",
+    "test": "node tests/test-suite.js",
+    "streaming": "node examples/streaming-demo.js",
+    "tools": "node examples/tool-calling-demo.js",
+    "vision": "node examples/vision-demo.js",
+    "agents": "node examples/agents-demo.js",
+    "agent": "node examples/agent-demo.js",
+    "subagents": "node examples/subagent-demo.js"
+  },
+  "keywords": [
+    "openagent",
+    "openrouter",
+    "ai",
+    "llm",
+    "agent",
+    "agentic",
+    "coding",
+    "assistant",
+    "gpt-5",
+    "claude",
+    "gemini",
+    "streaming",
+    "tool-calling",
+    "cli",
+    "2026"
+  ],
+  "author": "Zach",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.9",
+    "chalk": "^5.4.1",
+    "ora": "^8.1.2",
+    "inquirer": "^12.3.0",
+    "dotenv": "^16.4.7",
+    "fs-extra": "^11.3.0",
+    "cli-table3": "^0.6.5",
+    "boxen": "^8.0.1",
+    "gradient-string": "^3.0.0",
+    "glob": "^10.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Session files
+.sessions/
+
+# Model cache
+.model-cache.json
+.model-favorites.json
+.model-recents.json
+
+# Backups
+.windop-backups/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Coverage
+coverage/
+
+# Build
+dist/
+build/
