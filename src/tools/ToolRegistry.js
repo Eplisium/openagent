@@ -1,12 +1,31 @@
 /**
- * 🛠️ Tool Registry
+ * 🛠️ Tool Registry v3.0
  * Central registry for all available tools with execution and validation
+ * 
+ * Features:
+ * - Tool registration and validation
+ * - Permission-based execution
+ * - Execution history and statistics
+ * - Input validation
+ * - Timeout handling
+ * - Error categorization
  */
 
 import chalk from 'chalk';
 
+/**
+ * Tool execution error types
+ */
+export const ToolErrorType = {
+  NOT_FOUND: 'TOOL_NOT_FOUND',
+  VALIDATION_ERROR: 'VALIDATION_ERROR',
+  PERMISSION_DENIED: 'PERMISSION_DENIED',
+  EXECUTION_ERROR: 'EXECUTION_ERROR',
+  TIMEOUT: 'TOOL_TIMEOUT',
+};
+
 export class ToolRegistry {
-  constructor() {
+  constructor(options = {}) {
     this.tools = new Map();
     this.executionHistory = [];
     this.permissions = {
@@ -16,17 +35,56 @@ export class ToolRegistry {
       allowNetwork: true,
       allowGit: true,
       confirmDestructive: true,
+      ...options.permissions,
+    };
+    
+    // Execution settings
+    this.defaultTimeout = options.defaultTimeout || 30000; // 30 seconds
+    this.maxHistorySize = options.maxHistorySize || 500;
+    this.enableValidation = options.enableValidation !== false;
+    
+    // Statistics
+    this.stats = {
+      totalExecutions: 0,
+      successfulExecutions: 0,
+      failedExecutions: 0,
+      totalDuration: 0,
+      toolUsageCount: {},
     };
   }
 
   /**
-   * Register a tool
+   * Register a tool with validation
    */
   register(tool) {
-    if (!tool.name || !tool.execute) {
-      throw new Error('Tool must have a name and execute function');
+    if (!tool.name) {
+      throw new Error('Tool must have a name');
     }
-    this.tools.set(tool.name, tool);
+    if (!tool.execute || typeof tool.execute !== 'function') {
+      throw new Error(`Tool '${tool.name}' must have an execute function`);
+    }
+    if (!tool.description) {
+      console.warn(chalk.yellow(`⚠️ Tool '${tool.name}' has no description`));
+    }
+    
+    // Validate parameters schema if provided
+    if (tool.parameters && tool.parameters.type !== 'object') {
+      console.warn(chalk.yellow(`⚠️ Tool '${tool.name}' parameters should be of type 'object'`));
+    }
+    
+    this.tools.set(tool.name, {
+      ...tool,
+      enabled: tool.enabled !== false,
+      category: tool.category || 'general',
+      destructive: tool.destructive || false,
+      timeout: tool.timeout || this.defaultTimeout,
+    });
+    
+    // Initialize usage count
+    if (!this.stats.toolUsageCount[tool.name]) {
+      this.stats.toolUsageCount[tool.name] = 0;
+    }
+    
     return this;
   }
 
@@ -83,57 +141,91 @@ export class ToolRegistry {
   }
 
   /**
-   * Execute a tool with permission checks
+   * Execute a tool with permission checks, validation, and timeout
    */
   async execute(toolName, args = {}) {
+    const startTime = Date.now();
+    this.stats.totalExecutions++;
+    
     const tool = this.tools.get(toolName);
     
     if (!tool) {
+      this.recordExecution(toolName, args, false, Date.now() - startTime, 'Tool not found');
       return {
         success: false,
         error: `Tool "${toolName}" not found`,
+        errorType: ToolErrorType.NOT_FOUND,
         availableTools: Array.from(this.tools.keys()),
+      };
+    }
+    
+    if (!tool.enabled) {
+      this.recordExecution(toolName, args, false, Date.now() - startTime, 'Tool disabled');
+      return {
+        success: false,
+        error: `Tool "${toolName}" is disabled`,
+        errorType: ToolErrorType.PERMISSION_DENIED,
       };
     }
 
     // Permission checks
     if (tool.category === 'shell' && !this.permissions.allowShell) {
-      return { success: false, error: 'Shell execution is disabled' };
+      this.recordExecution(toolName, args, false, Date.now() - startTime, 'Shell execution disabled');
+      return { 
+        success: false, 
+        error: 'Shell execution is disabled',
+        errorType: ToolErrorType.PERMISSION_DENIED,
+      };
     }
     if (tool.category === 'file' && tool.destructive && !this.permissions.allowFileDelete) {
-      return { success: false, error: 'File deletion is disabled' };
+      this.recordExecution(toolName, args, false, Date.now() - startTime, 'File deletion disabled');
+      return { 
+        success: false, 
+        error: 'File deletion is disabled',
+        errorType: ToolErrorType.PERMISSION_DENIED,
+      };
     }
     if (tool.category === 'network' && !this.permissions.allowNetwork) {
-      return { success: false, error: 'Network access is disabled' };
+      this.recordExecution(toolName, args, false, Date.now() - startTime, 'Network access disabled');
+      return { 
+        success: false, 
+        error: 'Network access is disabled',
+        errorType: ToolErrorType.PERMISSION_DENIED,
+      };
+    }
+
+    // Input validation
+    if (this.enableValidation && tool.parameters) {
+      const validationError = this.validateArgs(tool, args);
+      if (validationError) {
+        this.recordExecution(toolName, args, false, Date.now() - startTime, validationError);
+        return {
+          success: false,
+          error: validationError,
+          errorType: ToolErrorType.VALIDATION_ERROR,
+        };
+      }
     }
 
     // Confirm destructive operations
     if (tool.destructive && this.permissions.confirmDestructive) {
-      // In interactive mode, this would prompt the user
-      // For now, we log it
       console.log(chalk.yellow(`⚠️  Destructive operation: ${toolName}`));
     }
 
-    const startTime = Date.now();
-    
+    // Execute with timeout
     try {
-      const result = await tool.execute(args);
+      const result = await this.executeWithTimeout(tool, args, tool.timeout || this.defaultTimeout);
       const duration = Date.now() - startTime;
       
-      const entry = {
-        tool: toolName,
-        args,
-        result: result.success !== false ? 'success' : 'failure',
-        duration,
-        timestamp: new Date().toISOString(),
-      };
+      this.recordExecution(toolName, args, result.success !== false, duration);
+      this.stats.toolUsageCount[toolName] = (this.stats.toolUsageCount[toolName] || 0) + 1;
       
-      this.executionHistory.push(entry);
-      
-      // Keep history manageable
-      if (this.executionHistory.length > 500) {
-        this.executionHistory = this.executionHistory.slice(-250);
+      if (result.success !== false) {
+        this.stats.successfulExecutions++;
+      } else {
+        this.stats.failedExecutions++;
       }
+      this.stats.totalDuration += duration;
       
       return {
         ...result,
@@ -141,22 +233,90 @@ export class ToolRegistry {
       };
     } catch (error) {
       const duration = Date.now() - startTime;
+      const isTimeout = error.message.includes('timeout');
       
-      this.executionHistory.push({
-        tool: toolName,
-        args,
-        result: 'error',
-        error: error.message,
-        duration,
-        timestamp: new Date().toISOString(),
-      });
+      this.recordExecution(toolName, args, false, duration, error.message);
+      this.stats.failedExecutions++;
+      this.stats.totalDuration += duration;
       
       return {
         success: false,
         error: error.message,
+        errorType: isTimeout ? ToolErrorType.TIMEOUT : ToolErrorType.EXECUTION_ERROR,
         _meta: { tool: toolName, duration },
       };
     }
+  }
+  
+  /**
+   * Execute tool with timeout
+   */
+  async executeWithTimeout(tool, args, timeout) {
+    return Promise.race([
+      tool.execute(args),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error(`Tool execution timeout (${timeout}ms)`)), timeout)
+      ),
+    ]);
+  }
+  
+  /**
+   * Validate tool arguments against schema
+   */
+  validateArgs(tool, args) {
+    if (!tool.parameters || !tool.parameters.required) {
+      return null;
+    }
+    
+    for (const required of tool.parameters.required) {
+      if (args[required] === undefined || args[required] === null) {
+        return `Missing required parameter: ${required}`;
+      }
+    }
+    
+    return null;
+  }
+  
+  /**
+   * Record execution in history
+   */
+  recordExecution(toolName, args, success, duration, error = null) {
+    const entry = {
+      tool: toolName,
+      args: this.sanitizeArgs(args),
+      result: success ? 'success' : 'failure',
+      error,
+      duration,
+      timestamp: new Date().toISOString(),
+    };
+    
+    this.executionHistory.push(entry);
+    
+    // Keep history manageable
+    if (this.executionHistory.length > this.maxHistorySize) {
+      this.executionHistory = this.executionHistory.slice(-Math.floor(this.maxHistorySize / 2));
+    }
+  }
+  
+  /**
+   * Sanitize args for logging (remove sensitive data)
+   */
+  sanitizeArgs(args) {
+    const sanitized = { ...args };
+    // Remove potentially sensitive fields
+    delete sanitized.apiKey;
+    delete sanitized.token;
+    delete sanitized.password;
+    delete sanitized.secret;
+    
+    // Truncate long strings
+    for (const [key, value] of Object.entries(sanitized)) {
+      if (typeof value === 'string' && value.length > 200) {
+        sanitized[key] = value.substring(0, 200) + '...';
+      }
+    }
+    
+    return sanitized;
   }
 
   /**
@@ -174,28 +334,36 @@ export class ToolRegistry {
   }
 
   /**
-   * Get stats
+   * Get comprehensive stats
    */
   getStats() {
-    const total = this.executionHistory.length;
-    const successful = this.executionHistory.filter(e => e.result === 'success').length;
-    const failed = total - successful;
+    const total = this.stats.totalExecutions;
+    const successful = this.stats.successfulExecutions;
+    const failed = this.stats.failedExecutions;
     const avgDuration = total > 0
-      ? this.executionHistory.reduce((sum, e) => sum + e.duration, 0) / total
+      ? Math.round(this.stats.totalDuration / total)
       : 0;
+    
+    // Get most used tools
+    const sortedTools = Object.entries(this.stats.toolUsageCount)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 5);
 
     return {
       totalExecutions: total,
       successful,
       failed,
       successRate: total > 0 ? ((successful / total) * 100).toFixed(1) + '%' : 'N/A',
-      avgDuration: Math.round(avgDuration) + 'ms',
+      avgDuration: avgDuration + 'ms',
       registeredTools: this.tools.size,
+      enabledTools: Array.from(this.tools.values()).filter(t => t.enabled).length,
+      mostUsedTools: sortedTools.map(([name, count]) => `${name} (${count})`).join(', ') || 'None',
+      historySize: this.executionHistory.length,
     };
   }
 
   /**
-   * List all registered tools
+   * List all registered tools with details
    */
   list() {
     const list = [];
@@ -206,9 +374,30 @@ export class ToolRegistry {
         category: tool.category || 'general',
         enabled: tool.enabled !== false,
         destructive: tool.destructive || false,
+        usageCount: this.stats.toolUsageCount[name] || 0,
       });
     }
-    return list;
+    // Sort by usage count
+    return list.sort((a, b) => b.usageCount - a.usageCount);
+  }
+  
+  /**
+   * Enable/disable a tool
+   */
+  setToolEnabled(toolName, enabled) {
+    const tool = this.tools.get(toolName);
+    if (tool) {
+      tool.enabled = enabled;
+      return true;
+    }
+    return false;
+  }
+  
+  /**
+   * Get tools by category
+   */
+  getByCategory(category) {
+    return Array.from(this.tools.values()).filter(t => t.category === category);
   }
 }
 

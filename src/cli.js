@@ -1,6 +1,14 @@
 /**
- * 💻 OpenAgent CLI
+ * 💻 OpenAgent CLI v3.0
  * Beautiful interactive terminal with real-time streaming & tool visualization
+ * 
+ * New features:
+ * - Enhanced progress indicators
+ * - Cost tracking display
+ * - Session statistics
+ * - Command aliases
+ * - Auto-save sessions
+ * - Better error handling
  */
 
 import chalk from 'chalk';
@@ -12,7 +20,7 @@ import { AgentSession } from './agent/AgentSession.js';
 import { CONFIG } from './config.js';
 import { ModelBrowser } from './ModelBrowser.js';
 
-const VERSION = '2.0.0';
+const VERSION = '3.0.0';
 
 // ═══════════════════════════════════════════════════════════════════
 // 🎨 Styles
@@ -50,6 +58,32 @@ export class CLI {
     this.verbose = true;
     this.history = [];
     this.mode = 'agent'; // 'agent' or 'chat'
+    
+    // Session tracking
+    this.sessionStartTime = Date.now();
+    this.totalCost = 0;
+    this.totalTokens = 0;
+    this.taskCount = 0;
+    
+    // Auto-save settings
+    this.autoSave = options.autoSave !== false;
+    this.autoSaveInterval = options.autoSaveInterval || 5 * 60 * 1000; // 5 minutes
+    this.lastSaveTime = Date.now();
+    
+    // Command aliases
+    this.aliases = {
+      'q': 'exit',
+      'quit': 'exit',
+      'c': 'chat',
+      'a': 'agent',
+      'm': 'model',
+      's': 'stats',
+      'h': 'help',
+      't': 'tools',
+      'cl': 'clear',
+      'st': 'stream',
+      'v': 'verbose',
+    };
   }
 
   async start() {
@@ -70,87 +104,150 @@ export class CLI {
     console.log(chalk.green('✓ API Key configured'));
     console.log(chalk.gray(`  Working directory: ${this.workingDir}`));
 
-    this.session = new AgentSession({
-      workingDir: this.workingDir,
-      model: CONFIG.DEFAULT_MODEL,
-      verbose: this.verbose,
-      streaming: this.streaming,
-    });
+    const spinner = ora({ text: chalk.gray('Initializing session...'), spinner: 'dots', color: 'cyan' }).start();
+    
+    try {
+      this.session = new AgentSession({
+        workingDir: this.workingDir,
+        model: CONFIG.DEFAULT_MODEL,
+        verbose: this.verbose,
+        streaming: this.streaming,
+      });
+      spinner.succeed(chalk.green('Session initialized'));
+    } catch (error) {
+      spinner.fail(chalk.red(`Failed to initialize session: ${error.message}`));
+      process.exit(1);
+    }
 
     // Initialize model browser
     this.modelBrowser = new ModelBrowser(this.session.agent.client);
-    const spinner = ora({ text: chalk.gray('Loading models from OpenRouter...'), spinner: 'dots', color: 'cyan' }).start();
+    const modelSpinner = ora({ text: chalk.gray('Loading models from OpenRouter...'), spinner: 'dots', color: 'cyan' }).start();
     try {
       await this.modelBrowser.init();
-      spinner.succeed(chalk.green(`Loaded ${this.modelBrowser.models.length} models`));
+      modelSpinner.succeed(chalk.green(`Loaded ${this.modelBrowser.models.length} models`));
     } catch (e) {
-      spinner.warn(chalk.yellow('Could not load models, using defaults'));
+      modelSpinner.warn(chalk.yellow('Could not load models, using defaults'));
     }
 
     console.log(chalk.gray(`  Model: ${chalk.cyan(this.session.agent.model)}`));
 
+    // Start auto-save timer
+    if (this.autoSave) {
+      this.startAutoSave();
+    }
+
     console.log(boxen(
       `${chalk.bold('Commands:')}\n\n` +
-      `${chalk.cyan('/agent')}    ${chalk.gray('- Run agentic task (with tools)')}\n` +
-      `${chalk.cyan('/chat')}     ${chalk.gray('- Simple chat (no tools)')}\n` +
-      `${chalk.cyan('/model')}    ${chalk.gray('- Change AI model')}\n` +
-      `${chalk.cyan('/stream')}   ${chalk.gray('- Toggle streaming')}\n` +
-      `${chalk.cyan('/verbose')}  ${chalk.gray('- Toggle verbose mode')}\n` +
-      `${chalk.cyan('/tools')}    ${chalk.gray('- List available tools')}\n` +
-      `${chalk.cyan('/agents')}   ${chalk.gray('- Show subagent status')}\n` +
-      `${chalk.cyan('/stats')}    ${chalk.gray('- Show statistics')}\n` +
-      `${chalk.cyan('/clear')}    ${chalk.gray('- Clear conversation')}\n` +
-      `${chalk.cyan('/save')}     ${chalk.gray('- Save session')}\n` +
-      `${chalk.cyan('/load')}     ${chalk.gray('- Load session')}\n` +
-      `${chalk.cyan('/help')}     ${chalk.gray('- Show all commands')}\n` +
-      `${chalk.cyan('/exit')}     ${chalk.gray('- Exit')}\n\n` +
+      `${chalk.cyan('/agent <task>')}  ${chalk.gray('- Run agentic task (with tools)')}\n` +
+      `${chalk.cyan('/chat <msg>')}   ${chalk.gray('- Simple chat (no tools)')}\n` +
+      `${chalk.cyan('/model')}        ${chalk.gray('- Change AI model')}\n` +
+      `${chalk.cyan('/stream')}       ${chalk.gray('- Toggle streaming')}\n` +
+      `${chalk.cyan('/verbose')}      ${chalk.gray('- Toggle verbose mode')}\n` +
+      `${chalk.cyan('/tools')}        ${chalk.gray('- List available tools')}\n` +
+      `${chalk.cyan('/agents')}       ${chalk.gray('- Show subagent status')}\n` +
+      `${chalk.cyan('/stats')}        ${chalk.gray('- Show statistics')}\n` +
+      `${chalk.cyan('/clear')}        ${chalk.gray('- Clear conversation')}\n` +
+      `${chalk.cyan('/save')}         ${chalk.gray('- Save session')}\n` +
+      `${chalk.cyan('/load')}         ${chalk.gray('- Load session')}\n` +
+      `${chalk.cyan('/history')}      ${chalk.gray('- Show command history')}\n` +
+      `${chalk.cyan('/paste')}        ${chalk.gray('- Paste large text')}\n` +
+      `${chalk.cyan('/cost')}         ${chalk.gray('- Show cost breakdown')}\n` +
+      `${chalk.cyan('/help')}         ${chalk.gray('- Show all commands')}\n` +
+      `${chalk.cyan('/exit')}         ${chalk.gray('- Exit')}\n\n` +
+      `${chalk.dim('Shortcuts:')} ${chalk.gray('q=exit, c=chat, a=agent, m=model, s=stats, h=help')}\n` +
       `${chalk.dim('Tip: Just type a message to run as an agentic task')}`,
       { ...box.default, title: '🤖 OpenAgent', titleAlignment: 'center' }
     ));
 
     await this.mainLoop();
   }
+  
+  /**
+   * Start auto-save timer
+   */
+  startAutoSave() {
+    setInterval(async () => {
+      if (Date.now() - this.lastSaveTime > this.autoSaveInterval) {
+        try {
+          await this.session.save();
+          this.lastSaveTime = Date.now();
+          if (this.verbose) {
+            console.log(chalk.dim('\n💾 Auto-saved session'));
+          }
+        } catch (error) {
+          // Silently fail auto-save
+        }
+      }
+    }, this.autoSaveInterval);
+  }
 
   printBanner() {
     console.log(`
-${g.title('╔═══════════════════════════════════════════════════════════════╗')}
-${g.title('║')}                                                               ${g.title('║')}
-${g.title('║')}   ${gradient.rainbow('🚀 OpenAgent')} ${chalk.gray(`v${VERSION}`)}                                           ${g.title('║')}
-${g.title('║')}   ${chalk.gray('AI-Powered Agentic Assistant with 400+ Models')}               ${g.title('║')}
-${g.title('║')}                                                               ${g.title('║')}
-${g.title('╚═══════════════════════════════════════════════════════════════╝')}
-`);
+ ${g.title('╔═══════════════════════════════════════════════════════════════╗')}
+ ${g.title('║')}                                                               ${g.title('║')}
+ ${g.title('║')}   ${gradient.rainbow('🚀 OpenAgent')} ${chalk.gray(`v${VERSION}`)}                                           ${g.title('║')}
+ ${g.title('║')}   ${chalk.gray('AI-Powered Agentic Assistant with 400+ Models')}               ${g.title('║')}
+ ${g.title('║')}   ${chalk.gray('Production-grade • Tool calling • Multi-agent')}                ${g.title('║')}
+ ${g.title('║')}                                                               ${g.title('║')}
+ ${g.title('╚═══════════════════════════════════════════════════════════════╝')}
+ `);
   }
 
   async mainLoop() {
     while (true) {
       console.log('');
+      
+      // Show context usage in prompt
+      const contextPct = this.getContextUsage();
+      const contextColor = contextPct > 70 ? chalk.red : contextPct > 40 ? chalk.yellow : chalk.green;
+      const prompt = `${chalk.cyan('❯')} ${contextColor(`[${contextPct}%]`)}`;
+      
       const { input } = await inquirer.prompt([{
         type: 'input',
         name: 'input',
-        message: chalk.cyan('❯'),
+        message: prompt,
         prefix: '',
       }]);
 
       const trimmed = input.trim();
       if (!trimmed) continue;
 
+      // Check for command alias
+      let command = trimmed;
       if (trimmed.startsWith('/')) {
-        const shouldContinue = await this.handleCommand(trimmed);
+        const cmd = trimmed.slice(1).split(' ')[0].toLowerCase();
+        if (this.aliases[cmd]) {
+          command = '/' + this.aliases[cmd] + trimmed.slice(cmd.length + 1);
+        }
+      }
+
+      if (command.startsWith('/')) {
+        const shouldContinue = await this.handleCommand(command);
         if (!shouldContinue) break;
         continue;
       }
 
-      if (trimmed.startsWith('!')) {
-        await this.runShellCommand(trimmed.slice(1));
+      if (command.startsWith('!')) {
+        await this.runShellCommand(command.slice(1));
         continue;
       }
 
       // Default: run as agentic task
+      this.taskCount++;
       await this.runAgentTask(trimmed);
     }
 
     this.printGoodbye();
+  }
+  
+  /**
+   * Get current context usage percentage
+   */
+  getContextUsage() {
+    if (!this.session?.agent) return 0;
+    const estimated = this.session.agent.estimateTokens();
+    const max = this.session.agent.maxContextTokens;
+    return Math.min(100, Math.round((estimated / max) * 100));
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -324,6 +421,11 @@ ${g.title('╚══════════════════════
       if (n >= 1000) return (n / 1000).toFixed(0) + 'K';
       return n.toString();
     };
+    
+    // Update session totals
+    if (result.performance) {
+      this.totalTokens += result.performance.totalToolCalls * 1000; // Rough estimate
+    }
 
     console.log('');
     console.log(chalk.dim(`  ── `) +
@@ -333,6 +435,11 @@ ${g.title('╚══════════════════════
       chalk.white(`${result.stats.toolExecutions} tools`) + chalk.dim(' • ') +
       chalk.white(`${seconds}s`) +
       chalk.dim(' ──'));
+    
+    // Show performance metrics if available
+    if (result.performance && result.performance.totalRetries > 0) {
+      console.log(chalk.dim(`  └─ ${result.performance.totalRetries} retries`));
+    }
   }
 
   printGoodbye() {
@@ -357,10 +464,18 @@ ${g.title('╚══════════════════════
       case 'exit':
       case 'quit':
       case 'q':
+        // Auto-save before exit
+        if (this.autoSave) {
+          try {
+            await this.session.save();
+            console.log(chalk.dim('💾 Session auto-saved'));
+          } catch {}
+        }
         return false;
 
       case 'agent':
         if (argStr) {
+          this.taskCount++;
           await this.runAgentTask(argStr);
         } else {
           console.log(chalk.gray('Usage: /agent <task>'));
@@ -422,6 +537,14 @@ ${g.title('╚══════════════════════
 
       case 'paste':
         await this.handlePaste();
+        break;
+
+      case 'cost':
+        this.showCost();
+        break;
+
+      case 'reset':
+        this.resetSession();
         break;
 
       case 'help':
@@ -662,18 +785,63 @@ ${g.title('╚══════════════════════
       `${chalk.cyan('/tools')}        - List available tools\n` +
       `${chalk.cyan('/agents')}       - Show subagent status\n` +
       `${chalk.cyan('/stats')}        - Show statistics\n` +
+      `${chalk.cyan('/cost')}         - Show cost breakdown\n` +
       `${chalk.cyan('/clear')}        - Clear conversation\n` +
       `${chalk.cyan('/save')}         - Save session\n` +
       `${chalk.cyan('/load')}         - Load session\n` +
       `${chalk.cyan('/history')}      - Show command history\n` +
-      `${chalk.cyan('/paste')}        - Paste large text (multi-line)\n` +
+      `${chalk.cyan('/paste')}        - Paste large text\n` +
+      `${chalk.cyan('/reset')}        - Reset session\n` +
       `${chalk.cyan('/help')}         - Show this help\n` +
       `${chalk.cyan('/exit')}         - Exit\n\n` +
+      `${chalk.bold('Aliases')}\n\n` +
+      `${chalk.cyan('q')}=exit ${chalk.cyan('c')}=chat ${chalk.cyan('a')}=agent ${chalk.cyan('m')}=model ${chalk.cyan('s')}=stats ${chalk.cyan('h')}=help\n\n` +
       `${chalk.bold('Shortcuts')}\n\n` +
       `${chalk.cyan('! <cmd>')}       - Run shell command\n` +
       `${chalk.cyan('plain text')}    - Run as agentic task`,
       { ...box.info, title: '📖 Help' }
     ));
+  }
+  
+  /**
+   * Show cost breakdown
+   */
+  showCost() {
+    const clientStats = this.session.agent.client.getStats();
+    const sessionDuration = Date.now() - this.sessionStartTime;
+    const sessionMinutes = Math.floor(sessionDuration / 60000);
+    
+    console.log(boxen(
+      `${chalk.bold('Session Cost')}\n\n` +
+      `${chalk.cyan('Session Duration:')} ${sessionMinutes} minutes\n` +
+      `${chalk.cyan('Total Requests:')} ${clientStats.requestCount}\n` +
+      `${chalk.cyan('Total Cost:')} $${clientStats.estimatedTotalCost}\n` +
+      `${chalk.cyan('Budget Used:')} $${clientStats.budgetUsed} / $${clientStats.budgetLimit}\n` +
+      `${chalk.cyan('Budget Remaining:')} $${clientStats.budgetRemaining}\n` +
+      `${chalk.cyan('Avg Duration:')} ${clientStats.avgDuration}\n` +
+      `${chalk.cyan('Cache Size:')} ${clientStats.cacheSize} entries\n` +
+      `${chalk.cyan('Tasks Completed:')} ${this.taskCount}`,
+      { ...box.stats, title: '💰 Cost' }
+    ));
+  }
+  
+  /**
+   * Reset session
+   */
+  async resetSession() {
+    const { confirm } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirm',
+      message: 'Reset session? This will clear all conversation history.',
+      default: false,
+    }]);
+    
+    if (confirm) {
+      this.session.agent.clear();
+      this.session.agent.client.clearHistory();
+      this.taskCount = 0;
+      console.log(chalk.green('✓ Session reset'));
+    }
   }
 }
 

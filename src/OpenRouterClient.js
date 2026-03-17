@@ -1,6 +1,17 @@
 /**
- * 🤖 OpenRouterClient - Ultimate AI Client
+ * 🤖 OpenRouterClient - Ultimate AI Client v3.0
  * Full-featured client for OpenRouter API with 2026 capabilities
+ * 
+ * Features:
+ * - Automatic retry with exponential backoff
+ * - Request/response caching
+ * - Rate limit handling
+ * - Cost tracking and budget controls
+ * - Streaming support
+ * - Tool calling
+ * - Vision/multimodal support
+ * - Structured output
+ * - Model routing and fallback
  */
 
 import axios from 'axios';
@@ -54,6 +65,25 @@ export class OpenRouterClient {
     this.totalCost = 0;
     this.requestHistory = [];
     
+    // Response cache for identical requests
+    this.cache = new Map();
+    this.cacheTTL = options.cacheTTL || 5 * 60 * 1000; // 5 minutes default
+    this.cacheEnabled = options.cacheEnabled !== false;
+    
+    // Rate limit tracking
+    this.rateLimitRemaining = null;
+    this.rateLimitReset = null;
+    
+    // Budget tracking
+    this.budgetUsed = 0;
+    this.budgetLimit = options.budgetLimit || CONFIG.MAX_COST_PER_REQUEST_USD * 100;
+    
+    // Request queue for rate limiting
+    this.requestQueue = [];
+    this.isProcessingQueue = false;
+    this.minRequestInterval = options.minRequestInterval || 100; // ms between requests
+    this.lastRequestTime = 0;
+    
     // Initialize axios instance
     this.client = axios.create({
       baseURL: this.baseURL,
@@ -65,11 +95,91 @@ export class OpenRouterClient {
       },
     });
     
-    // Add response interceptor for error handling
+    // Add request interceptor for rate limiting
+    this.client.interceptors.request.use(
+      async (config) => {
+        await this.waitForRateLimit();
+        this.lastRequestTime = Date.now();
+        return config;
+      },
+      (error) => Promise.reject(error)
+    );
+    
+    // Add response interceptor for error handling and rate limit tracking
     this.client.interceptors.response.use(
-      (response) => response,
+      (response) => {
+        // Update rate limit info from headers
+        this.rateLimitRemaining = parseInt(response.headers['x-ratelimit-remaining']) || null;
+        this.rateLimitReset = parseInt(response.headers['x-ratelimit-reset']) || null;
+        return response;
+      },
       (error) => this.handleError(error)
     );
+  }
+  
+  /**
+   * Wait for rate limit if needed
+   */
+  async waitForRateLimit() {
+    if (this.rateLimitRemaining !== null && this.rateLimitRemaining <= 1) {
+      const waitTime = this.rateLimitReset ? (this.rateLimitReset * 1000 - Date.now()) : 1000;
+      if (waitTime > 0) {
+        await this.sleep(Math.min(waitTime, 10000)); // Max 10s wait
+      }
+    }
+    
+    // Ensure minimum interval between requests
+    const timeSinceLastRequest = Date.now() - this.lastRequestTime;
+    if (timeSinceLastRequest < this.minRequestInterval) {
+      await this.sleep(this.minRequestInterval - timeSinceLastRequest);
+    }
+  }
+  
+  /**
+   * Generate cache key for a request
+   */
+  getCacheKey(messages, options) {
+    const key = {
+      model: options.model || this.defaultModel,
+      messages: messages.map(m => ({ role: m.role, content: m.content?.substring(0, 100) })),
+      temperature: options.temperature,
+      max_tokens: options.max_tokens,
+    };
+    return JSON.stringify(key);
+  }
+  
+  /**
+   * Get from cache if valid
+   */
+  getFromCache(key) {
+    if (!this.cacheEnabled) return null;
+    const cached = this.cache.get(key);
+    if (cached && Date.now() - cached.timestamp < this.cacheTTL) {
+      return cached.data;
+    }
+    this.cache.delete(key);
+    return null;
+  }
+  
+  /**
+   * Store in cache
+   */
+  storeInCache(key, data) {
+    if (!this.cacheEnabled) return;
+    this.cache.set(key, { data, timestamp: Date.now() });
+    
+    // Limit cache size
+    if (this.cache.size > 100) {
+      const oldestKey = this.cache.keys().next().value;
+      this.cache.delete(oldestKey);
+    }
+  }
+  
+  /**
+   * Clear cache
+   */
+  clearCache() {
+    this.cache.clear();
   }
 
   /**
@@ -78,6 +188,21 @@ export class OpenRouterClient {
   async chat(messages, options = {}) {
     const requestId = this.generateRequestId();
     const startTime = Date.now();
+    
+    // Check cache first
+    const cacheKey = this.getCacheKey(messages, options);
+    const cached = this.getFromCache(cacheKey);
+    if (cached) {
+      return { ...cached, _cached: true };
+    }
+    
+    // Check budget
+    if (this.budgetUsed >= this.budgetLimit) {
+      throw new OpenRouterError('Budget limit exceeded', 'BUDGET_EXCEEDED', {
+        budgetUsed: this.budgetUsed,
+        budgetLimit: this.budgetLimit,
+      });
+    }
     
     const payload = this.buildPayload(messages, options);
     
@@ -90,8 +215,13 @@ export class OpenRouterClient {
       const duration = Date.now() - startTime;
       const result = this.processResponse(response.data, requestId, duration);
       
-      // Track request
+      // Track request and cost
       this.trackRequest(requestId, payload, result, duration);
+      
+      // Cache successful responses
+      if (result.content) {
+        this.storeInCache(cacheKey, result);
+      }
       
       return result;
     } catch (error) {
@@ -395,7 +525,7 @@ export class OpenRouterClient {
   }
 
   /**
-   * ⚡ Execute with Retry Logic
+   * ⚡ Execute with Retry Logic and exponential backoff
    */
   async executeWithRetry(fn, maxRetries) {
     let lastError;
@@ -414,12 +544,20 @@ export class OpenRouterClient {
           throw error;
         }
         
-        // Handle rate limiting
+        // Don't retry on bad requests (client errors)
+        if (error.response?.status >= 400 && error.response?.status < 500 && error.response?.status !== 429) {
+          throw error;
+        }
+        
+        // Handle rate limiting with jitter
         if (error.response?.status === 429) {
           const retryAfter = error.response.headers['retry-after'] || delay / 1000;
-          await this.sleep(retryAfter * 1000);
+          const jitter = Math.random() * 1000; // Add jitter to prevent thundering herd
+          await this.sleep((retryAfter * 1000) + jitter);
         } else {
-          await this.sleep(delay);
+          // Exponential backoff with jitter for other errors
+          const jitter = Math.random() * 500;
+          await this.sleep(delay + jitter);
         }
         
         delay *= CONFIG.RETRY_BACKOFF_MULTIPLIER;
@@ -451,7 +589,7 @@ export class OpenRouterClient {
   }
 
   /**
-   * 📊 Track Request
+   * 📊 Track Request with enhanced metrics
    */
   trackRequest(requestId, payload, result, duration) {
     this.requestCount++;
@@ -463,6 +601,7 @@ export class OpenRouterClient {
       // Very rough estimate - actual pricing varies
       const estimatedCost = (inputTokens * 0.00001) + (outputTokens * 0.00003);
       this.totalCost += estimatedCost;
+      this.budgetUsed += estimatedCost;
     }
     
     this.requestHistory.push({
@@ -471,6 +610,8 @@ export class OpenRouterClient {
       model: payload.model,
       duration,
       success: true,
+      tokens: result.usage?.total_tokens || 0,
+      cost: this.totalCost,
     });
     
     // Keep history manageable
@@ -537,23 +678,36 @@ export class OpenRouterClient {
   }
 
   /**
-   * 📈 Get Stats
+   * 📈 Get comprehensive stats
    */
   getStats() {
+    const avgDuration = this.requestHistory.length > 0
+      ? this.requestHistory.reduce((sum, r) => sum + r.duration, 0) / this.requestHistory.length
+      : 0;
+    
     return {
       requestCount: this.requestCount,
       estimatedTotalCost: this.totalCost.toFixed(4),
+      budgetUsed: this.budgetUsed.toFixed(4),
+      budgetLimit: this.budgetLimit.toFixed(4),
+      budgetRemaining: (this.budgetLimit - this.budgetUsed).toFixed(4),
+      avgDuration: Math.round(avgDuration) + 'ms',
+      cacheSize: this.cache.size,
+      cacheEnabled: this.cacheEnabled,
+      rateLimitRemaining: this.rateLimitRemaining,
       recentRequests: this.requestHistory.slice(-10),
     };
   }
 
   /**
-   * 🧹 Clear History
+   * 🧹 Clear History and reset stats
    */
   clearHistory() {
     this.requestHistory = [];
     this.requestCount = 0;
     this.totalCost = 0;
+    this.budgetUsed = 0;
+    this.clearCache();
   }
 }
 

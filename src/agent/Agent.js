@@ -1,11 +1,47 @@
 /**
- * 🤖 Agent Engine
- * The core agentic loop: gather context → take action → verify results → repeat
+ * 🤖 Agent Engine v3.0
+ * Production-grade agentic loop with advanced error handling, retry logic,
+ * context management, and performance optimizations.
+ * 
+ * Core Loop: gather context → plan → act → verify → repeat
  */
 
 import { OpenRouterClient } from '../OpenRouterClient.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
 import chalk from 'chalk';
+
+/**
+ * Custom error types for better error handling
+ */
+export class AgentError extends Error {
+  constructor(message, code, details = {}) {
+    super(message);
+    this.name = 'AgentError';
+    this.code = code;
+    this.details = details;
+    this.timestamp = new Date().toISOString();
+  }
+}
+
+export class ToolExecutionError extends AgentError {
+  constructor(toolName, originalError) {
+    super(`Tool '${toolName}' failed: ${originalError.message}`, 'TOOL_EXECUTION_ERROR', {
+      toolName,
+      originalError: originalError.message,
+    });
+    this.name = 'ToolExecutionError';
+  }
+}
+
+export class ContextOverflowError extends AgentError {
+  constructor(currentTokens, maxTokens) {
+    super(`Context overflow: ${currentTokens} tokens exceeds limit of ${maxTokens}`, 'CONTEXT_OVERFLOW', {
+      currentTokens,
+      maxTokens,
+    });
+    this.name = 'ContextOverflowError';
+  }
+}
 
 export class Agent {
   constructor(options = {}) {
@@ -20,15 +56,38 @@ export class Agent {
     this.onToolStart = options.onToolStart || null;
     this.onToolEnd = options.onToolEnd || null;
     this.onResponse = options.onResponse || null;
+    this.onIterationStart = options.onIterationStart || null;
+    this.onIterationEnd = options.onIterationEnd || null;
+    this.onError = options.onError || null;
     this.iterationCount = 0;
     this.totalTokensUsed = 0;
     this.totalCost = 0;
     this.history = [];
     
     // Context management settings
-    this.maxContextTokens = options.maxContextTokens || 800000; // Leave room for output
-    this.maxToolResultChars = options.maxToolResultChars || 15000; // Truncate large tool results
-    this.compactThreshold = options.compactThreshold || 0.7; // Compact when 70% full
+    this.maxContextTokens = options.maxContextTokens || 800000;
+    this.maxToolResultChars = options.maxToolResultChars || 15000;
+    this.compactThreshold = options.compactThreshold || 0.7;
+    
+    // Retry configuration
+    this.maxRetries = options.maxRetries || 3;
+    this.retryDelay = options.retryDelay || 1000;
+    this.retryBackoff = options.retryBackoff || 2;
+    
+    // Performance tracking
+    this.performanceMetrics = {
+      totalIterations: 0,
+      totalToolCalls: 0,
+      totalErrors: 0,
+      totalRetries: 0,
+      avgIterationTime: 0,
+      totalExecutionTime: 0,
+    };
+    
+    // State management
+    this.state = 'idle'; // idle, running, paused, error, completed
+    this.lastError = null;
+    this.checkpoints = [];
     
     // Initialize with system prompt
     if (this.systemPrompt) {
@@ -37,7 +96,7 @@ export class Agent {
   }
 
   /**
-   * Default system prompt for agentic behavior
+   * Enhanced system prompt with better instructions
    */
   defaultSystemPrompt() {
     return `You are an advanced AI assistant with access to powerful tools. You can:
@@ -69,122 +128,170 @@ export class Agent {
 - Check git status before committing
 - Test code after writing it
 
+## Error Handling
+- If a tool fails, analyze the error and try alternative approaches
+- For file operations, check if paths exist before writing
+- For shell commands, verify the command is correct before executing
+- If you encounter repeated failures, explain the issue and suggest solutions
+
+## Performance
+- Batch related operations when possible
+- Use search tools to find relevant code before making changes
+- Minimize unnecessary file reads by checking file info first
+
 When you have completed the task, provide a clear summary of what was done.`;
   }
 
   /**
-   * Run the agentic loop
+   * Run the agentic loop with enhanced error handling and performance tracking
    */
   async run(userInput, options = {}) {
+    const startTime = Date.now();
+    this.state = 'running';
     this.iterationCount = 0;
+    this.lastError = null;
     
     // Add user message
     this.messages.push({ role: 'user', content: userInput });
     
     let finalResponse = null;
     
-    while (this.iterationCount < this.maxIterations) {
-      this.iterationCount++;
-      
-      if (this.verbose) {
-        console.log(chalk.gray(`\n[Iteration ${this.iterationCount}/${this.maxIterations}]`));
-      }
-      
-      // Check context size BEFORE calling LLM
-      await this.maybeCompactContext();
-      
-      // Get LLM response with tools
-      const response = await this.getLLMResponse();
-      
-      if (!response) {
-        throw new Error('No response from model');
-      }
-      
-      // Check if there are tool calls
-      const toolCalls = response.toolCalls || [];
-      
-      if (toolCalls.length === 0) {
-        // No tool calls - this is the final response
-        finalResponse = response.content;
-        this.messages.push({ role: 'assistant', content: response.content });
+    try {
+      while (this.iterationCount < this.maxIterations) {
+        this.iterationCount++;
+        this.performanceMetrics.totalIterations++;
         
-        if (this.onResponse) {
-          this.onResponse(response.content);
+        const iterationStart = Date.now();
+        
+        if (this.verbose) {
+          console.log(chalk.gray(`\n[Iteration ${this.iterationCount}/${this.maxIterations}]`));
         }
         
-        break;
-      }
-      
-      // Execute tool calls
-      const toolResults = await this.executeToolCalls(toolCalls);
-      
-      // Add assistant message with tool calls
-      this.messages.push({
-        role: 'assistant',
-        content: response.content || null,
-        tool_calls: toolCalls.map(tc => ({
-          id: tc.id,
-          type: 'function',
-          function: {
-            name: tc.name,
-            arguments: JSON.stringify(tc.arguments),
-          },
-        })),
-      });
-      
-      // Add tool results (truncated to prevent context overflow)
-      for (const result of toolResults) {
-        let content = JSON.stringify(result.result);
+        if (this.onIterationStart) {
+          this.onIterationStart(this.iterationCount);
+        }
         
-        // Truncate large tool results
-        if (content.length > this.maxToolResultChars) {
-          const original = content;
-          content = content.substring(0, this.maxToolResultChars) + 
-            '\n\n... [truncated - original was ' + original.length + ' chars]';
+        // Check context size BEFORE calling LLM
+        await this.maybeCompactContext();
+        
+        // Get LLM response with tools (with retry logic)
+        const response = await this.getLLMResponseWithRetry();
+        
+        if (!response) {
+          throw new AgentError('No response from model', 'NO_RESPONSE');
+        }
+        
+        // Check if there are tool calls
+        const toolCalls = response.toolCalls || [];
+        
+        if (toolCalls.length === 0) {
+          // No tool calls - this is the final response
+          finalResponse = response.content;
+          this.messages.push({ role: 'assistant', content: response.content });
           
-          if (this.verbose) {
-            console.log(chalk.yellow(`   ⚠️ Tool result truncated (${original.length} → ${content.length} chars)`));
+          if (this.onResponse) {
+            this.onResponse(response.content);
           }
+          
+          break;
         }
         
+        // Execute tool calls with enhanced error handling
+        const toolResults = await this.executeToolCallsEnhanced(toolCalls);
+        
+        // Add assistant message with tool calls
         this.messages.push({
-          role: 'tool',
-          tool_call_id: result.toolCallId,
-          content,
+          role: 'assistant',
+          content: response.content || null,
+          tool_calls: toolCalls.map(tc => ({
+            id: tc.id,
+            type: 'function',
+            function: {
+              name: tc.name,
+              arguments: JSON.stringify(tc.arguments),
+            },
+          })),
         });
+        
+        // Add tool results (truncated to prevent context overflow)
+        for (const result of toolResults) {
+          let content = JSON.stringify(result.result);
+          
+          // Truncate large tool results
+          if (content.length > this.maxToolResultChars) {
+            const original = content;
+            content = content.substring(0, this.maxToolResultChars) + 
+              '\n\n... [truncated - original was ' + original.length + ' chars]';
+            
+            if (this.verbose) {
+              console.log(chalk.yellow(`   ⚠️ Tool result truncated (${original.length} → ${content.length} chars)`));
+            }
+          }
+          
+          this.messages.push({
+            role: 'tool',
+            tool_call_id: result.toolCallId,
+            content,
+          });
+        }
+        
+        // Check if we need to compact context
+        await this.maybeCompactContext();
+        
+        // Record in history
+        this.history.push({
+          iteration: this.iterationCount,
+          response: response.content,
+          toolCalls: toolCalls.map(tc => tc.name),
+          toolResults: toolResults.map(tr => ({ tool: tr.toolName, success: tr.result.success })),
+          duration: Date.now() - iterationStart,
+        });
+        
+        // Update performance metrics
+        this.performanceMetrics.avgIterationTime = 
+          (this.performanceMetrics.avgIterationTime * (this.performanceMetrics.totalIterations - 1) + 
+           (Date.now() - iterationStart)) / this.performanceMetrics.totalIterations;
+        
+        if (this.onIterationEnd) {
+          this.onIterationEnd(this.iterationCount, Date.now() - iterationStart);
+        }
       }
       
-      // Check if we need to compact context
-      await this.maybeCompactContext();
+      if (!finalResponse && this.iterationCount >= this.maxIterations) {
+        finalResponse = 'I reached the maximum number of iterations. Here\'s what I accomplished so far:\n\n' +
+          this.history.map(h => `- Iteration ${h.iteration}: Used tools: ${h.toolCalls.join(', ')}`).join('\n');
+      }
       
-      // Record in history
-      this.history.push({
-        iteration: this.iterationCount,
-        response: response.content,
-        toolCalls: toolCalls.map(tc => tc.name),
-        toolResults: toolResults.map(tr => ({ tool: tr.toolName, success: tr.result.success })),
-      });
+      this.state = 'completed';
+      this.performanceMetrics.totalExecutionTime = Date.now() - startTime;
+      
+      return {
+        response: finalResponse,
+        iterations: this.iterationCount,
+        history: this.history,
+        messages: this.messages,
+        stats: this.getStats(),
+        performance: this.performanceMetrics,
+      };
+      
+    } catch (error) {
+      this.state = 'error';
+      this.lastError = error;
+      this.performanceMetrics.totalErrors++;
+      
+      if (this.onError) {
+        this.onError(error);
+      }
+      
+      throw error;
     }
-    
-    if (!finalResponse && this.iterationCount >= this.maxIterations) {
-      finalResponse = 'I reached the maximum number of iterations. Here\'s what I accomplished so far:\n\n' +
-        this.history.map(h => `- Iteration ${h.iteration}: Used tools: ${h.toolCalls.join(', ')}`).join('\n');
-    }
-    
-    return {
-      response: finalResponse,
-      iterations: this.iterationCount,
-      history: this.history,
-      messages: this.messages,
-      stats: this.getStats(),
-    };
   }
 
   /**
-   * Get LLM response with tool calling
+   * Get LLM response with tool calling and retry logic
    */
-  async getLLMResponse(retryCount = 0) {
-    const maxRetries = 2;
+  async getLLMResponseWithRetry(retryCount = 0) {
+    const maxRetries = this.maxRetries;
     
     // Reduce max_tokens on retries to prevent truncation
     const maxTokens = retryCount === 0 ? 8192 : retryCount === 1 ? 4096 : 2048;
@@ -213,65 +320,165 @@ When you have completed the task, provide a clear summary of what was done.`;
                           error.message.includes('context length');
       
       if (isJsonError && retryCount < maxRetries) {
+        this.performanceMetrics.totalRetries++;
         console.log(chalk.yellow(`   ⚠️ Retrying with shorter response (attempt ${retryCount + 1}/${maxRetries})`));
         
         // Compact context before retry
         await this.maybeCompactContext();
         
+        // Exponential backoff
+        await this.sleep(this.retryDelay * Math.pow(this.retryBackoff, retryCount));
+        
         // Retry with lower max_tokens to avoid truncation
-        return this.getLLMResponse(retryCount + 1);
+        return this.getLLMResponseWithRetry(retryCount + 1);
       }
       
       console.error(chalk.red(`LLM Error: ${error.message}`));
       throw error;
     }
   }
+  
+  /**
+   * Alias for backward compatibility
+   */
+  async getLLMResponse(retryCount = 0) {
+    return this.getLLMResponseWithRetry(retryCount);
+  }
 
   /**
-   * Execute tool calls from LLM
+   * Execute tool calls from LLM with enhanced error handling
    */
-  async executeToolCalls(toolCalls) {
+  async executeToolCallsEnhanced(toolCalls) {
     const results = [];
     
+    // Execute tools in parallel when possible (independent tools)
+    const independentTools = [];
+    const dependentTools = [];
+    
+    // Simple heuristic: file reads can be parallel, writes should be sequential
     for (const toolCall of toolCalls) {
       const toolName = toolCall.name;
-      const args = toolCall.arguments;
-      
-      if (this.verbose) {
-        console.log(chalk.yellow(`\n🔧 Executing: ${toolName}`));
-        if (args && Object.keys(args).length > 0) {
-          const argStr = JSON.stringify(args);
-          console.log(chalk.gray(`   Args: ${argStr.length > 100 ? argStr.substring(0, 100) + '...' : argStr}`));
-        }
+      if (toolName.startsWith('read_') || toolName === 'list_directory' || toolName === 'search_in_files') {
+        independentTools.push(toolCall);
+      } else {
+        dependentTools.push(toolCall);
       }
+    }
+    
+    // Execute independent tools in parallel
+    if (independentTools.length > 1) {
+      const parallelResults = await Promise.allSettled(
+        independentTools.map(toolCall => this.executeSingleToolCall(toolCall))
+      );
       
-      if (this.onToolStart) {
-        this.onToolStart(toolName, args);
-      }
-      
-      const result = await this.tools.execute(toolName, args);
-      
-      if (this.verbose) {
-        if (result.success !== false) {
-          console.log(chalk.green(`   ✓ Success`));
+      for (let i = 0; i < parallelResults.length; i++) {
+        const result = parallelResults[i];
+        const toolCall = independentTools[i];
+        
+        if (result.status === 'fulfilled') {
+          results.push(result.value);
         } else {
-          console.log(chalk.red(`   ✗ Failed: ${result.error}`));
+          results.push({
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            args: toolCall.arguments,
+            result: { success: false, error: result.reason.message },
+          });
         }
       }
-      
-      if (this.onToolEnd) {
-        this.onToolEnd(toolName, result);
-      }
-      
-      results.push({
-        toolCallId: toolCall.id,
-        toolName,
-        args,
-        result,
-      });
+    } else if (independentTools.length === 1) {
+      const result = await this.executeSingleToolCall(independentTools[0]);
+      results.push(result);
+    }
+    
+    // Execute dependent tools sequentially
+    for (const toolCall of dependentTools) {
+      const result = await this.executeSingleToolCall(toolCall);
+      results.push(result);
     }
     
     return results;
+  }
+  
+  /**
+   * Execute a single tool call with retry logic
+   */
+  async executeSingleToolCall(toolCall) {
+    const toolName = toolCall.name;
+    const args = toolCall.arguments;
+    this.performanceMetrics.totalToolCalls++;
+    
+    if (this.verbose) {
+      console.log(chalk.yellow(`\n🔧 Executing: ${toolName}`));
+      if (args && Object.keys(args).length > 0) {
+        const argStr = JSON.stringify(args);
+        console.log(chalk.gray(`   Args: ${argStr.length > 100 ? argStr.substring(0, 100) + '...' : argStr}`));
+      }
+    }
+    
+    if (this.onToolStart) {
+      this.onToolStart(toolName, args);
+    }
+    
+    let lastError = null;
+    
+    // Retry logic for tool execution
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      try {
+        const result = await this.tools.execute(toolName, args);
+        
+        if (this.verbose) {
+          if (result.success !== false) {
+            console.log(chalk.green(`   ✓ Success`));
+          } else {
+            console.log(chalk.red(`   ✗ Failed: ${result.error}`));
+          }
+        }
+        
+        if (this.onToolEnd) {
+          this.onToolEnd(toolName, result);
+        }
+        
+        return {
+          toolCallId: toolCall.id,
+          toolName,
+          args,
+          result,
+        };
+        
+      } catch (error) {
+        lastError = error;
+        this.performanceMetrics.totalRetries++;
+        
+        if (attempt < this.maxRetries) {
+          console.log(chalk.yellow(`   ⚠️ Retry ${attempt + 1}/${this.maxRetries} for ${toolName}`));
+          await this.sleep(this.retryDelay * Math.pow(this.retryBackoff, attempt));
+        }
+      }
+    }
+    
+    // All retries failed
+    if (this.verbose) {
+      console.log(chalk.red(`   ✗ Failed after ${this.maxRetries} retries: ${lastError.message}`));
+    }
+    
+    if (this.onToolEnd) {
+      this.onToolEnd(toolName, { success: false, error: lastError.message });
+    }
+    
+    return {
+      toolCallId: toolCall.id,
+      toolName,
+      args,
+      result: { success: false, error: lastError.message },
+    };
+  }
+  
+  /**
+   * Alias for backward compatibility
+   */
+  async executeToolCalls(toolCalls) {
+    return this.executeToolCallsEnhanced(toolCalls);
   }
 
   /**
@@ -352,15 +559,19 @@ When you have completed the task, provide a clear summary of what was done.`;
   }
 
   /**
-   * Estimate token count (rough: ~4 chars per token)
+   * Estimate token count (improved estimation)
    */
   estimateTokens() {
     let total = 0;
     for (const msg of this.messages) {
-      if (msg.content) total += msg.content.length;
-      if (msg.tool_calls) total += JSON.stringify(msg.tool_calls).length;
+      if (msg.content) {
+        // More accurate estimation: ~4 chars per token for English, ~3 for code
+        const isCode = /[{}\[\]()=><]/.test(msg.content);
+        total += isCode ? Math.ceil(msg.content.length / 3) : Math.ceil(msg.content.length / 4);
+      }
+      if (msg.tool_calls) total += JSON.stringify(msg.tool_calls).length / 3;
     }
-    return Math.ceil(total / 4);
+    return Math.ceil(total);
   }
 
   /**
@@ -426,7 +637,7 @@ When you have completed the task, provide a clear summary of what was done.`;
   }
 
   /**
-   * Get session statistics
+   * Get comprehensive session statistics
    */
   getStats() {
     return {
@@ -435,6 +646,10 @@ When you have completed the task, provide a clear summary of what was done.`;
       totalTokensUsed: this.totalTokensUsed,
       toolExecutions: this.history.reduce((sum, h) => sum + h.toolCalls.length, 0),
       toolsUsed: [...new Set(this.history.flatMap(h => h.toolCalls))],
+      state: this.state,
+      performance: this.performanceMetrics,
+      estimatedTokens: this.estimateTokens(),
+      contextUsage: `${Math.round((this.estimateTokens() / this.maxContextTokens) * 100)}%`,
     };
   }
 
@@ -448,10 +663,20 @@ When you have completed the task, provide a clear summary of what was done.`;
     }
     this.history = [];
     this.iterationCount = 0;
+    this.state = 'idle';
+    this.lastError = null;
+    this.performanceMetrics = {
+      totalIterations: 0,
+      totalToolCalls: 0,
+      totalErrors: 0,
+      totalRetries: 0,
+      avgIterationTime: 0,
+      totalExecutionTime: 0,
+    };
   }
 
   /**
-   * Export conversation
+   * Export conversation with full state
    */
   export() {
     return {
@@ -460,18 +685,68 @@ When you have completed the task, provide a clear summary of what was done.`;
       messages: this.messages,
       history: this.history,
       stats: this.getStats(),
+      performance: this.performanceMetrics,
+      state: this.state,
       timestamp: new Date().toISOString(),
+      version: '3.0',
     };
   }
 
   /**
-   * Import conversation
+   * Import conversation with state restoration
    */
   import(data) {
     this.model = data.model || this.model;
     this.messages = data.messages || [];
     this.history = data.history || [];
+    this.performanceMetrics = data.performance || this.performanceMetrics;
+    this.state = data.state || 'idle';
     return this;
+  }
+  
+  /**
+   * Sleep utility
+   */
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+  
+  /**
+   * Create a checkpoint of current state
+   */
+  createCheckpoint(label = 'checkpoint') {
+    const checkpoint = {
+      id: `cp_${Date.now()}`,
+      label,
+      timestamp: new Date().toISOString(),
+      messages: JSON.parse(JSON.stringify(this.messages)),
+      history: JSON.parse(JSON.stringify(this.history)),
+      stats: this.getStats(),
+    };
+    
+    this.checkpoints.push(checkpoint);
+    
+    // Keep only last 10 checkpoints
+    if (this.checkpoints.length > 10) {
+      this.checkpoints = this.checkpoints.slice(-10);
+    }
+    
+    return checkpoint.id;
+  }
+  
+  /**
+   * Restore to a checkpoint
+   */
+  restoreCheckpoint(checkpointId) {
+    const checkpoint = this.checkpoints.find(cp => cp.id === checkpointId);
+    if (!checkpoint) {
+      return { success: false, error: `Checkpoint ${checkpointId} not found` };
+    }
+    
+    this.messages = JSON.parse(JSON.stringify(checkpoint.messages));
+    this.history = JSON.parse(JSON.stringify(checkpoint.history));
+    
+    return { success: true, label: checkpoint.label, timestamp: checkpoint.timestamp };
   }
 }
 

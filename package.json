@@ -1,7 +1,7 @@
 {
   "name": "openagent",
-  "version": "2.0.0",
-  "description": "🚀 OpenAgent - Production-grade AI agent with 400+ models. On par with Claude Code, Cursor, and Codex.",
+  "version": "3.0.0",
+  "description": "🚀 OpenAgent v3.0 - Production-grade AI agent with 400+ models. Enhanced error handling, cost tracking, caching, and performance optimizations. On par with Claude Code, Cursor, and Codex.",
   "main": "src/index.js",
   "type": "module",
   "bin": {
@@ -18,7 +18,9 @@
     "vision": "node examples/vision-demo.js",
     "agents": "node examples/agents-demo.js",
     "agent": "node examples/agent-demo.js",
-    "subagents": "node examples/subagent-demo.js"
+    "subagents": "node examples/subagent-demo.js",
+    "quick": "node -e \"import('./src/index.js').then(m => m.quickRun(process.argv.slice(1).join(' ')))\"",
+    "chat": "node -e \"import('./src/index.js').then(m => m.quickChat(process.argv.slice(1).join(' '))).then(r => console.log(r.content))\""
   },
   "keywords": [
     "openagent",
