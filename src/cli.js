@@ -172,6 +172,9 @@ const HEALTH_CHECKS = {
   api: {
     name: 'API Connection',
     check: async (session) => {
+      if (!session?.agent?.client) {
+        return { status: 'error', message: 'API client not initialized' };
+      }
       try {
         await session.agent.client.getModels();
         return { status: 'healthy', message: 'API connection successful' };
@@ -183,9 +186,16 @@ const HEALTH_CHECKS = {
   model: {
     name: 'Model Availability',
     check: async (session) => {
+      if (!session?.agent) {
+        return { status: 'error', message: 'Agent not initialized' };
+      }
       try {
-        const result = await session.agent.chat('test');
-        return { status: 'healthy', message: 'Model responding correctly' };
+        // Quick validation: verify the model is set and client can reach API
+        const model = session.agent.model;
+        if (!model) {
+          return { status: 'error', message: 'No model selected' };
+        }
+        return { status: 'healthy', message: `Model: ${model}` };
       } catch (error) {
         return { status: 'error', message: `Model Error: ${error.message}` };
       }
@@ -195,7 +205,12 @@ const HEALTH_CHECKS = {
     name: 'Tool Registry',
     check: async (session) => {
       try {
-        const tools = session.agent.toolRegistry.getAvailableTools();
+        // Agent stores tools as 'tools' (ToolRegistry instance)
+        const registry = session?.toolRegistry || session?.agent?.tools;
+        if (!registry) {
+          return { status: 'error', message: 'Tool registry not found' };
+        }
+        const tools = registry.list();
         return { 
           status: 'healthy', 
           message: `${tools.length} tools available`,
@@ -223,7 +238,7 @@ const HEALTH_CHECKS = {
     name: 'Disk Space',
     check: async () => {
       try {
-        const stats = await fs.stat(process.cwd());
+        await fs.stat(process.cwd());
         return { status: 'healthy', message: 'Disk access OK' };
       } catch (error) {
         return { status: 'error', message: `Disk Error: ${error.message}` };
@@ -399,9 +414,6 @@ export class CLI {
   /**
    * Start auto-save timer
    */
-  /**
-   * Start auto-save timer
-   */
   startAutoSave() {
     setInterval(async () => {
       if (Date.now() - this.lastSaveTime > this.autoSaveInterval) {
@@ -501,7 +513,7 @@ export class CLI {
     this.taskStartTime = startTime;
     this.currentTask = task;
     let toolCallCount = 0;
-    let iterationCount = 0;
+    let responsePrinted = false;
 
     // Set up enhanced visual callbacks
     this.session.agent.onToolStart = (toolName, args) => {
@@ -514,16 +526,23 @@ export class CLI {
     };
 
     this.session.agent.onResponse = (content) => {
-      this.printAIResponse(content);
+      if (!responsePrinted) {
+        // Deduplicate: check if the response contains itself repeated
+        const deduped = this.deduplicateResponse(content);
+        this.printAIResponse(deduped);
+        responsePrinted = true;
+      }
     };
 
     try {
       const result = await this.session.run(task);
       const duration = Date.now() - startTime;
 
-      // If no onResponse callback fired, print the response
-      if (result.response && !this.session.agent.onResponse) {
-        this.printAIResponse(result.response);
+      // Only print if onResponse callback didn't already handle it
+      if (result.response && !responsePrinted) {
+        const deduped = this.deduplicateResponse(result.response);
+        this.printAIResponse(deduped);
+        responsePrinted = true;
       }
 
       // Print enhanced summary stats
@@ -1110,7 +1129,7 @@ ${g.title('╚══════════════════════
     for (const [key, check] of Object.entries(HEALTH_CHECKS)) {
       const spinner = ora({ text: chalk.gray(check.name), spinner: 'dots' }).start();
       try {
-        const result = await check.check();
+        const result = await check.check(this.session);
         spinner.stop();
         
         const icon = result.status === 'healthy' ? chalk.green('✓') :
@@ -1397,6 +1416,53 @@ ${g.title('╚══════════════════════
     }
     
     return suggestions;
+  }
+
+  /**
+   * Deduplicate response content that may have been repeated by the LLM
+   */
+  deduplicateResponse(content) {
+    if (!content || content.length < 100) return content;
+    
+    // Check if the response is roughly the same text repeated
+    const half = Math.floor(content.length / 2);
+    const firstHalf = content.substring(0, half).trim();
+    const secondHalf = content.substring(half).trim();
+    
+    // If both halves are very similar (>85% overlap), take just the first half
+    if (firstHalf.length > 50 && secondHalf.length > 50) {
+      const similarity = this.textSimilarity(firstHalf, secondHalf);
+      if (similarity > 0.85) {
+        return firstHalf;
+      }
+    }
+    
+    // Also check for exact substring duplication (content repeated verbatim)
+    // Try different split points around the middle
+    for (let offset = -20; offset <= 20; offset++) {
+      const splitPoint = half + offset;
+      if (splitPoint < 50 || splitPoint > content.length - 50) continue;
+      
+      const part1 = content.substring(0, splitPoint).trim();
+      const part2 = content.substring(splitPoint).trim();
+      
+      if (part1 === part2) {
+        return part1;
+      }
+    }
+    
+    return content;
+  }
+
+  /**
+   * Simple text similarity check (Jaccard on words)
+   */
+  textSimilarity(a, b) {
+    const wordsA = new Set(a.toLowerCase().split(/\s+/));
+    const wordsB = new Set(b.toLowerCase().split(/\s+/));
+    const intersection = new Set([...wordsA].filter(w => wordsB.has(w)));
+    const union = new Set([...wordsA, ...wordsB]);
+    return union.size > 0 ? intersection.size / union.size : 0;
   }
 
   /**

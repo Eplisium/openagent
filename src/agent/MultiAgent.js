@@ -21,7 +21,6 @@ const AGENT_ROLES = {
 Analyze the task, identify dependencies, and create a structured plan.
 Output your plan as a numbered list with brief descriptions.
 Consider potential issues and edge cases.`,
-    model: 'anthropic/claude-sonnet-4',
   },
   coder: {
     name: '💻 Coder',
@@ -30,7 +29,6 @@ Follow best practices for the language/framework being used.
 Include error handling and edge cases.
 Test your code when possible.
 Explain your implementation choices.`,
-    model: 'anthropic/claude-sonnet-4',
   },
   researcher: {
     name: '🔍 Researcher',
@@ -38,7 +36,6 @@ Explain your implementation choices.`,
 Be thorough and accurate. Cite sources when possible.
 Synthesize findings into clear, actionable insights.
 Identify patterns and connections.`,
-    model: 'anthropic/claude-sonnet-4',
   },
   reviewer: {
     name: '✅ Reviewer',
@@ -50,7 +47,6 @@ Identify patterns and connections.`,
 - Missing error handling
 - Test coverage
 Provide constructive, specific feedback with suggested fixes.`,
-    model: 'anthropic/claude-sonnet-4',
   },
   tester: {
     name: '🧪 Tester',
@@ -59,7 +55,6 @@ Write unit tests, integration tests, and edge case tests.
 Run tests and analyze results.
 Report failures with clear reproduction steps.
 Suggest fixes for failing tests.`,
-    model: 'anthropic/claude-sonnet-4',
   },
 };
 
@@ -90,9 +85,14 @@ export class MultiAgent {
       throw new Error(`Unknown role: ${role}. Available: ${Object.keys(AGENT_ROLES).join(', ')}`);
     }
     
+    const model = customOptions.model || this.options.model;
+    if (!model) {
+      throw new Error('Model must be specified. Pass model in options or customOptions.');
+    }
+    
     const agent = new Agent({
       tools: this.sharedTools,
-      model: customOptions.model || roleConfig.model,
+      model,
       systemPrompt: customOptions.systemPrompt || roleConfig.systemPrompt,
       verbose: customOptions.verbose !== false,
       maxIterations: customOptions.maxIterations || 15,
@@ -197,7 +197,7 @@ export class MultiAgent {
   /**
    * Debate between two agents
    */
-  async debate(topic, rounds = 3) {
+  async debate(topic, rounds = 3, options = {}) {
     const results = {
       topic,
       rounds: [],
@@ -206,10 +206,15 @@ export class MultiAgent {
     
     console.log(chalk.cyan(`\n🎭 Starting Agent Debate: ${topic}\n`));
     
+    const debateModel = options.model || this.options.model;
+    if (!debateModel) {
+      throw new Error('Model must be specified for debate. Pass model in options.');
+    }
+    
     // Create pro and con agents
     const pro = new Agent({
       tools: this.sharedTools,
-      model: 'anthropic/claude-sonnet-4',
+      model: debateModel,
       systemPrompt: `You are debating IN FAVOR of the position. Present strong, logical arguments.
 Be persuasive but honest. Address counterarguments.`,
       verbose: false,
@@ -218,7 +223,7 @@ Be persuasive but honest. Address counterarguments.`,
     
     const con = new Agent({
       tools: this.sharedTools,
-      model: 'anthropic/claude-sonnet-4',
+      model: debateModel,
       systemPrompt: `You are debating AGAINST the position. Present strong, logical arguments.
 Be persuasive but honest. Address counterarguments.`,
       verbose: false,

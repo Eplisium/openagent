@@ -24,12 +24,9 @@ export {
 
 // Configuration
 export { 
-  MODELS, 
-  MODEL_CATEGORIES, 
   CONFIG, 
   PLUGINS, 
-  UI, 
-  PRESETS 
+  UI 
 } from './config.js';
 
 // Utilities
@@ -67,8 +64,13 @@ import { CONFIG } from './config.js';
 
 /**
  * Create a quick agent instance for programmatic use
+ * Model must be specified in options
  */
 export async function createAgent(options = {}) {
+  if (!options.model) {
+    throw new Error('Model must be specified when creating an agent. Use ModelBrowser to select a model first.');
+  }
+  
   const { Agent } = await import('./agent/Agent.js');
   const { ToolRegistry } = await import('./tools/ToolRegistry.js');
   const { fileTools } = await import('./tools/fileTools.js');

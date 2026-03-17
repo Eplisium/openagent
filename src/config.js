@@ -1,9 +1,10 @@
 /**
- * 🎛️ OpenRouter Configuration v3.0
+ * 🎛️ OpenRouter Configuration v3.1
  * Centralized configuration for all API interactions
  * 
  * Enhanced with:
- * - Better model categorization
+ * - Dynamic model selection from OpenRouter API
+ * - No hardcoded models - everything comes from API
  * - Performance presets
  * - Budget controls
  * - Retry configuration
@@ -20,69 +21,8 @@ const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, '../.env') });
 
 /**
- * 🏆 Latest 2026 Models - Curated List
- * These are the most capable models available on OpenRouter
- */
-export const MODELS = {
-  // 🥇 OpenAI Models
-  GPT_5_4: 'openai/gpt-5.4',           // Latest GPT with 1M+ context
-  GPT_5_2: 'openai/gpt-5.2',           // Fast GPT model
-  GPT_5_MINI: 'openai/gpt-5-mini',     // Cost-effective
-  GPT_4O: 'openai/gpt-4o',             // Reliable workhorse
-  O3_MINI: 'openai/o3-mini',           // Reasoning model
-  O1: 'openai/o1',                     // Advanced reasoning
-  O1_MINI: 'openai/o1-mini',           // Fast reasoning
-  
-  // 🎭 Anthropic Models
-  CLAUDE_OPUS_4: 'anthropic/claude-opus-4',       // Most capable
-  CLAUDE_SONNET_4: 'anthropic/claude-sonnet-4',   // Balanced (recommended)
-  CLAUDE_HAIKU_3: 'anthropic/claude-haiku-3',     // Fast & cheap
-  CLAUDE_SONNET_3_5: 'anthropic/claude-3.5-sonnet', // Previous gen
-  
-  // 🌟 Google Models
-  GEMINI_2_5_PRO: 'google/gemini-2.5-pro',        // Latest Gemini
-  GEMINI_2_FLASH: 'google/gemini-2-flash',        // Fast variant
-  GEMINI_2_5_FLASH: 'google/gemini-2.5-flash',    // Ultra-fast
-  GEMINI_1_5_PRO: 'google/gemini-1.5-pro',        // Reliable
-  
-  // 🔥 Meta Models
-  LLAMA_4_MAVERICK: 'meta/llama-4-maverick',      // Latest Llama
-  LLAMA_4_SCOUT: 'meta/llama-4-scout',            // Efficient
-  LLAMA_3_3_70B: 'meta/llama-3.3-70b',            // Open source
-  LLAMA_3_1_405B: 'meta/llama-3.1-405b',          // Large open source
-  
-  // ⚡ High-Performance Open Source
-  DEEPSEEK_V3: 'deepseek/deepseek-v3',
-  DEEPSEEK_R1: 'deepseek/deepseek-r1',
-  QWEN_2_5_72B: 'qwen/qwen-2.5-72b',
-  QWEN_2_5_CODER: 'qwen/qwen-2.5-coder-32b',     // Coding specialist
-  MISTRAL_LARGE: 'mistral/mistral-large',
-  MISTRAL_MEDIUM: 'mistral/mistral-medium',
-  COMMAND_R: 'cohere/command-r',
-  
-  // 🆓 Free Models (Rate limited)
-  FREE_LLAMA: 'meta/llama-3.3-70b:free',
-  FREE_QWEN: 'qwen/qwen-2.5-72b:free',
-  FREE_GEMMA: 'google/gemma-2-9b:free',
-  FREE_MISTRAL: 'mistralai/mistral-7b-instruct:free',
-};
-
-/**
- * 🎯 Model Categories for Easy Selection
- */
-export const MODEL_CATEGORIES = {
-  CODING: [MODELS.CLAUDE_SONNET_4, MODELS.GPT_5_4, MODELS.GEMINI_2_5_PRO, MODELS.DEEPSEEK_V3, MODELS.QWEN_2_5_CODER],
-  CREATIVE: [MODELS.CLAUDE_OPUS_4, MODELS.GPT_5_4, MODELS.GEMINI_2_5_PRO],
-  FAST: [MODELS.CLAUDE_HAIKU_3, MODELS.GPT_5_MINI, MODELS.GEMINI_2_FLASH],
-  CHEAP: [MODELS.FREE_LLAMA, MODELS.FREE_QWEN, MODELS.GPT_5_MINI, MODELS.CLAUDE_HAIKU_3],
-  REASONING: [MODELS.O1, MODELS.O3_MINI, MODELS.DEEPSEEK_R1, MODELS.O1_MINI],
-  VISION: [MODELS.GPT_5_4, MODELS.CLAUDE_SONNET_4, MODELS.GEMINI_2_5_PRO, MODELS.GPT_4O],
-  BALANCED: [MODELS.CLAUDE_SONNET_4, MODELS.GPT_5_2, MODELS.GEMINI_2_5_FLASH],
-  AGENTS: [MODELS.CLAUDE_SONNET_4, MODELS.GPT_5_4, MODELS.GEMINI_2_5_PRO], // Best for tool calling
-};
-
-/**
  * ⚙️ Default Configuration
+ * All model settings are now dynamic from OpenRouter API
  */
 export const CONFIG = {
   // API Settings
@@ -94,10 +34,6 @@ export const CONFIG = {
     'HTTP-Referer': process.env.SITE_URL || 'https://localhost',
     'X-OpenRouter-Title': process.env.SITE_NAME || 'OpenAgent',
   },
-  
-  // Default Model (Claude Sonnet 4 is best for agents)
-  DEFAULT_MODEL: process.env.DEFAULT_MODEL || MODELS.CLAUDE_SONNET_4,
-  FALLBACK_MODEL: process.env.FALLBACK_MODEL || MODELS.GPT_5_MINI,
   
   // Request Settings
   MAX_RETRIES: parseInt(process.env.MAX_RETRIES) || 3,
@@ -112,7 +48,7 @@ export const CONFIG = {
   // Generation Parameters
   DEFAULT_PARAMS: {
     temperature: 0.7,
-    max_tokens: 8192, // Increased for better responses
+    max_tokens: 8192,
     top_p: 0.9,
     frequency_penalty: 0,
     presence_penalty: 0,
@@ -137,7 +73,7 @@ export const CONFIG = {
   COMPACT_THRESHOLD: parseFloat(process.env.COMPACT_THRESHOLD) || 0.7,
   
   // Tool Settings
-  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 120000, // 2 minutes (as per changelog)
+  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 120000,
   MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS) || 15000,
   
   // Performance
@@ -145,7 +81,7 @@ export const CONFIG = {
   CACHE_TTL_MS: parseInt(process.env.CACHE_TTL_MS) || 5 * 60 * 1000, // 5 minutes
   
   // Logging
-  LOG_LEVEL: process.env.LOG_LEVEL || 'info', // debug, info, warn, error
+  LOG_LEVEL: process.env.LOG_LEVEL || 'info',
 };
 
 /**
@@ -156,36 +92,6 @@ export const PLUGINS = {
   FILE_PARSER: { id: 'file-parser', enabled: true },
   RESPONSE_HEALING: { id: 'response-healing', enabled: true },
   CODE_INTERPRETER: { id: 'code-interpreter', enabled: false },
-};
-
-/**
- * 🎯 Performance Presets
- */
-export const PRESETS = {
-  FAST: {
-    model: MODELS.CLAUDE_HAIKU_3,
-    temperature: 0.5,
-    max_tokens: 2048,
-    maxIterations: 10,
-  },
-  BALANCED: {
-    model: MODELS.CLAUDE_SONNET_4,
-    temperature: 0.7,
-    max_tokens: 4096,
-    maxIterations: 20,
-  },
-  QUALITY: {
-    model: MODELS.CLAUDE_OPUS_4,
-    temperature: 0.3,
-    max_tokens: 8192,
-    maxIterations: 30,
-  },
-  CODING: {
-    model: MODELS.CLAUDE_SONNET_4,
-    temperature: 0.2,
-    max_tokens: 8192,
-    maxIterations: 25,
-  },
 };
 
 /**
@@ -204,4 +110,4 @@ export const UI = {
   SPINNER_STYLE: 'dots',
 };
 
-export default { MODELS, MODEL_CATEGORIES, CONFIG, PLUGINS, UI };
+export default { CONFIG, PLUGINS, UI };

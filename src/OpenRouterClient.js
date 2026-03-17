@@ -56,7 +56,7 @@ export class OpenRouterClient {
       ...CONFIG.HEADERS,
       ...options.headers,
     };
-    this.defaultModel = options.defaultModel || CONFIG.DEFAULT_MODEL;
+    this.defaultModel = options.defaultModel || null; // Must be set by caller
     this.maxRetries = options.maxRetries || CONFIG.MAX_RETRIES;
     this.timeout = options.timeout || CONFIG.TIMEOUT_MS;
     
@@ -189,8 +189,11 @@ export class OpenRouterClient {
     const requestId = this.generateRequestId();
     const startTime = Date.now();
     
+    // Normalize messages early so all downstream code can rely on array format
+    const normalizedMessages = this.normalizeMessages(messages);
+    
     // Check cache first
-    const cacheKey = this.getCacheKey(messages, options);
+    const cacheKey = this.getCacheKey(normalizedMessages, options);
     const cached = this.getFromCache(cacheKey);
     if (cached) {
       return { ...cached, _cached: true };
@@ -204,7 +207,7 @@ export class OpenRouterClient {
       });
     }
     
-    const payload = this.buildPayload(messages, options);
+    const payload = this.buildPayload(normalizedMessages, options);
     
     try {
       const response = await this.executeWithRetry(
@@ -244,17 +247,45 @@ export class OpenRouterClient {
     let fullContent = '';
     let usage = null;
     
+    // Accumulate tool call fragments across multiple deltas
+    const toolCallAccumulator = new Map(); // index -> { id, name, arguments: '' }
+    
     for await (const chunk of response.data) {
-      const lines = chunk.toString().split('\n');
+      // Append raw bytes to buffer and split by newlines
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      // Keep the last (possibly incomplete) line in the buffer
+      buffer = lines.pop() || '';
       
       for (const line of lines) {
-        if (line.trim() === '') continue;
-        if (line.startsWith(':')) continue; // SSE comment
+        const trimmed = line.trim();
+        if (trimmed === '' || trimmed.startsWith(':')) continue; // empty or SSE comment
         
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6);
+        if (trimmed.startsWith('data: ')) {
+          const data = trimmed.slice(6).trim();
           
           if (data === '[DONE]') {
+            // Emit any accumulated tool calls before done
+            if (toolCallAccumulator.size > 0) {
+              const toolCalls = [];
+              for (const [, tc] of toolCallAccumulator) {
+                let args = {};
+                try {
+                  args = tc.arguments ? JSON.parse(tc.arguments) : {};
+                } catch {
+                  // Try to fix truncated JSON
+                  try {
+                    let fixed = tc.arguments.trim();
+                    if (!fixed.endsWith('}')) fixed += '}';
+                    args = JSON.parse(fixed);
+                  } catch {
+                    args = { _raw: tc.arguments, _error: 'Could not parse streamed arguments' };
+                  }
+                }
+                toolCalls.push({ id: tc.id, name: tc.name, arguments: args });
+              }
+              yield { type: 'tool_calls', toolCalls, requestId };
+            }
             yield { type: 'done', content: fullContent, usage };
             return;
           }
@@ -280,20 +311,62 @@ export class OpenRouterClient {
                 };
               }
               
-              // Handle tool calls in stream
+              // Accumulate tool call fragments (streaming sends them piece by piece)
               if (delta.tool_calls) {
-                yield {
-                  type: 'tool_calls',
-                  toolCalls: delta.tool_calls,
-                  requestId,
-                };
+                for (const tc of delta.tool_calls) {
+                  const idx = tc.index ?? 0;
+                  if (!toolCallAccumulator.has(idx)) {
+                    toolCallAccumulator.set(idx, { id: null, name: null, arguments: '' });
+                  }
+                  const acc = toolCallAccumulator.get(idx);
+                  if (tc.id) acc.id = tc.id;
+                  if (tc.function?.name) acc.name = tc.function.name;
+                  if (tc.function?.arguments) acc.arguments += tc.function.arguments;
+                }
               }
             }
-          } catch (e) {
-            // Ignore parse errors for malformed chunks
+            
+            // Check for finish_reason to emit tool calls
+            const finishReason = parsed.choices?.[0]?.finish_reason;
+            if (finishReason === 'tool_calls' && toolCallAccumulator.size > 0) {
+              const toolCalls = [];
+              for (const [, tc] of toolCallAccumulator) {
+                let args = {};
+                try {
+                  args = tc.arguments ? JSON.parse(tc.arguments) : {};
+                } catch {
+                  try {
+                    let fixed = tc.arguments.trim();
+                    if (!fixed.endsWith('}')) fixed += '}';
+                    args = JSON.parse(fixed);
+                  } catch {
+                    args = { _raw: tc.arguments, _error: 'Could not parse streamed arguments' };
+                  }
+                }
+                toolCalls.push({ id: tc.id, name: tc.name, arguments: args });
+              }
+              toolCallAccumulator.clear();
+              yield { type: 'tool_calls', toolCalls, requestId };
+            }
+          } catch {
+            // Ignore parse errors for malformed/incomplete chunks
           }
         }
       }
+    }
+    
+    // If stream ends without [DONE], emit what we have
+    if (fullContent || toolCallAccumulator.size > 0) {
+      if (toolCallAccumulator.size > 0) {
+        const toolCalls = [];
+        for (const [, tc] of toolCallAccumulator) {
+          let args = {};
+          try { args = tc.arguments ? JSON.parse(tc.arguments) : {}; } catch { args = {}; }
+          toolCalls.push({ id: tc.id, name: tc.name, arguments: args });
+        }
+        yield { type: 'tool_calls', toolCalls, requestId };
+      }
+      yield { type: 'done', content: fullContent, usage };
     }
   }
 
@@ -301,6 +374,9 @@ export class OpenRouterClient {
    * 🛠️ Tool/Function Calling
    */
   async chatWithTools(messages, tools, options = {}) {
+    const requestId = this.generateRequestId();
+    const startTime = Date.now();
+    
     const payload = this.buildPayload(messages, {
       ...options,
       tools: tools.map(t => ({
@@ -314,21 +390,30 @@ export class OpenRouterClient {
       tool_choice: options.tool_choice || 'auto',
     });
     
-    const response = await this.client.post('/chat/completions', payload);
+    const response = await this.executeWithRetry(
+      () => this.client.post('/chat/completions', payload),
+      options.retries || this.maxRetries
+    );
+    
     const data = response.data;
+    const duration = Date.now() - startTime;
+    const message = data.choices?.[0]?.message;
     
-    const message = data.choices[0]?.message;
+    if (!message) {
+      throw new OpenRouterError('No message in response', 'EMPTY_RESPONSE', { data });
+    }
     
-    const toolCalls = (message?.tool_calls || []).map(tc => {
+    const toolCalls = (message.tool_calls || []).map(tc => {
       let args = {};
       try {
         args = JSON.parse(tc.function.arguments);
       } catch (e) {
         // Handle truncated/malformed JSON from model
-        console.warn(`Warning: Could not parse arguments for ${tc.function.name}, attempting recovery`);
         try {
           // Try to fix common issues: trailing commas, missing closing braces
           let fixed = tc.function.arguments.trim();
+          // Remove trailing commas before closing braces
+          fixed = fixed.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
           if (!fixed.endsWith('}')) fixed += '}';
           args = JSON.parse(fixed);
         } catch {
@@ -342,12 +427,19 @@ export class OpenRouterClient {
       };
     });
     
-    return {
-      content: message?.content,
+    const result = {
+      content: message.content,
       toolCalls,
       usage: data.usage,
       model: data.model,
+      requestId,
+      duration,
     };
+    
+    // Track request
+    this.trackRequest(requestId, payload, result, duration);
+    
+    return result;
   }
 
   /**
@@ -461,45 +553,79 @@ export class OpenRouterClient {
    * 🏷️ Build Request Payload
    */
   buildPayload(messages, options = {}) {
+    // Separate API params from our internal options
+    const {
+      model, stream, temperature, max_tokens, top_p, 
+      frequency_penalty, presence_penalty, reasoning_effort,
+      tools, tool_choice, response_format,
+      plugins, provider, transforms, route, models: fallbackModels,
+      retries, cacheTTL, // internal options to exclude
+      ...extraParams
+    } = options;
+    
     const payload = {
-      model: options.model || this.defaultModel,
+      model: model || this.defaultModel,
       messages: this.normalizeMessages(messages),
-      stream: options.stream || false,
-      ...CONFIG.DEFAULT_PARAMS,
-      ...options,
+      stream: stream || false,
+      // Apply defaults, then explicit overrides
+      temperature: temperature ?? CONFIG.DEFAULT_PARAMS.temperature,
+      max_tokens: max_tokens ?? CONFIG.DEFAULT_PARAMS.max_tokens,
+      top_p: top_p ?? CONFIG.DEFAULT_PARAMS.top_p,
+      frequency_penalty: frequency_penalty ?? CONFIG.DEFAULT_PARAMS.frequency_penalty,
+      presence_penalty: presence_penalty ?? CONFIG.DEFAULT_PARAMS.presence_penalty,
     };
     
+    // Add reasoning effort for reasoning models
+    if (reasoning_effort) {
+      payload.reasoning_effort = reasoning_effort;
+    }
+    
+    // Add tools if specified
+    if (tools) {
+      payload.tools = tools;
+    }
+    
+    // Add tool_choice if specified
+    if (tool_choice) {
+      payload.tool_choice = tool_choice;
+    }
+    
+    // Add response format if specified
+    if (response_format) {
+      payload.response_format = response_format;
+    }
+    
     // Add plugins if specified
-    if (options.plugins) {
-      payload.plugins = options.plugins.map(p => 
+    if (plugins) {
+      payload.plugins = plugins.map(p => 
         typeof p === 'string' ? { id: p, enabled: true } : p
       );
     }
     
     // Add provider preferences
-    if (options.provider) {
-      payload.provider = options.provider;
+    if (provider) {
+      payload.provider = provider;
     }
     
     // Add transforms
-    if (options.transforms) {
-      payload.transforms = options.transforms;
+    if (transforms) {
+      payload.transforms = transforms;
     }
     
     // Add routing preferences
-    if (options.route) {
-      payload.route = options.route;
+    if (route) {
+      payload.route = route;
     }
     
     // Add models for fallback routing
-    if (options.models) {
-      payload.models = options.models;
+    if (fallbackModels) {
+      payload.models = fallbackModels;
     }
     
     // Clean up undefined values
-    Object.keys(payload).forEach(key => {
+    for (const key of Object.keys(payload)) {
       if (payload[key] === undefined) delete payload[key];
-    });
+    }
     
     return payload;
   }

@@ -19,12 +19,25 @@ const RECENTS_FILE = path.join(__dirname, '../.model-recents.json');
 const CACHE_TTL = 1000 * 60 * 60; // 1 hour
 
 export class ModelBrowser {
-  constructor(client) {
+  constructor(client = null) {
     this.client = client;
     this.models = [];
     this.favorites = [];
     this.recents = [];
     this.loaded = false;
+    this.ownsClient = false;
+  }
+
+  /**
+   * Get or create a client for API calls
+   */
+  async getClient() {
+    if (!this.client) {
+      const { OpenRouterClient } = await import('./OpenRouterClient.js');
+      this.client = new OpenRouterClient();
+      this.ownsClient = true;
+    }
+    return this.client;
   }
 
   /**
@@ -56,7 +69,8 @@ export class ModelBrowser {
 
     // Fetch from API
     try {
-      const rawModels = await this.client.getModels();
+      const client = await this.getClient();
+      const rawModels = await client.getModels();
       
       this.models = rawModels.map(m => ({
         id: m.id,

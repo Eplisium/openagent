@@ -399,6 +399,13 @@ export class ToolRegistry {
   getByCategory(category) {
     return Array.from(this.tools.values()).filter(t => t.category === category);
   }
+  
+  /**
+   * Alias for list() - backward compatibility
+   */
+  getAvailableTools() {
+    return this.list();
+  }
 }
 
 export default ToolRegistry;

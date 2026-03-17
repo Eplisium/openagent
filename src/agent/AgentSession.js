@@ -42,6 +42,7 @@ export class AgentSession {
       workingDir: this.workingDir,
       verbose: options.verbose !== false,
       maxConcurrent: options.maxSubagents || 3,
+      parentAgent: null, // Will be set after agent creation
     });
     
     // Register subagent tools
@@ -58,6 +59,9 @@ export class AgentSession {
       systemPrompt: options.systemPrompt || this.buildSystemPrompt(),
       ...options,
     });
+    
+    // Set parent agent reference for subagents to inherit model
+    this.subagentManager.parentAgent = this.agent;
   }
 
   /**

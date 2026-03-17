@@ -4,7 +4,7 @@
  */
 
 import { OpenRouterClient, OpenRouterError } from '../src/OpenRouterClient.js';
-import { MODELS, CONFIG } from '../src/config.js';
+import { CONFIG } from '../src/config.js';
 import * as ui from '../src/utils.js';
 
 class TestRunner {
@@ -95,19 +95,8 @@ const hasApiKey = !!CONFIG.API_KEY;
 // ========================================
 runner.test('Configuration loads correctly', () => {
   runner.assertExists(CONFIG.BASE_URL, 'BASE_URL should exist');
-  runner.assertExists(CONFIG.DEFAULT_MODEL, 'DEFAULT_MODEL should exist');
+  runner.assertExists(CONFIG.API_KEY, 'API_KEY should exist');
   runner.assert(CONFIG.MAX_RETRIES > 0, 'MAX_RETRIES should be positive');
-});
-
-runner.test('Models are defined', () => {
-  runner.assertExists(MODELS.GPT_5_4, 'GPT_5_4 should exist');
-  runner.assertExists(MODELS.CLAUDE_SONNET_4, 'CLAUDE_SONNET_4 should exist');
-  runner.assertExists(MODELS.GEMINI_2_5_PRO, 'GEMINI_2_5_PRO should exist');
-});
-
-runner.test('Model categories are valid', () => {
-  runner.assertExists(MODEL_CATEGORIES.CODING, 'CODING category should exist');
-  runner.assert(MODEL_CATEGORIES.CODING.length > 0, 'CODING should have models');
 });
 
 // ========================================
@@ -116,15 +105,16 @@ runner.test('Model categories are valid', () => {
 runner.test('Client initializes with defaults', () => {
   const client = new OpenRouterClient();
   runner.assertExists(client, 'Client should be created');
-  runner.assertEqual(client.defaultModel, CONFIG.DEFAULT_MODEL, 'Default model should match config');
+  // Model must be provided by caller - no hardcoded default
+  runner.assertEqual(client.defaultModel, null, 'Default model should be null (must be set by caller)');
 });
 
 runner.test('Client accepts custom options', () => {
   const client = new OpenRouterClient({
-    defaultModel: MODELS.GPT_5_MINI,
+    defaultModel: 'test/model',
     maxRetries: 5,
   });
-  runner.assertEqual(client.defaultModel, MODELS.GPT_5_MINI, 'Custom model should be set');
+  runner.assertEqual(client.defaultModel, 'test/model', 'Custom model should be set');
   runner.assertEqual(client.maxRetries, 5, 'Custom retries should be set');
 });
 
@@ -159,10 +149,10 @@ runner.test('Normalizes message array', () => {
 // ========================================
 // Payload Building Tests
 // ========================================
-runner.test('Builds payload with defaults', () => {
-  const client = new OpenRouterClient();
+runner.test('Builds payload with model', () => {
+  const client = new OpenRouterClient({ defaultModel: 'test/model' });
   const payload = client.buildPayload('Hello');
-  runner.assertEqual(payload.model, CONFIG.DEFAULT_MODEL, 'Should use default model');
+  runner.assertEqual(payload.model, 'test/model', 'Should use provided model');
   runner.assertExists(payload.messages, 'Should have messages');
   runner.assertEqual(payload.stream, false, 'Should not stream by default');
 });
@@ -170,11 +160,11 @@ runner.test('Builds payload with defaults', () => {
 runner.test('Builds payload with custom options', () => {
   const client = new OpenRouterClient();
   const payload = client.buildPayload('Hello', {
-    model: MODELS.GPT_5_MINI,
+    model: 'custom/model',
     temperature: 0.5,
     stream: true,
   });
-  runner.assertEqual(payload.model, MODELS.GPT_5_MINI, 'Should use custom model');
+  runner.assertEqual(payload.model, 'custom/model', 'Should use custom model');
   runner.assertEqual(payload.temperature, 0.5, 'Should use custom temperature');
   runner.assertEqual(payload.stream, true, 'Should enable streaming');
 });
@@ -203,12 +193,15 @@ runner.test('Truncate works correctly', () => {
 // ========================================
 // API Integration Tests (requires API key)
 // ========================================
+// Use a cheap model for API tests - use a model that exists
+const TEST_MODEL = 'google/gemini-2.0-flash-001';
+
 if (hasApiKey) {
-  const client = new OpenRouterClient();
+  const client = new OpenRouterClient({ defaultModel: TEST_MODEL });
 
   runner.test('API: Basic chat completion', async () => {
     const result = await client.chat('Say "test passed" and nothing else.', {
-      model: MODELS.GPT_5_MINI,
+      model: TEST_MODEL,
     });
     runner.assertExists(result.content, 'Should have content');
     runner.assertExists(result.id, 'Should have response ID');
@@ -220,7 +213,7 @@ if (hasApiKey) {
       { role: 'system', content: 'You are a test assistant.' },
       { role: 'user', content: 'What is 2+2?' },
     ];
-    const result = await client.chat(messages, { model: MODELS.GPT_5_MINI });
+    const result = await client.chat(messages, { model: TEST_MODEL });
     runner.assertExists(result.content, 'Should have response');
     runner.assert(result.content.includes('4'), 'Should answer correctly');
   });
@@ -234,13 +227,13 @@ if (hasApiKey) {
 
   runner.test('API: Stats tracking', async () => {
     const before = client.getStats().requestCount;
-    await client.chat('Test', { model: MODELS.GPT_5_MINI });
+    await client.chat('Test', { model: TEST_MODEL });
     const after = client.getStats().requestCount;
     runner.assertEqual(after, before + 1, 'Should increment request count');
   });
 
   runner.test('API: Streaming response', async () => {
-    const stream = client.chatStream('Say hi', { model: MODELS.GPT_5_MINI });
+    const stream = client.chatStream('Say hi', { model: TEST_MODEL });
     let receivedContent = false;
     
     for await (const chunk of stream) {
@@ -269,7 +262,7 @@ if (hasApiKey) {
     const result = await client.structuredOutput(
       'What is the capital of France?',
       schema,
-      { model: MODELS.GPT_5_MINI }
+      { model: TEST_MODEL }
     );
     
     runner.assertExists(result.data, 'Should have parsed data');

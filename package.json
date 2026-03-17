@@ -11,7 +11,6 @@
     "start": "node src/index.js",
     "cli": "node src/cli.js",
     "demo": "node examples/demo.js",
-    "chat": "node examples/interactive-chat.js",
     "test": "node tests/test-suite.js",
     "streaming": "node examples/streaming-demo.js",
     "tools": "node examples/tool-calling-demo.js",
@@ -20,7 +19,7 @@
     "agent": "node examples/agent-demo.js",
     "subagents": "node examples/subagent-demo.js",
     "quick": "node -e \"import('./src/index.js').then(m => m.quickRun(process.argv.slice(1).join(' ')))\"",
-    "chat": "node -e \"import('./src/index.js').then(m => m.quickChat(process.argv.slice(1).join(' '))).then(r => console.log(r.content))\""
+    "quick-chat": "node -e \"import('./src/index.js').then(m => m.quickChat(process.argv.slice(1).join(' '))).then(r => console.log(r.content))\""
   },
   "keywords": [
     "openagent",

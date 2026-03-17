@@ -45,7 +45,7 @@ export const execTool = {
       
       // Auto-detect PowerShell vs CMD
       const isPowerShell = detectPowerShell(command);
-      const shell = isPowerShell ? 'powershell.exe' : undefined;
+      const shell = isPowerShell ? 'powershell' : undefined;
       
       const result = await execAsync(command, {
         cwd: resolvedCwd,
@@ -153,10 +153,16 @@ export const execBackgroundTool = {
       proc.stdout.on('data', (data) => {
         output += data.toString();
         if (output.length > 50000) output = output.slice(-25000);
+        if (global.__bgProcesses[procLabel]) {
+          global.__bgProcesses[procLabel].output = output;
+        }
       });
       proc.stderr.on('data', (data) => {
         output += data.toString();
         if (output.length > 50000) output = output.slice(-25000);
+        if (global.__bgProcesses[procLabel]) {
+          global.__bgProcesses[procLabel].output = output;
+        }
       });
       
       return {

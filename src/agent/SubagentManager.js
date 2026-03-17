@@ -31,6 +31,7 @@ const TaskState = {
 
 /**
  * Predefined subagent specializations
+ * Models are now dynamic - no hardcoded model IDs
  */
 const SUBAGENT_SPECIALIZATIONS = {
   coder: {
@@ -42,7 +43,6 @@ const SUBAGENT_SPECIALIZATIONS = {
 - Include error handling
 - Focus ONLY on the specific coding task given to you
 - Return your completed code with a brief explanation`,
-    model: 'anthropic/claude-sonnet-4',
     maxIterations: 15,
   },
   researcher: {
@@ -54,7 +54,6 @@ const SUBAGENT_SPECIALIZATIONS = {
 - Synthesize findings into clear, actionable insights
 - Cite sources when possible
 - Return a well-organized summary of your findings`,
-    model: 'anthropic/claude-sonnet-4',
     maxIterations: 10,
   },
   file_manager: {
@@ -66,7 +65,6 @@ const SUBAGENT_SPECIALIZATIONS = {
 - Create directory structures
 - Handle file organization tasks
 - Report what you did clearly`,
-    model: 'anthropic/claude-sonnet-4',
     maxIterations: 10,
   },
   tester: {
@@ -78,7 +76,6 @@ const SUBAGENT_SPECIALIZATIONS = {
 - Verify code behavior
 - Report test results clearly
 - Identify bugs and issues`,
-    model: 'anthropic/claude-sonnet-4',
     maxIterations: 15,
   },
   reviewer: {
@@ -90,7 +87,6 @@ const SUBAGENT_SPECIALIZATIONS = {
 - Suggest performance improvements
 - Verify best practices
 - Provide constructive, specific feedback`,
-    model: 'anthropic/claude-sonnet-4',
     maxIterations: 10,
   },
   general: {
@@ -100,7 +96,6 @@ const SUBAGENT_SPECIALIZATIONS = {
 - Understand the task clearly
 - Use appropriate tools to complete it
 - Report your results concisely`,
-    model: 'anthropic/claude-sonnet-4',
     maxIterations: 20,
   },
 };
@@ -156,7 +151,6 @@ export class SubagentManager {
     
     // Task management
     this.tasks = new Map();
-    this.taskQueue = [];
     this.runningTasks = new Set();
     this.completedTasks = [];
     this.taskIdCounter = 0;
@@ -198,9 +192,16 @@ export class SubagentManager {
   createSubagent(specialization = 'general', customOptions = {}) {
     const spec = SUBAGENT_SPECIALIZATIONS[specialization] || SUBAGENT_SPECIALIZATIONS.general;
     
+    // Model must be provided - either from parent agent or customOptions
+    const model = customOptions.model || this.parentAgent?.model;
+    
+    if (!model) {
+      throw new Error('Model must be specified for subagent. Pass model in customOptions or set parentAgent.');
+    }
+    
     const agent = new Agent({
       tools: this.sharedTools,
-      model: customOptions.model || spec.model,
+      model: model,
       systemPrompt: customOptions.systemPrompt || spec.systemPrompt,
       verbose: this.verbose,
       maxIterations: customOptions.maxIterations || spec.maxIterations,
@@ -433,7 +434,6 @@ Please synthesize these results into a coherent response.`;
   getStats() {
     return {
       ...this.stats,
-      pendingTasks: this.taskQueue.length,
       runningTasks: this.runningTasks.size,
       avgDuration: this.stats.completedTasks > 0 
         ? Math.round(this.stats.totalDuration / this.stats.completedTasks) + 'ms'
@@ -479,7 +479,6 @@ Please synthesize these results into a coherent response.`;
       id: key,
       name: spec.name,
       description: spec.description,
-      model: spec.model,
       maxIterations: spec.maxIterations,
     }));
   }
