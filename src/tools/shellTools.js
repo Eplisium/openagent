@@ -43,12 +43,17 @@ export const execTool = {
     try {
       const resolvedCwd = path.resolve(cwd);
       
+      // Auto-detect PowerShell vs CMD
+      const isPowerShell = detectPowerShell(command);
+      const shell = isPowerShell ? 'powershell.exe' : undefined;
+      
       const result = await execAsync(command, {
         cwd: resolvedCwd,
         timeout,
         env: { ...process.env, ...env },
         maxBuffer: 10 * 1024 * 1024, // 10MB
         encoding: 'utf-8',
+        shell,
       });
       
       return {
@@ -58,6 +63,7 @@ export const execTool = {
         command,
         cwd: resolvedCwd,
         exitCode: 0,
+        shell: isPowerShell ? 'powershell' : 'cmd',
       };
     } catch (error) {
       return {
@@ -71,6 +77,28 @@ export const execTool = {
     }
   },
 };
+
+/**
+ * Detect if a command needs PowerShell
+ */
+export function detectPowerShell(command) {
+  // PowerShell-specific commands and patterns
+  const psPatterns = [
+    /^Get-/i, /^Set-/i, /^New-/i, /^Remove-/i, /^Invoke-/i,
+    /^Start-/i, /^Stop-/i, /^Test-/i, /^Write-/i, /^Read-/i,
+    /^Import-/i, /^Export-/i, /^Out-/i, /^Select-/i, /^Where-/i,
+    /^ForEach-/i, /^Sort-/i, /^Measure-/i, /^Compare-/i,
+    /\|\s*(Format-|Select-|Where-|Sort-|Measure-|ConvertTo-|ConvertFrom-)/i,
+    /@\{/, /\$\(/, /\$_\./,
+    /-AutoSize/, /-List/, /-Table/, /-Property/,
+    /\[math\]::Round/, /\[math\]::Floor/, /\[math\]::Ceiling/,
+    /Get-CimInstance/i, /Get-WmiObject/i, /Get-PSDrive/i,
+    /Get-Process/i, /Get-Service/i, /Get-EventLog/i,
+    /Get-Counter/i, /Get-NetAdapter/i, /Get-NetIPAddress/i,
+  ];
+  
+  return psPatterns.some(pattern => pattern.test(command));
+}
 
 /**
  * Execute a command in the background

@@ -372,6 +372,7 @@ export class SubagentManager {
     
     const synthesisAgent = this.createSubagent('general', {
       maxIterations: 15,
+      maxToolResultChars: 30000, // Allow larger results for synthesis
     });
     
     const synthesisTask = `${synthesisPrompt}
