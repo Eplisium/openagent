@@ -39,7 +39,7 @@ export class ToolRegistry {
     };
     
     // Execution settings
-    this.defaultTimeout = options.defaultTimeout || 30000; // 30 seconds
+    this.defaultTimeout = options.defaultTimeout || 120000; // 2 minutes (as per changelog)
     this.maxHistorySize = options.maxHistorySize || 500;
     this.enableValidation = options.enableValidation !== false;
     

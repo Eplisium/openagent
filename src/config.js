@@ -137,7 +137,7 @@ export const CONFIG = {
   COMPACT_THRESHOLD: parseFloat(process.env.COMPACT_THRESHOLD) || 0.7,
   
   // Tool Settings
-  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 30000,
+  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 120000, // 2 minutes (as per changelog)
   MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS) || 15000,
   
   // Performance

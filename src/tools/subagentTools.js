@@ -39,6 +39,7 @@ The subagent will work independently and return its results.`,
         },
         required: ['task'],
       },
+      timeout: 120000, // 2 minutes for single subagent task
       async execute(args) {
         try {
           const result = await subagentManager.delegate(args.task, {
@@ -103,6 +104,7 @@ Each task runs in its own isolated subagent.`,
         },
         required: ['tasks'],
       },
+      timeout: 180000, // 3 minutes for parallel subagent tasks
       async execute(args) {
         try {
           const results = await subagentManager.delegateParallel(args.tasks, {
@@ -173,6 +175,7 @@ Each task runs in its own isolated subagent.`,
         },
         required: ['tasks'],
       },
+      timeout: 300000, // 5 minutes for parallel tasks + synthesis
       async execute(args) {
         try {
           const result = await subagentManager.delegateWithSynthesis(
@@ -212,6 +215,7 @@ Each task runs in its own isolated subagent.`,
           },
         },
       },
+      timeout: 30000, // 30 seconds for status check (default)
       async execute(args) {
         if (args.taskId) {
           const status = subagentManager.getTaskStatus(args.taskId);
