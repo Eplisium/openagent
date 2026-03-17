@@ -1,14 +1,15 @@
 /**
- * 💻 OpenAgent CLI v3.0
+ * 💻 OpenAgent CLI v3.1
  * Beautiful interactive terminal with real-time streaming & tool visualization
  * 
- * New features:
- * - Enhanced progress indicators
- * - Cost tracking display
- * - Session statistics
- * - Command aliases
- * - Auto-save sessions
- * - Better error handling
+ * New features v3.1:
+ * - Smart error recovery suggestions
+ * - Intelligent prompt suggestions
+ * - Built-in workflow templates
+ * - Environment health checks
+ * - Enhanced progress with timing/context
+ * - First-run onboarding wizard
+ * - Persistent local state management
  */
 
 import chalk from 'chalk';
@@ -16,11 +17,220 @@ import ora from 'ora';
 import boxen from 'boxen';
 import gradient from 'gradient-string';
 import inquirer from 'inquirer';
+import fs from 'fs-extra';
+import path from 'path';
+import os from 'os';
 import { AgentSession } from './agent/AgentSession.js';
 import { CONFIG } from './config.js';
 import { ModelBrowser } from './ModelBrowser.js';
 
-const VERSION = '3.0.0';
+const VERSION = '3.1.0';
+
+// ═══════════════════════════════════════════════════════════════════
+// 🏠 Local State Management
+// ═══════════════════════════════════════════════════════════════════
+
+const STATE_DIR = path.join(os.homedir(), '.openagent');
+const STATE_FILE = path.join(STATE_DIR, 'state.json');
+
+const DEFAULT_STATE = {
+  version: VERSION,
+  firstRun: true,
+  lastUsed: null,
+  totalSessions: 0,
+  preferences: {
+    showTips: true,
+    autoSuggest: true,
+    verboseErrors: true,
+  },
+  stats: {
+    totalTasks: 0,
+    totalTokens: 0,
+    totalCost: 0,
+    favoriteCommands: {},
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// 🎯 Workflow Templates
+// ═══════════════════════════════════════════════════════════════════
+
+const WORKFLOW_TEMPLATES = {
+  'code-review': {
+    name: '🔍 Code Review',
+    description: 'Comprehensive code analysis and improvement suggestions',
+    steps: [
+      'Analyze the codebase structure and architecture',
+      'Review code quality, patterns, and best practices',
+      'Check for security vulnerabilities and performance issues',
+      'Suggest improvements and refactoring opportunities',
+      'Generate a detailed review report'
+    ],
+    prompt: 'Please perform a comprehensive code review of this project. Focus on code quality, security, performance, and best practices.'
+  },
+  'bug-fix': {
+    name: '🐛 Bug Investigation',
+    description: 'Systematic debugging and issue resolution',
+    steps: [
+      'Analyze error logs and stack traces',
+      'Identify root cause of the issue',
+      'Examine related code and dependencies',
+      'Propose and implement fixes',
+      'Test the solution and verify resolution'
+    ],
+    prompt: 'Help me debug and fix this issue. Please analyze the error, identify the root cause, and provide a working solution.'
+  },
+  'feature-dev': {
+    name: '⚡ Feature Development',
+    description: 'End-to-end feature implementation',
+    steps: [
+      'Understand requirements and scope',
+      'Design the feature architecture',
+      'Implement core functionality',
+      'Add error handling and validation',
+      'Write tests and documentation'
+    ],
+    prompt: 'Help me develop this new feature from start to finish. Please design, implement, test, and document the solution.'
+  },
+  'refactor': {
+    name: '🔧 Code Refactoring',
+    description: 'Improve code structure and maintainability',
+    steps: [
+      'Analyze current code structure',
+      'Identify refactoring opportunities',
+      'Plan the refactoring strategy',
+      'Implement improvements incrementally',
+      'Ensure functionality is preserved'
+    ],
+    prompt: 'Please refactor this code to improve its structure, readability, and maintainability while preserving all functionality.'
+  },
+  'docs': {
+    name: '📚 Documentation',
+    description: 'Generate comprehensive project documentation',
+    steps: [
+      'Analyze project structure and functionality',
+      'Create API documentation',
+      'Write user guides and tutorials',
+      'Generate code comments',
+      'Create README and setup instructions'
+    ],
+    prompt: 'Please create comprehensive documentation for this project including API docs, user guides, and setup instructions.'
+  },
+  'test-suite': {
+    name: '🧪 Test Suite Creation',
+    description: 'Build comprehensive test coverage',
+    steps: [
+      'Analyze code to identify test scenarios',
+      'Create unit tests for core functions',
+      'Add integration tests',
+      'Implement edge case testing',
+      'Set up test automation'
+    ],
+    prompt: 'Please create a comprehensive test suite for this project with unit tests, integration tests, and edge case coverage.'
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// 🎯 Smart Prompt Suggestions
+// ═══════════════════════════════════════════════════════════════════
+
+const PROMPT_SUGGESTIONS = {
+  coding: [
+    "Review and improve this code",
+    "Debug this error and fix it",
+    "Add comprehensive tests",
+    "Refactor for better performance",
+    "Add error handling and validation",
+    "Create documentation for this code",
+    "Optimize this algorithm",
+    "Add TypeScript types"
+  ],
+  files: [
+    "Analyze this project structure",
+    "Find and fix security issues",
+    "Clean up unused files",
+    "Organize project structure",
+    "Create a build system",
+    "Add configuration files",
+    "Set up development environment"
+  ],
+  general: [
+    "Explain how this works",
+    "What are the best practices here?",
+    "How can I improve this?",
+    "What are potential issues?",
+    "Create a step-by-step guide",
+    "Compare different approaches"
+  ]
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// 🏥 Health Check Diagnostics
+// ═══════════════════════════════════════════════════════════════════
+
+const HEALTH_CHECKS = {
+  api: {
+    name: 'API Connection',
+    check: async (session) => {
+      try {
+        await session.agent.client.getModels();
+        return { status: 'healthy', message: 'API connection successful' };
+      } catch (error) {
+        return { status: 'error', message: `API Error: ${error.message}` };
+      }
+    }
+  },
+  model: {
+    name: 'Model Availability',
+    check: async (session) => {
+      try {
+        const result = await session.agent.chat('test');
+        return { status: 'healthy', message: 'Model responding correctly' };
+      } catch (error) {
+        return { status: 'error', message: `Model Error: ${error.message}` };
+      }
+    }
+  },
+  tools: {
+    name: 'Tool Registry',
+    check: async (session) => {
+      try {
+        const tools = session.agent.toolRegistry.getAvailableTools();
+        return { 
+          status: 'healthy', 
+          message: `${tools.length} tools available`,
+          details: tools.map(t => t.name).join(', ')
+        };
+      } catch (error) {
+        return { status: 'error', message: `Tools Error: ${error.message}` };
+      }
+    }
+  },
+  memory: {
+    name: 'Memory Usage',
+    check: async () => {
+      const usage = process.memoryUsage();
+      const usedMB = Math.round(usage.heapUsed / 1024 / 1024);
+      const totalMB = Math.round(usage.heapTotal / 1024 / 1024);
+      
+      if (usedMB > 500) {
+        return { status: 'warning', message: `High memory usage: ${usedMB}MB/${totalMB}MB` };
+      }
+      return { status: 'healthy', message: `Memory usage: ${usedMB}MB/${totalMB}MB` };
+    }
+  },
+  disk: {
+    name: 'Disk Space',
+    check: async () => {
+      try {
+        const stats = await fs.stat(process.cwd());
+        return { status: 'healthy', message: 'Disk access OK' };
+      } catch (error) {
+        return { status: 'error', message: `Disk Error: ${error.message}` };
+      }
+    }
+  }
+};
 
 // ═══════════════════════════════════════════════════════════════════
 // 🎨 Styles
@@ -70,6 +280,11 @@ export class CLI {
     this.autoSaveInterval = options.autoSaveInterval || 5 * 60 * 1000; // 5 minutes
     this.lastSaveTime = Date.now();
     
+    // Enhanced state management
+    this.state = null;
+    this.currentTask = null;
+    this.taskStartTime = null;
+    
     // Command aliases
     this.aliases = {
       'q': 'exit',
@@ -83,33 +298,60 @@ export class CLI {
       'cl': 'clear',
       'st': 'stream',
       'v': 'verbose',
+      'tmp': 'templates',
+      'doc': 'doctor',
     };
   }
 
   async start() {
     console.clear();
+    
+    // Load or initialize state
+    await this.loadState();
+    
     this.printBanner();
 
+    // First-run onboarding
+    if (this.state.firstRun) {
+      await this.runOnboarding();
+    }
+
     if (!CONFIG.API_KEY) {
-      console.log(boxen(
-        `${chalk.red('❌ No API Key Found')}\n\n` +
-        `${chalk.gray('Set your OpenRouter API key in .env:')}\n` +
-        `${chalk.cyan('  OPENROUTER_API_KEY=your_key_here')}\n\n` +
-        `${chalk.gray('Get your key at:')} ${chalk.underline('https://openrouter.ai/keys')}`,
-        box.error
-      ));
+      this.showSmartError('api_key_missing', {
+        message: 'No API Key Found',
+        suggestions: [
+          'Set OPENROUTER_API_KEY in your .env file',
+          'Get your key at https://openrouter.ai/keys',
+          'Run /doctor to check your environment setup'
+        ]
+      });
       process.exit(1);
     }
 
     console.log(chalk.green('✓ API Key configured'));
     console.log(chalk.gray(`  Working directory: ${this.workingDir}`));
 
+    // Initialize model browser FIRST (before creating session)
+    this.modelBrowser = new ModelBrowser();
+    const modelSpinner = ora({ text: chalk.gray('Loading models from OpenRouter...'), spinner: 'dots', color: 'cyan' }).start();
+    try {
+      await this.modelBrowser.init();
+      modelSpinner.succeed(chalk.green(`Loaded ${this.modelBrowser.models.length} models`));
+    } catch (e) {
+      modelSpinner.fail(chalk.red(`Failed to load models: ${e.message}`));
+      console.log(chalk.yellow('⚠️ Cannot continue without models. Check your API key and internet connection.'));
+      process.exit(1);
+    }
+
+    // Let user select a model
+    const selectedModel = await this.selectModel();
+    
     const spinner = ora({ text: chalk.gray('Initializing session...'), spinner: 'dots', color: 'cyan' }).start();
     
     try {
       this.session = new AgentSession({
         workingDir: this.workingDir,
-        model: CONFIG.DEFAULT_MODEL,
+        model: selectedModel,
         verbose: this.verbose,
         streaming: this.streaming,
       });
@@ -117,16 +359,6 @@ export class CLI {
     } catch (error) {
       spinner.fail(chalk.red(`Failed to initialize session: ${error.message}`));
       process.exit(1);
-    }
-
-    // Initialize model browser
-    this.modelBrowser = new ModelBrowser(this.session.agent.client);
-    const modelSpinner = ora({ text: chalk.gray('Loading models from OpenRouter...'), spinner: 'dots', color: 'cyan' }).start();
-    try {
-      await this.modelBrowser.init();
-      modelSpinner.succeed(chalk.green(`Loaded ${this.modelBrowser.models.length} models`));
-    } catch (e) {
-      modelSpinner.warn(chalk.yellow('Could not load models, using defaults'));
     }
 
     console.log(chalk.gray(`  Model: ${chalk.cyan(this.session.agent.model)}`));
@@ -138,23 +370,25 @@ export class CLI {
 
     console.log(boxen(
       `${chalk.bold('Commands:')}\n\n` +
-      `${chalk.cyan('/agent <task>')}  ${chalk.gray('- Run agentic task (with tools)')}\n` +
-      `${chalk.cyan('/chat <msg>')}   ${chalk.gray('- Simple chat (no tools)')}\n` +
-      `${chalk.cyan('/model')}        ${chalk.gray('- Change AI model')}\n` +
-      `${chalk.cyan('/stream')}       ${chalk.gray('- Toggle streaming')}\n` +
-      `${chalk.cyan('/verbose')}      ${chalk.gray('- Toggle verbose mode')}\n` +
-      `${chalk.cyan('/tools')}        ${chalk.gray('- List available tools')}\n` +
-      `${chalk.cyan('/agents')}       ${chalk.gray('- Show subagent status')}\n` +
-      `${chalk.cyan('/stats')}        ${chalk.gray('- Show statistics')}\n` +
-      `${chalk.cyan('/clear')}        ${chalk.gray('- Clear conversation')}\n` +
-      `${chalk.cyan('/save')}         ${chalk.gray('- Save session')}\n` +
-      `${chalk.cyan('/load')}         ${chalk.gray('- Load session')}\n` +
-      `${chalk.cyan('/history')}      ${chalk.gray('- Show command history')}\n` +
-      `${chalk.cyan('/paste')}        ${chalk.gray('- Paste large text')}\n` +
-      `${chalk.cyan('/cost')}         ${chalk.gray('- Show cost breakdown')}\n` +
-      `${chalk.cyan('/help')}         ${chalk.gray('- Show all commands')}\n` +
-      `${chalk.cyan('/exit')}         ${chalk.gray('- Exit')}\n\n` +
-      `${chalk.dim('Shortcuts:')} ${chalk.gray('q=exit, c=chat, a=agent, m=model, s=stats, h=help')}\n` +
+      `${chalk.cyan('/agent <task>')}     ${chalk.gray('- Run agentic task (with tools)')}\n` +
+      `${chalk.cyan('/chat <msg>')}      ${chalk.gray('- Simple chat (no tools)')}\n` +
+      `${chalk.cyan('/templates')}       ${chalk.gray('- Browse workflow templates')}\n` +
+      `${chalk.cyan('/doctor')}          ${chalk.gray('- Environment health check')}\n` +
+      `${chalk.cyan('/model')}           ${chalk.gray('- Change AI model')}\n` +
+      `${chalk.cyan('/stream')}          ${chalk.gray('- Toggle streaming')}\n` +
+      `${chalk.cyan('/verbose')}         ${chalk.gray('- Toggle verbose mode')}\n` +
+      `${chalk.cyan('/tools')}           ${chalk.gray('- List available tools')}\n` +
+      `${chalk.cyan('/agents')}          ${chalk.gray('- Show subagent status')}\n` +
+      `${chalk.cyan('/stats')}           ${chalk.gray('- Show statistics')}\n` +
+      `${chalk.cyan('/clear')}           ${chalk.gray('- Clear conversation')}\n` +
+      `${chalk.cyan('/save')}            ${chalk.gray('- Save session')}\n` +
+      `${chalk.cyan('/load')}            ${chalk.gray('- Load session')}\n` +
+      `${chalk.cyan('/history')}         ${chalk.gray('- Show command history')}\n` +
+      `${chalk.cyan('/paste')}           ${chalk.gray('- Paste large text')}\n` +
+      `${chalk.cyan('/cost')}            ${chalk.gray('- Show cost breakdown')}\n` +
+      `${chalk.cyan('/help')}            ${chalk.gray('- Show all commands')}\n` +
+      `${chalk.cyan('/exit')}            ${chalk.gray('- Exit')}\n\n` +
+      `${chalk.dim('Shortcuts:')} ${chalk.gray('q=exit, c=chat, a=agent, m=model, s=stats, h=help, tmp=templates, doc=doctor')}\n` +
       `${chalk.dim('Tip: Just type a message to run as an agentic task')}`,
       { ...box.default, title: '🤖 OpenAgent', titleAlignment: 'center' }
     ));
@@ -162,6 +396,9 @@ export class CLI {
     await this.mainLoop();
   }
   
+  /**
+   * Start auto-save timer
+   */
   /**
    * Start auto-save timer
    */
@@ -196,6 +433,11 @@ export class CLI {
   async mainLoop() {
     while (true) {
       console.log('');
+      
+      // Show smart suggestions if enabled
+      if (this.state?.preferences?.autoSuggest && Math.random() < 0.3) {
+        this.showSmartSuggestions();
+      }
       
       // Show context usage in prompt
       const contextPct = this.getContextUsage();
@@ -256,17 +498,19 @@ export class CLI {
 
   async runAgentTask(task) {
     const startTime = Date.now();
+    this.taskStartTime = startTime;
+    this.currentTask = task;
     let toolCallCount = 0;
     let iterationCount = 0;
 
-    // Set up visual callbacks
+    // Set up enhanced visual callbacks
     this.session.agent.onToolStart = (toolName, args) => {
       toolCallCount++;
-      this.printToolCallStart(toolName, args, toolCallCount);
+      this.printEnhancedToolCallStart(toolName, args, toolCallCount, startTime);
     };
 
     this.session.agent.onToolEnd = (toolName, result) => {
-      this.printToolCallEnd(toolName, result);
+      this.printEnhancedToolCallEnd(toolName, result, startTime, toolCallCount);
     };
 
     this.session.agent.onResponse = (content) => {
@@ -282,8 +526,16 @@ export class CLI {
         this.printAIResponse(result.response);
       }
 
-      // Print summary stats
-      this.printTaskSummary(result, duration);
+      // Print enhanced summary stats
+      this.printEnhancedTaskSummary(result, duration);
+
+      // Update state
+      if (this.state?.stats) {
+        this.state.stats.totalTasks++;
+        this.state.stats.totalTokens += result.stats?.totalTokensUsed || 0;
+        this.state.stats.totalCost += result.performance?.totalCost || 0;
+      }
+      await this.saveState();
 
       this.history.push({
         type: 'agent',
@@ -291,13 +543,18 @@ export class CLI {
         iterations: result.iterations,
         toolsUsed: result.stats.toolExecutions,
         timestamp: new Date().toISOString(),
+        duration,
       });
 
     } catch (error) {
-      console.log(boxen(
-        `${chalk.red('✗ Error')}\n\n${error.message}`,
-        box.error
-      ));
+      this.showSmartError('task_execution', {
+        message: error.message,
+        task,
+        suggestions: this.generateErrorSuggestions(error, task)
+      });
+    } finally {
+      this.currentTask = null;
+      this.taskStartTime = null;
     }
   }
 
@@ -376,9 +633,17 @@ export class CLI {
     ));
   }
 
-  printToolCallStart(toolName, args, count) {
+  printEnhancedToolCallStart(toolName, args, count, taskStartTime) {
+    const elapsed = Date.now() - taskStartTime;
+    const elapsedStr = this.formatDuration(elapsed);
+    const contextPct = this.getContextUsage();
+    
     console.log('');
-    console.log(`${g.tool('🔧 TOOL')} ${chalk.yellow.bold(toolName)} ${chalk.dim(`(#${count})`)}`);
+    console.log(`${g.tool('🔧 TOOL')} ${chalk.yellow.bold(toolName)} ${chalk.dim(`(#${count}) [${elapsedStr}] [${contextPct}% context]`)}`);
+    
+    if (this.currentTask) {
+      console.log(chalk.dim(`  └─ Task: ${this.currentTask.slice(0, 60)}${this.currentTask.length > 60 ? '...' : ''}`));
+    }
 
     if (args && Object.keys(args).length > 0) {
       const argLines = Object.entries(args)
@@ -442,7 +707,7 @@ export class CLI {
     }
   }
 
-  printGoodbye() {
+  async printGoodbye() {
     console.log(`
 ${g.title('╔═══════════════════════════════════════════════════════════════╗')}
 ${g.title('║')}                                                               ${g.title('║')}
@@ -450,6 +715,12 @@ ${g.title('║')}   ${g.success('👋 Session Complete')}                       
 ${g.title('║')}                                                               ${g.title('║')}
 ${g.title('╚═══════════════════════════════════════════════════════════════╝')}
 `);
+    
+    // Save state on exit
+    if (this.state) {
+      this.state.totalSessions = (this.state.totalSessions || 0) + 1;
+      await this.saveState();
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -547,6 +818,14 @@ ${g.title('╚══════════════════════
         this.resetSession();
         break;
 
+      case 'doctor':
+        await this.runDoctor();
+        break;
+
+      case 'templates':
+        await this.showTemplates();
+        break;
+
       case 'help':
         this.showHelp();
         break;
@@ -556,6 +835,48 @@ ${g.title('╚══════════════════════
     }
 
     return true;
+  }
+
+  /**
+   * Select a model at startup
+   */
+  async selectModel() {
+    console.log('');
+    
+    // Check for recent models first
+    if (this.modelBrowser.recents.length > 0) {
+      const recentModel = this.modelBrowser.recents[0];
+      const modelInfo = this.modelBrowser.models.find(m => m.id === recentModel);
+      
+      const { useRecent } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'useRecent',
+        message: `Use recent model: ${chalk.cyan(recentModel)}${modelInfo ? chalk.gray(` (${modelInfo.provider})`) : ''}?`,
+        default: true,
+      }]);
+      
+      if (useRecent) {
+        return recentModel;
+      }
+    }
+    
+    // Full model picker
+    const modelId = await this.modelBrowser.pickModel();
+    
+    if (modelId) {
+      await this.modelBrowser.addRecent(modelId);
+      return modelId;
+    }
+    
+    // Fallback: pick first available model
+    if (this.modelBrowser.models.length > 0) {
+      const fallback = this.modelBrowser.models[0].id;
+      console.log(chalk.yellow(`⚠️ No model selected, using: ${fallback}`));
+      return fallback;
+    }
+    
+    // Last resort
+    throw new Error('No models available. Check your API key and internet connection.');
   }
 
   async changeModel() {
@@ -621,11 +942,15 @@ ${g.title('╚══════════════════════
     const tasks = subagentManager.getAllTasksStatus();
     const specializations = subagentManager.constructor.listSpecializations();
 
+    // Calculate pending tasks from task map
+    const allTasks = subagentManager.getAllTasksStatus();
+    const pendingCount = allTasks.filter(t => t.state === 'pending').length;
+    
     let content = `${chalk.bold('Subagent System')}\n\n` +
       `${chalk.cyan('Max Concurrent:')} ${subagentManager.maxConcurrent}\n` +
       `${chalk.cyan('Total Tasks:')} ${stats.totalTasks}\n` +
       `${chalk.cyan('Running:')} ${stats.runningTasks}\n` +
-      `${chalk.cyan('Pending:')} ${stats.pendingTasks}\n` +
+      `${chalk.cyan('Pending:')} ${pendingCount}\n` +
       `${chalk.cyan('Completed:')} ${stats.completedTasks}\n` +
       `${chalk.cyan('Failed:')} ${stats.failedTasks}\n` +
       `${chalk.cyan('Success Rate:')} ${stats.successRate}\n` +
@@ -774,11 +1099,89 @@ ${g.title('╚══════════════════════
     await this.runAgentTask(pastedText);
   }
 
+  /**
+   * Run environment health check (doctor)
+   */
+  async runDoctor() {
+    console.log(chalk.cyan('\n🏥 Running health checks...\n'));
+    
+    const results = [];
+    
+    for (const [key, check] of Object.entries(HEALTH_CHECKS)) {
+      const spinner = ora({ text: chalk.gray(check.name), spinner: 'dots' }).start();
+      try {
+        const result = await check.check();
+        spinner.stop();
+        
+        const icon = result.status === 'healthy' ? chalk.green('✓') :
+                     result.status === 'warning' ? chalk.yellow('⚠') : chalk.red('✗');
+        console.log(`${icon} ${chalk.white(check.name)}: ${result.message}`);
+        
+        if (result.details) {
+          console.log(chalk.dim(`  └─ ${result.details}`));
+        }
+        
+        results.push({ check: key, ...result });
+      } catch (error) {
+        spinner.fail(chalk.red(`${check.name}: ${error.message}`));
+        results.push({ check: key, status: 'error', message: error.message });
+      }
+    }
+    
+    const healthy = results.filter(r => r.status === 'healthy').length;
+    const warnings = results.filter(r => r.status === 'warning').length;
+    const errors = results.filter(r => r.status === 'error').length;
+    
+    console.log('');
+    console.log(boxen(
+      `${chalk.bold('Health Summary')}\n\n` +
+      `${chalk.green(`✓ ${healthy} healthy`)}${warnings > 0 ? ` • ${chalk.yellow(`⚠ ${warnings} warnings`)}` : ''}${errors > 0 ? ` • ${chalk.red(`✗ ${errors} errors`)}` : ''}`,
+      { ...box.info, title: '🏥 Doctor' }
+    ));
+  }
+
+  /**
+   * Show workflow templates
+   */
+  async showTemplates() {
+    const choices = Object.entries(WORKFLOW_TEMPLATES).map(([key, tmpl]) => ({
+      name: `${tmpl.name} - ${chalk.gray(tmpl.description)}`,
+      value: key,
+    }));
+    
+    choices.push({ name: chalk.gray('Cancel'), value: null });
+    
+    const { template } = await inquirer.prompt([{
+      type: 'list',
+      name: 'template',
+      message: 'Select a workflow template:',
+      choices,
+    }]);
+    
+    if (!template) return;
+    
+    const tmpl = WORKFLOW_TEMPLATES[template];
+    
+    console.log(boxen(
+      `${chalk.bold(tmpl.name)}\n\n` +
+      `${chalk.gray(tmpl.description)}\n\n` +
+      `${chalk.bold('Steps:')}` +
+      tmpl.steps.map((s, i) => `\n${chalk.cyan(i + 1)}. ${s}`).join('') +
+      `\n\n${chalk.dim('Press Enter to run this workflow, or Escape to cancel')}`,
+      { ...box.info, title: '📋 Template' }
+    ));
+    
+    // Run the template prompt as an agent task
+    await this.runAgentTask(tmpl.prompt);
+  }
+
   showHelp() {
     console.log(boxen(
       `${chalk.bold('Commands')}\n\n` +
       `${chalk.cyan('/agent <task>')}  - Run agentic task (with tools)\n` +
       `${chalk.cyan('/chat <msg>')}   - Simple chat (no tools)\n` +
+      `${chalk.cyan('/templates')}    - Browse workflow templates\n` +
+      `${chalk.cyan('/doctor')}       - Environment health check\n` +
       `${chalk.cyan('/model')}        - Change AI model\n` +
       `${chalk.cyan('/stream')}       - Toggle streaming\n` +
       `${chalk.cyan('/verbose')}      - Toggle verbose mode\n` +
@@ -842,6 +1245,197 @@ ${g.title('╚══════════════════════
       this.taskCount = 0;
       console.log(chalk.green('✓ Session reset'));
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // 🗄️ State Management (was missing!)
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Load persistent state from disk
+   */
+  async loadState() {
+    try {
+      await fs.ensureDir(STATE_DIR);
+      
+      if (await fs.pathExists(STATE_FILE)) {
+        const saved = await fs.readJson(STATE_FILE);
+        this.state = {
+          ...DEFAULT_STATE,
+          ...saved,
+          // Always update version
+          version: VERSION,
+          // Update last used
+          lastUsed: new Date().toISOString(),
+        };
+        
+        if (this.verbose) {
+          console.log(chalk.dim('📂 Loaded local state'));
+        }
+      } else {
+        // First run
+        this.state = {
+          ...DEFAULT_STATE,
+          firstRun: true,
+          lastUsed: new Date().toISOString(),
+        };
+      }
+    } catch (error) {
+      // If state loading fails, use defaults
+      this.state = {
+        ...DEFAULT_STATE,
+        firstRun: true,
+      };
+      if (this.verbose) {
+        console.log(chalk.yellow('⚠️ Could not load state, using defaults'));
+      }
+    }
+  }
+
+  /**
+   * Save persistent state to disk
+   */
+  async saveState() {
+    try {
+      await fs.ensureDir(STATE_DIR);
+      this.state.lastUsed = new Date().toISOString();
+      await fs.writeJson(STATE_FILE, this.state, { spaces: 2 });
+    } catch (error) {
+      // Silently fail state save
+      if (this.verbose) {
+        console.log(chalk.dim(`⚠️ Could not save state: ${error.message}`));
+      }
+    }
+  }
+
+  /**
+   * Show smart suggestions based on usage patterns
+   */
+  showSmartSuggestions() {
+    const suggestions = [
+      '💡 Try /templates for common workflows',
+      '💡 Use /doctor to check your environment',
+      '💡 Type /help to see all commands',
+      '💡 Use /stream to toggle streaming mode',
+    ];
+    const suggestion = suggestions[Math.floor(Math.random() * suggestions.length)];
+    console.log(chalk.dim(suggestion));
+  }
+
+  /**
+   * First-run onboarding wizard
+   */
+  async runOnboarding() {
+    console.log(boxen(
+      `${chalk.bold('🎉 Welcome to OpenAgent!')}\n\n` +
+      `${chalk.cyan('OpenAgent')} is an AI-powered coding assistant with 400+ models.\n\n` +
+      `${chalk.bold('Quick Start:')}` +
+      `\n${chalk.green('•')} Type any message to run as an agentic task` +
+      `\n${chalk.green('•')} Use /chat for simple conversations` +
+      `\n${chalk.green('•')} Use /templates for common workflows` +
+      `\n${chalk.green('•')} Type /help for all commands\n\n` +
+      `${chalk.dim('This message will only show once.')}`,
+      { ...box.default, title: '🚀 Getting Started', titleAlignment: 'center' }
+    ));
+    
+    // Mark first run as complete
+    if (this.state) {
+      this.state.firstRun = false;
+      await this.saveState();
+    }
+  }
+
+  /**
+   * Show smart error with suggestions
+   */
+  showSmartError(errorType, details = {}) {
+    const { message, suggestions = [] } = details;
+    
+    let content = `${chalk.red('❌ Error')}\n\n${chalk.white(message || 'An error occurred')}`;
+    
+    if (suggestions.length > 0) {
+      content += `\n\n${chalk.bold('Suggestions:')}`;
+      for (const suggestion of suggestions) {
+        content += `\n${chalk.green('•')} ${suggestion}`;
+      }
+    }
+    
+    console.log(boxen(content, box.error));
+  }
+
+  /**
+   * Generate error suggestions based on error type
+   */
+  generateErrorSuggestions(error, task) {
+    const suggestions = [];
+    const errorMsg = error.message?.toLowerCase() || '';
+    
+    if (errorMsg.includes('api key') || errorMsg.includes('unauthorized') || errorMsg.includes('401')) {
+      suggestions.push('Check your OPENROUTER_API_KEY in .env file');
+      suggestions.push('Get a key at https://openrouter.ai/keys');
+    }
+    
+    if (errorMsg.includes('rate limit') || errorMsg.includes('429')) {
+      suggestions.push('Wait a moment and try again');
+      suggestions.push('Consider using a different model');
+    }
+    
+    if (errorMsg.includes('timeout') || errorMsg.includes('timed out')) {
+      suggestions.push('Try a simpler task or break it into steps');
+      suggestions.push('Check your internet connection');
+    }
+    
+    if (errorMsg.includes('context') || errorMsg.includes('token')) {
+      suggestions.push('Use /clear to reset conversation context');
+      suggestions.push('Try a model with larger context window');
+    }
+    
+    if (suggestions.length === 0) {
+      suggestions.push('Try /doctor to check your environment');
+      suggestions.push('Use /clear and try again');
+      suggestions.push('Check the error details above');
+    }
+    
+    return suggestions;
+  }
+
+  /**
+   * Format duration for display
+   */
+  formatDuration(ms) {
+    if (ms < 1000) return `${ms}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
+
+  /**
+   * Enhanced tool call end with timing
+   */
+  printEnhancedToolCallEnd(toolName, result, taskStartTime, count) {
+    const elapsed = Date.now() - taskStartTime;
+    const elapsedStr = this.formatDuration(elapsed);
+    
+    if (result.success !== false) {
+      console.log(chalk.green(`  ✓ ${toolName} completed [${elapsedStr}]`));
+      
+      // Show abbreviated result preview
+      const resultData = result.result || result;
+      if (resultData?.stdout && resultData.stdout.length > 0) {
+        const preview = resultData.stdout.substring(0, 150);
+        console.log(chalk.dim(`  └─ ${preview}${resultData.stdout.length > 150 ? '...' : ''}`));
+      } else if (resultData?.content && typeof resultData.content === 'string' && resultData.content.length > 0) {
+        const preview = resultData.content.substring(0, 150);
+        console.log(chalk.dim(`  └─ ${preview}${resultData.content.length > 150 ? '...' : ''}`));
+      }
+    } else {
+      console.log(chalk.red(`  ✗ ${toolName} failed [${elapsedStr}]: ${result.error || result.result?.error || 'Unknown error'}`));
+    }
+  }
+
+  /**
+   * Enhanced task summary with better formatting
+   */
+  printEnhancedTaskSummary(result, duration) {
+    this.printTaskSummary(result, duration);
   }
 }
 

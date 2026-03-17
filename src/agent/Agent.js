@@ -1,10 +1,4 @@
-/**
- * 🤖 Agent Engine v3.0
- * Production-grade agentic loop with advanced error handling, retry logic,
- * context management, and performance optimizations.
- * 
- * Core Loop: gather context → plan → act → verify → repeat
- */
+
 
 import { OpenRouterClient } from '../OpenRouterClient.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
@@ -47,8 +41,12 @@ export class Agent {
   constructor(options = {}) {
     this.client = options.client || new OpenRouterClient(options);
     this.tools = options.tools || new ToolRegistry();
-    this.model = options.model || 'anthropic/claude-sonnet-4';
+    this.model = options.model; // Must be provided - no hardcoded default
     this.systemPrompt = options.systemPrompt || this.defaultSystemPrompt();
+    
+    if (!this.model) {
+      throw new Error('Model must be specified when creating an Agent. Use the ModelBrowser to select a model.');
+    }
     this.messages = [];
     this.maxIterations = options.maxIterations || 30;
     this.verbose = options.verbose !== false;
@@ -235,9 +233,6 @@ When you have completed the task, provide a clear summary of what was done.`;
           });
         }
         
-        // Check if we need to compact context
-        await this.maybeCompactContext();
-        
         // Record in history
         this.history.push({
           iteration: this.iterationCount,
@@ -338,13 +333,6 @@ When you have completed the task, provide a clear summary of what was done.`;
     }
   }
   
-  /**
-   * Alias for backward compatibility
-   */
-  async getLLMResponse(retryCount = 0) {
-    return this.getLLMResponseWithRetry(retryCount);
-  }
-
   /**
    * Execute tool calls from LLM with enhanced error handling
    */
@@ -475,13 +463,6 @@ When you have completed the task, provide a clear summary of what was done.`;
   }
   
   /**
-   * Alias for backward compatibility
-   */
-  async executeToolCalls(toolCalls) {
-    return this.executeToolCallsEnhanced(toolCalls);
-  }
-
-  /**
    * Run a streaming version of the agent
    */
   async *runStream(userInput) {
@@ -525,7 +506,7 @@ When you have completed the task, provide a clear summary of what was done.`;
       // Execute tools
       yield { type: 'tools_start', count: toolCalls.length };
       
-      const results = await this.executeToolCalls(toolCalls);
+      const results = await this.executeToolCallsEnhanced(toolCalls);
       
       // Add messages
       this.messages.push({
@@ -535,8 +516,8 @@ When you have completed the task, provide a clear summary of what was done.`;
           id: tc.id,
           type: 'function',
           function: {
-            name: tc.function.name,
-            arguments: tc.function.arguments,
+            name: tc.name,
+            arguments: JSON.stringify(tc.arguments),
           },
         })),
       });
@@ -712,41 +693,10 @@ When you have completed the task, provide a clear summary of what was done.`;
   }
   
   /**
-   * Create a checkpoint of current state
+   * Get checkpoint info (AgentSession handles checkpoint storage)
    */
-  createCheckpoint(label = 'checkpoint') {
-    const checkpoint = {
-      id: `cp_${Date.now()}`,
-      label,
-      timestamp: new Date().toISOString(),
-      messages: JSON.parse(JSON.stringify(this.messages)),
-      history: JSON.parse(JSON.stringify(this.history)),
-      stats: this.getStats(),
-    };
-    
-    this.checkpoints.push(checkpoint);
-    
-    // Keep only last 10 checkpoints
-    if (this.checkpoints.length > 10) {
-      this.checkpoints = this.checkpoints.slice(-10);
-    }
-    
-    return checkpoint.id;
-  }
-  
-  /**
-   * Restore to a checkpoint
-   */
-  restoreCheckpoint(checkpointId) {
-    const checkpoint = this.checkpoints.find(cp => cp.id === checkpointId);
-    if (!checkpoint) {
-      return { success: false, error: `Checkpoint ${checkpointId} not found` };
-    }
-    
-    this.messages = JSON.parse(JSON.stringify(checkpoint.messages));
-    this.history = JSON.parse(JSON.stringify(checkpoint.history));
-    
-    return { success: true, label: checkpoint.label, timestamp: checkpoint.timestamp };
+  getCheckpoints() {
+    return this.checkpoints;
   }
 }
 
