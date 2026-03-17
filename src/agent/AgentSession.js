@@ -1,6 +1,6 @@
 /**
- * 📋 Agent Session Manager
- * Manages sessions, checkpoints, and context
+ * 📋 Agent Session Manager v3.2
+ * Manages sessions, checkpoints, and context with enhanced subagent integration
  */
 
 import fs from 'fs-extra';
@@ -45,7 +45,7 @@ export class AgentSession {
       parentAgent: null, // Will be set after agent creation
     });
     
-    // Register subagent tools
+    // Register subagent tools (includes new pipeline tool)
     const subagentTools = createSubagentTools(this.subagentManager);
     this.toolRegistry.registerAll(subagentTools);
     
@@ -65,7 +65,7 @@ export class AgentSession {
   }
 
   /**
-   * Build system prompt with working directory context
+   * Build system prompt with working directory context and enhanced delegation guidance
    */
   buildSystemPrompt() {
     return `You are an advanced AI coding assistant running in a terminal session.
@@ -77,30 +77,40 @@ You have access to powerful tools for:
 - **Shell Execution**: exec, exec_background, process_status, system_info
 - **Web Access**: web_search, read_webpage, fetch_url
 - **Git Operations**: git_status, git_log, git_diff, git_add, git_commit, git_push, git_pull, git_branch, git_info
-- **Subagent Delegation**: delegate_task, delegate_parallel, delegate_with_synthesis, subagent_status
+- **Subagent Delegation**: delegate_task, delegate_parallel, delegate_with_synthesis, delegate_pipeline, subagent_status
 
-## Subagent Delegation
-You can delegate tasks to specialized subagents:
-- **delegate_task**: Send a single task to a specialized subagent (coder, researcher, file_manager, tester, reviewer, general)
-- **delegate_parallel**: Run multiple independent tasks simultaneously
-- **delegate_with_synthesis**: Run parallel tasks and automatically combine results
-- Use subagents to parallelize work and handle specialized tasks efficiently
+## 🤝 Subagent Delegation (Your Superpower)
+You can delegate tasks to specialized subagents that work independently:
 
-## CRITICAL: When Using Subagents
-- When you use delegate_with_synthesis or delegate_parallel, the subagents DO THE WORK for you
-- DO NOT repeat the same tool calls that your subagents already made
-- After delegation, you should ONLY synthesize or present their results
-- If subagents already gathered system info, DO NOT call system_info again
-- If subagents already checked git status, DO NOT call git_status again
-- Trust the subagent results and present them to the user
+### When to Delegate
+- **Coding tasks**: Delegate to "coder" subagent for writing/editing code
+- **Research**: Delegate to "researcher" for web searches and information gathering
+- **Code review**: Delegate to "reviewer" for quality analysis
+- **Testing**: Delegate to "tester" for writing and running tests
+- **Architecture**: Delegate to "architect" for system design and planning
+- **Parallel work**: Use delegate_parallel for multiple independent tasks
+- **Workflows**: Use delegate_pipeline for Plan → Code → Test → Review flows
+
+### Delegation Best Practices
+1. **Be specific** - Give subagents detailed task descriptions with file paths and exact requirements
+2. **Trust results** - After delegation, present the subagent's results. Do NOT redo their work.
+3. **Use parallel** - When you have 2+ independent tasks, run them in parallel for speed
+4. **Use pipeline** - For multi-step workflows, use delegate_pipeline with {{previous}} references
+5. **Choose specialization** - Pick the right subagent type for the task
+
+### CRITICAL RULES for Subagents
+- When subagents complete work, DO NOT repeat the same tool calls they already made
+- After delegation, synthesize and present their results to the user
+- If a subagent already read files, checked git, or gathered info, use their results directly
+- Subagents have access to the same tools as you (files, shell, web, git)
 
 ## Working Style
 1. **Understand** what the user wants before acting
 2. **Explore** the codebase/context when needed
-3. **Plan** complex tasks into steps
-4. **Execute** using the most appropriate tools
+3. **Plan** complex tasks - consider if delegation would help
+4. **Execute** using the most appropriate tools or subagents
 5. **Verify** your work succeeded
-6. **Summarize** what you did when complete
+6. **Summarize** what was done when complete
 
 ## Guidelines
 - Always read files before editing them
@@ -115,7 +125,6 @@ You can delegate tasks to specialized subagents:
 - The exec tool auto-detects PowerShell vs CMD
 - PowerShell commands (Get-Process, Get-CimInstance, etc.) are automatically routed to PowerShell
 - You do NOT need to prefix with "powershell" - just use the command directly
-- Examples: Get-Process, systeminfo, wmic, tasklist all work directly
 
 ## Important
 - You are running on Windows. Use Windows-style paths (C:\\Users\\...)

@@ -24,7 +24,7 @@ import { AgentSession } from './agent/AgentSession.js';
 import { CONFIG } from './config.js';
 import { ModelBrowser } from './ModelBrowser.js';
 
-const VERSION = '3.1.0';
+const VERSION = '3.2.0';
 
 // ═══════════════════════════════════════════════════════════════════
 // 🏠 Local State Management
@@ -393,7 +393,7 @@ export class CLI {
       `${chalk.cyan('/stream')}          ${chalk.gray('- Toggle streaming')}\n` +
       `${chalk.cyan('/verbose')}         ${chalk.gray('- Toggle verbose mode')}\n` +
       `${chalk.cyan('/tools')}           ${chalk.gray('- List available tools')}\n` +
-      `${chalk.cyan('/agents')}          ${chalk.gray('- Show subagent status')}\n` +
+      `${chalk.cyan('/agents')}          ${chalk.gray('- Show subagent system status')}\n` +
       `${chalk.cyan('/stats')}           ${chalk.gray('- Show statistics')}\n` +
       `${chalk.cyan('/clear')}           ${chalk.gray('- Clear conversation')}\n` +
       `${chalk.cyan('/save')}            ${chalk.gray('- Save session')}\n` +
@@ -655,26 +655,42 @@ export class CLI {
   printEnhancedToolCallStart(toolName, args, count, taskStartTime) {
     const elapsed = Date.now() - taskStartTime;
     const elapsedStr = this.formatDuration(elapsed);
-    const contextPct = this.getContextUsage();
     
-    console.log('');
-    console.log(`${g.tool('🔧 TOOL')} ${chalk.yellow.bold(toolName)} ${chalk.dim(`(#${count}) [${elapsedStr}] [${contextPct}% context]`)}`);
+    // Detect subagent tools and use minimal output for them
+    const isSubagentTool = toolName.startsWith('delegate_') || toolName === 'subagent_status';
     
-    if (this.currentTask) {
-      console.log(chalk.dim(`  └─ Task: ${this.currentTask.slice(0, 60)}${this.currentTask.length > 60 ? '...' : ''}`));
+    if (isSubagentTool) {
+      // Subagent tools get their own beautiful UI from SubagentManager
+      // Just show a brief header here
+      console.log('');
+      console.log(`${chalk.cyan('⚡')} ${chalk.cyan.bold(toolName)} ${chalk.dim(`[${elapsedStr}]`)}`);
+      return;
     }
+    
+    // Regular tools get compact, clean output
+    const argPreview = this.formatToolArgs(toolName, args);
+    console.log(`  ${chalk.yellow('⚙')} ${chalk.yellow(toolName)} ${argPreview}${chalk.dim(` [${elapsedStr}]`)}`);
+  }
 
-    if (args && Object.keys(args).length > 0) {
-      const argLines = Object.entries(args)
-        .map(([key, value]) => {
-          const displayValue = typeof value === 'string' && value.length > 60
-            ? value.substring(0, 57) + '...'
-            : JSON.stringify(value);
-          return `  ${chalk.gray(key)}: ${chalk.white(displayValue)}`;
-        })
-        .join('\n');
-      console.log(argLines);
-    }
+  /**
+   * Format tool arguments for compact display
+   */
+  formatToolArgs(toolName, args) {
+    if (!args || Object.keys(args).length === 0) return '';
+    
+    // Show the most relevant arg for common tools
+    if (args.path) return chalk.dim(args.path);
+    if (args.command) return chalk.dim(args.command.substring(0, 50) + (args.command.length > 50 ? '...' : ''));
+    if (args.query) return chalk.dim(`"${args.query.substring(0, 40)}${args.query.length > 40 ? '...' : ''}"`);
+    if (args.url) return chalk.dim(args.url.substring(0, 50));
+    if (args.file) return chalk.dim(args.file);
+    
+    // Fallback: show first arg
+    const firstKey = Object.keys(args)[0];
+    const firstVal = typeof args[firstKey] === 'string' 
+      ? args[firstKey].substring(0, 40) 
+      : JSON.stringify(args[firstKey]).substring(0, 40);
+    return chalk.dim(`${firstKey}: ${firstVal}${firstVal.length >= 40 ? '...' : ''}`);
   }
 
   printToolCallEnd(toolName, result) {
@@ -961,45 +977,63 @@ ${g.title('╚══════════════════════
     const tasks = subagentManager.getAllTasksStatus();
     const specializations = subagentManager.constructor.listSpecializations();
 
-    // Calculate pending tasks from task map
-    const allTasks = subagentManager.getAllTasksStatus();
-    const pendingCount = allTasks.filter(t => t.state === 'pending').length;
+    // Stats section
+    const successBar = stats.totalTasks > 0 
+      ? this.miniBar(stats.completedTasks, stats.totalTasks) 
+      : chalk.dim('no tasks yet');
     
-    let content = `${chalk.bold('Subagent System')}\n\n` +
-      `${chalk.cyan('Max Concurrent:')} ${subagentManager.maxConcurrent}\n` +
-      `${chalk.cyan('Total Tasks:')} ${stats.totalTasks}\n` +
-      `${chalk.cyan('Running:')} ${stats.runningTasks}\n` +
-      `${chalk.cyan('Pending:')} ${pendingCount}\n` +
-      `${chalk.cyan('Completed:')} ${stats.completedTasks}\n` +
-      `${chalk.cyan('Failed:')} ${stats.failedTasks}\n` +
-      `${chalk.cyan('Success Rate:')} ${stats.successRate}\n` +
-      `${chalk.cyan('Avg Duration:')} ${stats.avgDuration}`;
+    let content = `${chalk.bold.white('📊 Stats')}` +
+      `\n  Tasks: ${chalk.white(stats.totalTasks)} total ${chalk.dim('│')} ${chalk.green(stats.completedTasks)} done ${chalk.dim('│')} ${chalk.red(stats.failedTasks)} failed ${chalk.dim('│')} ${chalk.cyan(stats.runningTasks)} running` +
+      `\n  Rate:  ${successBar}  ${chalk.white(stats.successRate)}` +
+      `\n  Speed: ${chalk.white(stats.avgDuration)} avg ${stats.totalRetries > 0 ? chalk.dim(`│ ${stats.totalRetries} retries`) : ''}`;
 
-    if (tasks.length > 0) {
-      content += `\n\n${chalk.bold('Recent Tasks')}\n`;
-      const recentTasks = tasks.slice(-5);
-      for (const task of recentTasks) {
-        const stateIcon = {
-          pending: chalk.yellow('⏳'),
-          running: chalk.cyan('🔄'),
-          completed: chalk.green('✓'),
-          failed: chalk.red('✗'),
-          cancelled: chalk.gray('⊘'),
-        }[task.state] || '?';
-
-        content += `\n${stateIcon} ${chalk.white(task.specialization)}: ${task.task}`;
-        if (task.duration > 0) {
-          content += chalk.dim(` (${(task.duration / 1000).toFixed(1)}s)`);
-        }
+    // Per-specialization breakdown if we have data
+    if (stats.bySpecialization && Object.keys(stats.bySpecialization).length > 0) {
+      content += `\n\n${chalk.bold.white('📈 By Specialization')}`;
+      for (const [specId, specStats] of Object.entries(stats.bySpecialization)) {
+        const spec = specializations.find(s => s.id === specId);
+        const icon = spec?.name?.charAt(0) || '🤖';
+        content += `\n  ${icon} ${chalk.cyan(specId.padEnd(14))} ${chalk.white(specStats.total)} tasks ${chalk.dim('│')} ${chalk.green(specStats.completed)} ok ${chalk.dim('│')} ${chalk.red(specStats.failed)} fail`;
       }
     }
 
-    content += `\n\n${chalk.bold('Available Specializations')}\n`;
-    for (const spec of specializations) {
-      content += `\n${chalk.cyan(spec.id)}: ${spec.name} - ${chalk.gray(spec.description)}`;
+    // Recent tasks
+    if (tasks.length > 0) {
+      content += `\n\n${chalk.bold.white('🕐 Recent Tasks')}`;
+      const recentTasks = tasks.slice(-6);
+      for (const task of recentTasks) {
+        const stateIcon = {
+          queued: chalk.gray('○'),
+          pending: chalk.yellow('◔'),
+          running: chalk.cyan('◑'),
+          completed: chalk.green('●'),
+          failed: chalk.red('●'),
+          cancelled: chalk.gray('⊘'),
+          retrying: chalk.yellow('↻'),
+        }[task.state] || chalk.gray('?');
+
+        const dur = task.duration > 0 ? chalk.dim(` ${(task.duration / 1000).toFixed(1)}s`) : '';
+        const retry = task.retryCount > 0 ? chalk.yellow(` ↻${task.retryCount}`) : '';
+        content += `\n  ${stateIcon} ${chalk.cyan(task.specialization.padEnd(12))} ${chalk.gray(task.task)}${dur}${retry}`;
+      }
     }
 
-    console.log(boxen(content, { ...box.info, title: '🤝 Subagents' }));
+    // Available specializations
+    content += `\n\n${chalk.bold.white('🎯 Specializations')}`;
+    for (const spec of specializations) {
+      content += `\n  ${spec.name.padEnd(16)} ${chalk.gray(spec.description)}`;
+    }
+
+    console.log(boxen(content, { ...box.info, title: '🤝 Subagent System', titleAlignment: 'center' }));
+  }
+
+  /**
+   * Create a mini progress bar
+   */
+  miniBar(current, total, length = 12) {
+    if (total === 0) return chalk.dim('░'.repeat(length));
+    const filled = Math.round((current / total) * length);
+    return chalk.green('█'.repeat(filled)) + chalk.dim('░'.repeat(length - filled));
   }
 
   showHistory() {
@@ -1477,23 +1511,36 @@ ${g.title('╚══════════════════════
    * Enhanced tool call end with timing
    */
   printEnhancedToolCallEnd(toolName, result, taskStartTime, count) {
+    // Subagent tools handle their own output via SubagentManager UI
+    const isSubagentTool = toolName.startsWith('delegate_') || toolName === 'subagent_status';
+    if (isSubagentTool) {
+      // Just show a brief completion status
+      if (result.success !== false) {
+        const resultData = result.result || result;
+        const taskCount = resultData?.summary?.total || resultData?.stats?.total || '';
+        const info = taskCount ? ` (${taskCount} tasks)` : '';
+        console.log(chalk.green(`  ✓ ${toolName} done${info}`));
+      } else {
+        console.log(chalk.red(`  ✗ ${toolName}: ${result.error || result.result?.error || 'failed'}`));
+      }
+      return;
+    }
+    
     const elapsed = Date.now() - taskStartTime;
     const elapsedStr = this.formatDuration(elapsed);
     
     if (result.success !== false) {
-      console.log(chalk.green(`  ✓ ${toolName} completed [${elapsedStr}]`));
+      console.log(chalk.green(`    ✓`) + chalk.dim(` ${elapsedStr}`));
       
-      // Show abbreviated result preview
+      // Show abbreviated result preview for useful output
       const resultData = result.result || result;
       if (resultData?.stdout && resultData.stdout.length > 0) {
-        const preview = resultData.stdout.substring(0, 150);
-        console.log(chalk.dim(`  └─ ${preview}${resultData.stdout.length > 150 ? '...' : ''}`));
-      } else if (resultData?.content && typeof resultData.content === 'string' && resultData.content.length > 0) {
-        const preview = resultData.content.substring(0, 150);
-        console.log(chalk.dim(`  └─ ${preview}${resultData.content.length > 150 ? '...' : ''}`));
+        const preview = resultData.stdout.substring(0, 120).replace(/\n/g, ' ');
+        console.log(chalk.dim(`    └─ ${preview}${resultData.stdout.length > 120 ? '...' : ''}`));
       }
     } else {
-      console.log(chalk.red(`  ✗ ${toolName} failed [${elapsedStr}]: ${result.error || result.result?.error || 'Unknown error'}`));
+      const errorMsg = result.error || result.result?.error || 'Unknown error';
+      console.log(chalk.red(`    ✗ ${errorMsg.substring(0, 80)}`));
     }
   }
 

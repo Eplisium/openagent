@@ -1,6 +1,6 @@
 {
   "name": "openagent",
-  "version": "3.0.0",
+  "version": "3.2.0",
   "description": "🚀 OpenAgent v3.0 - Production-grade AI agent with 400+ models. Enhanced error handling, cost tracking, caching, and performance optimizations. On par with Claude Code, Cursor, and Codex.",
   "main": "src/index.js",
   "type": "module",

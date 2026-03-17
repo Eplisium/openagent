@@ -162,7 +162,7 @@ When you have completed the task, provide a clear summary of what was done.`;
         const iterationStart = Date.now();
         
         if (this.verbose) {
-          console.log(chalk.gray(`\n[Iteration ${this.iterationCount}/${this.maxIterations}]`));
+          console.log(chalk.dim(`\n── iteration ${this.iterationCount}/${this.maxIterations} ──`));
         }
         
         if (this.onIterationStart) {
@@ -397,11 +397,9 @@ When you have completed the task, provide a clear summary of what was done.`;
     this.performanceMetrics.totalToolCalls++;
     
     if (this.verbose) {
-      console.log(chalk.yellow(`\n🔧 Executing: ${toolName}`));
-      if (args && Object.keys(args).length > 0) {
-        const argStr = JSON.stringify(args);
-        console.log(chalk.gray(`   Args: ${argStr.length > 100 ? argStr.substring(0, 100) + '...' : argStr}`));
-      }
+      // Compact tool output - avoid clashing with subagent UI
+      const argPreview = args?.path || args?.command?.substring(0, 40) || args?.query?.substring(0, 40) || '';
+      console.log(chalk.yellow(`  🔧 ${toolName}`) + (argPreview ? chalk.dim(` ${argPreview}`) : ''));
     }
     
     if (this.onToolStart) {
@@ -417,9 +415,9 @@ When you have completed the task, provide a clear summary of what was done.`;
         
         if (this.verbose) {
           if (result.success !== false) {
-            console.log(chalk.green(`   ✓ Success`));
+            console.log(chalk.green(`     ✓`));
           } else {
-            console.log(chalk.red(`   ✗ Failed: ${result.error}`));
+            console.log(chalk.red(`     ✗ ${result.error?.substring(0, 60) || 'failed'}`));
           }
         }
         
