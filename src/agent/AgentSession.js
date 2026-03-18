@@ -19,9 +19,15 @@ import { createSubagentTools } from '../tools/subagentTools.js';
 import { createTaskTools } from '../tools/taskTools.js';
 import chalk from 'chalk';
 
+function createSessionId() {
+  const timestamp = Date.now();
+  const randomSuffix = Math.random().toString(36).slice(2, 8);
+  return `session_${timestamp}_${randomSuffix}`;
+}
+
 export class AgentSession {
   constructor(options = {}) {
-    this.sessionId = options.sessionId || `session_${Date.now()}`;
+    this.sessionId = options.sessionId || createSessionId();
     this.workingDir = path.resolve(options.workingDir || process.cwd());
     this.workspaceManager = options.workspaceManager || new WorkspaceManager({
       workingDir: this.workingDir,
@@ -202,14 +208,7 @@ You can delegate tasks to specialized subagents that work independently:
 
   refreshSystemPrompt() {
     const systemPrompt = this.buildSystemPrompt();
-    this.agent.systemPrompt = systemPrompt;
-
-    const systemMessageIndex = this.agent.messages.findIndex(message => message.role === 'system');
-    if (systemMessageIndex >= 0) {
-      this.agent.messages[systemMessageIndex].content = systemPrompt;
-    } else {
-      this.agent.messages.unshift({ role: 'system', content: systemPrompt });
-    }
+    this.agent.setSystemPrompt(systemPrompt);
   }
 
   async prepareTaskWorkspace(task) {
@@ -217,9 +216,10 @@ You can delegate tasks to specialized subagents that work independently:
     const shouldReuseWorkspace = progress.status !== 'not_initialized' &&
       progress.status !== 'complete' &&
       progress.workspaceDir;
+    const currentWorkspaceDir = this.activeWorkspace?.workspaceDir || null;
 
     const workspace = await this.workspaceManager.prepareTaskWorkspace(task, {
-      workspaceDir: shouldReuseWorkspace ? progress.workspaceDir : undefined,
+      workspaceDir: currentWorkspaceDir || (shouldReuseWorkspace ? progress.workspaceDir : undefined),
       task,
       sessionId: this.sessionId,
       source: 'agent-session',
@@ -303,7 +303,7 @@ You can delegate tasks to specialized subagents that work independently:
       return { success: false, error: `Checkpoint ${checkpointId} not found` };
     }
     
-    this.agent.messages = JSON.parse(JSON.stringify(checkpoint.messages));
+    this.agent.setMessages(JSON.parse(JSON.stringify(checkpoint.messages)));
     this.agent.history = JSON.parse(JSON.stringify(checkpoint.history));
     
     return { success: true, label: checkpoint.label, timestamp: checkpoint.timestamp };
@@ -405,6 +405,7 @@ You can delegate tasks to specialized subagents that work independently:
             created: data.metadata?.created,
             updated: data.metadata?.updated,
             lastTask: data.metadata?.lastTask,
+            model: data.agent?.model || null,
             iterations: data.agent?.stats?.iterations || 0,
             activeWorkspaceDir: data.metadata?.activeWorkspaceDir || data.activeWorkspace?.workspaceDir || null,
           });

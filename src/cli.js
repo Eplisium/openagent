@@ -299,11 +299,14 @@ export class CLI {
     this.autoSave = options.autoSave !== false;
     this.autoSaveInterval = options.autoSaveInterval || 5 * 60 * 1000; // 5 minutes
     this.lastSaveTime = Date.now();
+    this.autoSaveTimer = null;
+    this.sessionSaveInFlight = null;
     
     // Enhanced state management
     this.state = null;
     this.currentTask = null;
     this.taskStartTime = null;
+    this.promptCount = 0;
     
     // Command aliases
     this.aliases = {
@@ -311,6 +314,7 @@ export class CLI {
       'quit': 'exit',
       'c': 'chat',
       'a': 'agent',
+      'n': 'new',
       'm': 'model',
       's': 'stats',
       'h': 'help',
@@ -356,7 +360,10 @@ export class CLI {
     const modelSpinner = ora({ text: chalk.gray('Loading models from OpenRouter...'), spinner: 'dots', color: 'cyan' }).start();
     try {
       await this.modelBrowser.init();
-      modelSpinner.succeed(chalk.green(`Loaded ${this.modelBrowser.models.length} models`));
+      const sourceSuffix = this.modelBrowser.lastLoadSource === 'cache' || this.modelBrowser.lastLoadSource === 'stale-cache'
+        ? ' from cache'
+        : '';
+      modelSpinner.succeed(chalk.green(`Loaded ${this.modelBrowser.models.length} models${sourceSuffix}`));
     } catch (e) {
       modelSpinner.fail(chalk.red(`Failed to load models: ${e.message}`));
       console.log(chalk.yellow('⚠️ Cannot continue without models. Check your API key and internet connection.'));
@@ -369,12 +376,7 @@ export class CLI {
     const spinner = ora({ text: chalk.gray('Initializing session...'), spinner: 'dots', color: 'cyan' }).start();
     
     try {
-      this.session = new AgentSession({
-        workingDir: this.workingDir,
-        model: selectedModel,
-        verbose: this.verbose,
-        streaming: this.streaming,
-      });
+      this.createSession({ modelId: selectedModel });
       spinner.succeed(chalk.green('Session initialized'));
     } catch (error) {
       spinner.fail(chalk.red(`Failed to initialize session: ${error.message}`));
@@ -396,11 +398,12 @@ export class CLI {
       `${chalk.cyan('/templates')}       ${chalk.gray('- Browse workflow templates')}\n` +
       `${chalk.cyan('/doctor')}          ${chalk.gray('- Environment health check')}\n` +
       `${chalk.cyan('/model')}           ${chalk.gray('- Change AI model')}\n` +
-      `${chalk.cyan('/stream')}          ${chalk.gray('- Toggle streaming')}\n` +
+      `${chalk.cyan('/stream')}          ${chalk.gray('- Toggle chat streaming')}\n` +
       `${chalk.cyan('/verbose')}         ${chalk.gray('- Toggle verbose mode')}\n` +
       `${chalk.cyan('/tools')}           ${chalk.gray('- List available tools')}\n` +
       `${chalk.cyan('/agents')}          ${chalk.gray('- Show subagent system status')}\n` +
       `${chalk.cyan('/stats')}           ${chalk.gray('- Show statistics')}\n` +
+      `${chalk.cyan('/new')}             ${chalk.gray('- Start a fresh session')}\n` +
       `${chalk.cyan('/clear')}           ${chalk.gray('- Clear conversation')}\n` +
       `${chalk.cyan('/save')}            ${chalk.gray('- Save session')}\n` +
       `${chalk.cyan('/load')}            ${chalk.gray('- Load session')}\n` +
@@ -409,7 +412,7 @@ export class CLI {
       `${chalk.cyan('/cost')}            ${chalk.gray('- Show cost breakdown')}\n` +
       `${chalk.cyan('/help')}            ${chalk.gray('- Show all commands')}\n` +
       `${chalk.cyan('/exit')}            ${chalk.gray('- Exit')}\n\n` +
-      `${chalk.dim('Shortcuts:')} ${chalk.gray('q=exit, c=chat, a=agent, m=model, s=stats, h=help, tmp=templates, doc=doctor')}\n` +
+      `${chalk.dim('Shortcuts:')} ${chalk.gray('q=exit, c=chat, a=agent, n=new, m=model, s=stats, h=help, tmp=templates, doc=doctor')}\n` +
       `${chalk.dim('Tip: Just type a message to run as an agentic task')}`,
       { ...box.default, title: '🤖 OpenAgent', titleAlignment: 'center' }
     ));
@@ -421,19 +424,38 @@ export class CLI {
    * Start auto-save timer
    */
   startAutoSave() {
-    setInterval(async () => {
-      if (Date.now() - this.lastSaveTime > this.autoSaveInterval) {
-        try {
-          await this.session.save();
-          this.lastSaveTime = Date.now();
-          if (this.verbose) {
-            console.log(chalk.dim('\n💾 Auto-saved session'));
-          }
-        } catch (error) {
-          // Silently fail auto-save
+    this.stopAutoSave();
+    this.autoSaveTimer = setInterval(async () => {
+      if (!this.session || this.sessionSaveInFlight) {
+        return;
+      }
+
+      if (Date.now() - this.lastSaveTime <= this.autoSaveInterval) {
+        return;
+      }
+
+      try {
+        this.sessionSaveInFlight = this.session.save();
+        await this.sessionSaveInFlight;
+        this.lastSaveTime = Date.now();
+        if (this.verbose) {
+          console.log(chalk.dim('\n💾 Auto-saved session'));
         }
+      } catch (error) {
+        // Silently fail auto-save
+      } finally {
+        this.sessionSaveInFlight = null;
       }
     }, this.autoSaveInterval);
+
+    this.autoSaveTimer.unref?.();
+  }
+
+  stopAutoSave() {
+    if (this.autoSaveTimer) {
+      clearInterval(this.autoSaveTimer);
+      this.autoSaveTimer = null;
+    }
   }
 
   printBanner() {
@@ -451,16 +473,8 @@ export class CLI {
   async mainLoop() {
     while (true) {
       console.log('');
-      
-      // Show smart suggestions if enabled
-      if (this.state?.preferences?.autoSuggest && Math.random() < 0.3) {
-        this.showSmartSuggestions();
-      }
-      
-      // Show context usage in prompt
-      const contextPct = this.getContextUsage();
-      const contextColor = contextPct > 70 ? chalk.red : contextPct > 40 ? chalk.yellow : chalk.green;
-      const prompt = `${chalk.cyan('❯')} ${contextColor(`[${contextPct}%]`)}`;
+      console.log(this.buildPromptStatusLine());
+      const prompt = chalk.cyan('❯');
       
       const { input } = await inquirer.prompt([{
         type: 'input',
@@ -468,6 +482,7 @@ export class CLI {
         message: prompt,
         prefix: '',
       }]);
+      this.promptCount++;
 
       const trimmed = input.trim();
       if (!trimmed) continue;
@@ -497,7 +512,7 @@ export class CLI {
       await this.runAgentTask(trimmed);
     }
 
-    this.printGoodbye();
+    await this.printGoodbye();
   }
   
   /**
@@ -505,9 +520,112 @@ export class CLI {
    */
   getContextUsage() {
     if (!this.session?.agent) return 0;
-    const estimated = this.session.agent.estimateTokens();
-    const max = this.session.agent.maxContextTokens;
-    return Math.min(100, Math.round((estimated / max) * 100));
+    return this.session.agent.getContextStats().percent;
+  }
+
+  syncSessionModelState(modelId = this.session?.agent?.model) {
+    if (!this.session?.agent || !modelId) {
+      return null;
+    }
+
+    this.session.model = modelId;
+    this.session.agent.model = modelId;
+    const contextLength = this.modelBrowser?.getContextLength(modelId) || CONFIG.MAX_CONTEXT_TOKENS;
+    this.session.agent.setMaxContextTokens(contextLength);
+
+    return {
+      model: this.modelBrowser?.getModel(modelId) || null,
+      contextLength,
+    };
+  }
+
+  createSession({
+    modelId = this.session?.agent?.model || this.session?.model,
+    sessionId,
+    activeWorkspace = null,
+    openAgentDir = this.session?.workspaceManager?.openAgentDir,
+    saveDir = this.session?.saveDir,
+    taskDir = this.session?.taskManager?.taskDir,
+  } = {}) {
+    if (!modelId) {
+      throw new Error('Model must be selected before creating a session.');
+    }
+
+    const nextSession = new AgentSession({
+      workingDir: this.workingDir,
+      model: modelId,
+      verbose: this.verbose,
+      streaming: this.streaming,
+      sessionId,
+      activeWorkspace,
+      openAgentDir,
+      saveDir,
+      taskDir,
+    });
+
+    this.session = nextSession;
+    this.syncSessionModelState(modelId);
+    this.lastSaveTime = Date.now();
+    return nextSession;
+  }
+
+  formatCompactNumber(value) {
+    if (!Number.isFinite(value)) return '0';
+    if (value >= 1000000) return `${(value / 1000000).toFixed(value >= 10000000 ? 0 : 1)}M`;
+    if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K`;
+    return Math.round(value).toString();
+  }
+
+  truncateInline(text, maxLength = 56) {
+    if (!text || text.length <= maxLength) {
+      return text || '';
+    }
+
+    return `${text.substring(0, maxLength - 3).trimEnd()}...`;
+  }
+
+  shortenModelLabel(modelId) {
+    if (!modelId) {
+      return 'no-model';
+    }
+
+    return this.truncateInline(modelId, 28);
+  }
+
+  getWorkspaceLabel() {
+    const workspaceDir = this.session?.activeWorkspace?.workspaceDir;
+    return workspaceDir ? path.basename(workspaceDir) : 'none';
+  }
+
+  getSessionLabel() {
+    const sessionId = this.session?.sessionId;
+    if (!sessionId) {
+      return 'new';
+    }
+
+    return sessionId.replace(/^session_/, '').slice(-8);
+  }
+
+  buildPromptStatusLine() {
+    if (!this.session?.agent) {
+      return chalk.dim('─ ready');
+    }
+
+    const context = this.session.agent.getContextStats();
+    const contextColor = context.percent > 70 ? chalk.red : context.percent > 40 ? chalk.yellow : chalk.green;
+    const segments = [
+      `${chalk.dim('model')} ${chalk.cyan(this.shortenModelLabel(this.session.agent.model))}`,
+      `${chalk.dim('ctx est')} ${contextColor(`${this.formatCompactNumber(context.usedTokens)}/${this.formatCompactNumber(context.maxTokens)} (${context.percent}%)`)}`,
+      `${chalk.dim('stream')} ${this.streaming ? chalk.green('chat-on') : chalk.gray('chat-off')}`,
+      `${chalk.dim('session')} ${chalk.gray(this.getSessionLabel())}`,
+    ];
+    const workspaceLabel = this.getWorkspaceLabel();
+
+    if (workspaceLabel !== 'none') {
+      segments.push(`${chalk.dim('ws')} ${chalk.gray(workspaceLabel)}`);
+    }
+
+    return `${chalk.dim('─ ')}${segments.join(chalk.dim(' │ '))}`;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -520,8 +638,20 @@ export class CLI {
     this.currentTask = task;
     let toolCallCount = 0;
     let responsePrinted = false;
+    const previousCallbacks = {
+      onToolStart: this.session.agent.onToolStart,
+      onToolEnd: this.session.agent.onToolEnd,
+      onResponse: this.session.agent.onResponse,
+      onIterationStart: this.session.agent.onIterationStart,
+      onIterationEnd: this.session.agent.onIterationEnd,
+      onStatus: this.session.agent.onStatus,
+    };
 
     // Set up enhanced visual callbacks
+    this.session.agent.onIterationStart = () => {
+      console.log(chalk.dim(`\n── ${this.session.agent.formatIterationLabel()} ──`));
+    };
+
     this.session.agent.onToolStart = (toolName, args) => {
       toolCallCount++;
       this.printEnhancedToolCallStart(toolName, args, toolCallCount, startTime);
@@ -538,6 +668,15 @@ export class CLI {
         this.printAIResponse(deduped);
         responsePrinted = true;
       }
+    };
+
+    this.session.agent.onStatus = ({ type, message }) => {
+      const formatter = type === 'compaction'
+        ? chalk.cyan
+        : type === 'retry'
+          ? chalk.yellow
+          : chalk.dim;
+      console.log(formatter(`   ${message}`));
     };
 
     try {
@@ -578,6 +717,12 @@ export class CLI {
         suggestions: this.generateErrorSuggestions(error, task)
       });
     } finally {
+      this.session.agent.onToolStart = previousCallbacks.onToolStart;
+      this.session.agent.onToolEnd = previousCallbacks.onToolEnd;
+      this.session.agent.onResponse = previousCallbacks.onResponse;
+      this.session.agent.onIterationStart = previousCallbacks.onIterationStart;
+      this.session.agent.onIterationEnd = previousCallbacks.onIterationEnd;
+      this.session.agent.onStatus = previousCallbacks.onStatus;
       this.currentTask = null;
       this.taskStartTime = null;
     }
@@ -606,15 +751,13 @@ export class CLI {
             process.stdout.write(chalk.white(chunk.content));
             fullContent += chunk.content;
           } else if (chunk.type === 'done') {
-            if (chunk.usage) {
-              this.session.agent.totalTokensUsed += chunk.usage.total_tokens || 0;
-            }
+            this.session.agent.updateUsageStats(chunk.usage);
           }
         }
 
         console.log(''); // New line
-        this.session.agent.messages.push({ role: 'user', content: message });
-        this.session.agent.messages.push({ role: 'assistant', content: fullContent });
+        this.session.agent.pushMessage({ role: 'user', content: message });
+        this.session.agent.pushMessage({ role: 'assistant', content: fullContent });
 
       } catch (error) {
         console.log(chalk.red(`\n✗ ${error.message}`));
@@ -632,10 +775,6 @@ export class CLI {
         const result = await this.session.agent.chat(message);
         spinner.stop();
         this.printAIResponse(result.content);
-
-        if (result.usage) {
-          this.session.agent.totalTokensUsed += result.usage.total_tokens || 0;
-        }
       } catch (error) {
         spinner.fail(chalk.red(`Error: ${error.message}`));
       }
@@ -717,9 +856,11 @@ export class CLI {
     const seconds = (duration / 1000).toFixed(1);
     const modelId = this.session.agent.model;
     const modelShort = modelId.split('/').pop();
-    const contextUsed = this.session.agent.estimateTokens();
-    const contextMax = this.modelBrowser?.getContextLength(modelId) || 128000;
-    const contextPct = Math.min(100, Math.round((contextUsed / contextMax) * 100));
+    this.syncSessionModelState(modelId);
+    const contextStats = this.session.agent.getContextStats();
+    const contextUsed = contextStats.usedTokens;
+    const contextMax = contextStats.maxTokens;
+    const contextPct = contextStats.percent;
     const contextColor = contextPct > 70 ? chalk.red : contextPct > 40 ? chalk.yellow : chalk.green;
 
     const formatCtx = (n) => {
@@ -736,7 +877,7 @@ export class CLI {
     console.log('');
     console.log(chalk.dim(`  ── `) +
       chalk.cyan(modelShort) + chalk.dim(' • ') +
-      contextColor(`${formatCtx(contextUsed)}/${formatCtx(contextMax)} ctx (${contextPct}%)`) + chalk.dim(' • ') +
+      contextColor(`${formatCtx(contextUsed)}/${formatCtx(contextMax)} ctx est (${contextPct}%)`) + chalk.dim(' • ') +
       chalk.white(`${result.iterations} iter`) + chalk.dim(' • ') +
       chalk.white(`${result.stats.toolExecutions} tools`) + chalk.dim(' • ') +
       chalk.white(`${seconds}s`) +
@@ -757,6 +898,11 @@ export class CLI {
   }
 
   async printGoodbye() {
+    this.stopAutoSave();
+    if (this.sessionSaveInFlight) {
+      await this.sessionSaveInFlight.catch(() => {});
+    }
+
     console.log(`
 ${g.title('╔═══════════════════════════════════════════════════════════════╗')}
 ${g.title('║')}                                                               ${g.title('║')}
@@ -785,9 +931,11 @@ ${g.title('╚══════════════════════
       case 'quit':
       case 'q':
         // Auto-save before exit
+        this.stopAutoSave();
         if (this.autoSave) {
           try {
             await this.session.save();
+            this.lastSaveTime = Date.now();
             console.log(chalk.dim('💾 Session auto-saved'));
           } catch {}
         }
@@ -817,7 +965,7 @@ ${g.title('╚══════════════════════
       case 'stream':
         this.streaming = !this.streaming;
         this.session.agent.streaming = this.streaming;
-        console.log(chalk.green(`✓ Streaming ${this.streaming ? 'enabled' : 'disabled'}`));
+        console.log(chalk.green(`✓ Chat streaming ${this.streaming ? 'enabled' : 'disabled'}`));
         break;
 
       case 'verbose':
@@ -843,6 +991,11 @@ ${g.title('╚══════════════════════
         console.log(chalk.green('✓ Conversation cleared'));
         break;
 
+      case 'new':
+      case 'reset':
+        await this.resetSession();
+        break;
+
       case 'save':
         await this.saveSession();
         break;
@@ -861,10 +1014,6 @@ ${g.title('╚══════════════════════
 
       case 'cost':
         this.showCost();
-        break;
-
-      case 'reset':
-        this.resetSession();
         break;
 
       case 'doctor':
@@ -894,18 +1043,26 @@ ${g.title('╚══════════════════════
     
     // Check for recent models first
     if (this.modelBrowser.recents.length > 0) {
-      const recentModel = this.modelBrowser.recents[0];
-      const modelInfo = this.modelBrowser.models.find(m => m.id === recentModel);
+      let recentModel = this.modelBrowser.recents[0];
+      let modelInfo = this.modelBrowser.getModel(recentModel);
+
+      if (recentModel && !modelInfo && this.modelBrowser.models.length > 0) {
+        await this.modelBrowser.removeRecent(recentModel);
+        recentModel = this.modelBrowser.recents[0];
+        modelInfo = recentModel ? this.modelBrowser.getModel(recentModel) : null;
+      }
       
-      const { useRecent } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'useRecent',
-        message: `Use recent model: ${chalk.cyan(recentModel)}${modelInfo ? chalk.gray(` (${modelInfo.provider})`) : ''}?`,
-        default: true,
-      }]);
-      
-      if (useRecent) {
-        return recentModel;
+      if (recentModel && modelInfo) {
+        const { useRecent } = await inquirer.prompt([{
+          type: 'confirm',
+          name: 'useRecent',
+          message: `Use recent model: ${chalk.cyan(recentModel)}${modelInfo ? chalk.gray(` (${modelInfo.provider})`) : ''}?`,
+          default: true,
+        }]);
+        
+        if (useRecent) {
+          return recentModel;
+        }
       }
     }
     
@@ -934,9 +1091,9 @@ ${g.title('╚══════════════════════
     });
 
     if (modelId) {
-      this.session.agent.model = modelId;
+      const synced = this.syncSessionModelState(modelId);
       await this.modelBrowser.addRecent(modelId);
-      console.log(chalk.green(`✓ Model: ${chalk.cyan(modelId)}`));
+      console.log(chalk.green(`✓ Model: ${chalk.cyan(modelId)} ${chalk.gray(`(${this.formatCompactNumber(synced?.contextLength || 0)} ctx)`)}`));
     }
   }
 
@@ -954,6 +1111,7 @@ ${g.title('╚══════════════════════
 
   showStats() {
     const stats = this.session.agent.getStats();
+    const contextStats = this.session.agent.getContextStats();
     const toolStats = this.session.toolRegistry.getStats();
     const subagentStats = this.session.subagentManager?.getStats() || {};
 
@@ -961,6 +1119,8 @@ ${g.title('╚══════════════════════
       `${chalk.cyan('Messages:')} ${stats.totalMessages}\n` +
       `${chalk.cyan('Iterations:')} ${stats.iterations}\n` +
       `${chalk.cyan('Tokens:')} ${stats.totalTokensUsed.toLocaleString()}\n` +
+      `${chalk.cyan('Context Est:')} ${this.formatCompactNumber(contextStats.usedTokens)}/${this.formatCompactNumber(contextStats.maxTokens)} (${contextStats.percent}%)\n` +
+      `${chalk.cyan('Compactions:')} ${contextStats.compactions}\n` +
       `${chalk.cyan('Tool Calls:')} ${stats.toolExecutions}\n` +
       `${chalk.cyan('Tools Used:')} ${stats.toolsUsed.join(', ') || 'None'}\n\n` +
       `${chalk.bold('Registry')}\n\n` +
@@ -1067,6 +1227,7 @@ ${g.title('╚══════════════════════
   async saveSession() {
     const result = await this.session.save();
     if (result.success) {
+      this.lastSaveTime = Date.now();
       console.log(chalk.green(`✓ Saved to ${result.path}`));
     } else {
       console.log(chalk.red('✗ Save failed'));
@@ -1084,7 +1245,13 @@ ${g.title('╚══════════════════════
     }
 
     const choices = sessions.map(s => ({
-      name: `${s.sessionId} (${new Date(s.updated).toLocaleString()})`,
+      name: [
+        s.sessionId,
+        s.model ? this.shortenModelLabel(s.model) : null,
+        s.iterations ? `${s.iterations} iter` : null,
+        s.lastTask ? this.truncateInline(s.lastTask, 42) : null,
+        s.activeWorkspaceDir ? path.basename(s.activeWorkspaceDir) : null,
+      ].filter(Boolean).join(chalk.dim(' • ')) + chalk.dim(` (${new Date(s.updated).toLocaleString()})`),
       value: s.sessionId,
     }));
 
@@ -1100,7 +1267,15 @@ ${g.title('╚══════════════════════
     });
     if (loaded) {
       this.session = loaded;
+      this.syncSessionModelState(this.session.agent.model);
       console.log(chalk.green(`✓ Loaded ${sessionId}`));
+      console.log(chalk.gray(`  Model: ${chalk.cyan(this.session.agent.model)}`));
+      if (this.session.activeWorkspace?.workspaceDir) {
+        console.log(chalk.gray(`  Workspace: ${this.getWorkspaceLabel()}`));
+      }
+      if (this.session.metadata?.lastTask) {
+        console.log(chalk.gray(`  Last task: ${this.truncateInline(this.session.metadata.lastTask, 80)}`));
+      }
     } else {
       console.log(chalk.red('✗ Load failed'));
     }
@@ -1254,22 +1429,23 @@ ${g.title('╚══════════════════════
       `${chalk.cyan('/templates')}    - Browse workflow templates\n` +
       `${chalk.cyan('/doctor')}       - Environment health check\n` +
       `${chalk.cyan('/model')}        - Change AI model\n` +
-      `${chalk.cyan('/stream')}       - Toggle streaming\n` +
+      `${chalk.cyan('/stream')}       - Toggle chat streaming\n` +
       `${chalk.cyan('/verbose')}      - Toggle verbose mode\n` +
       `${chalk.cyan('/tools')}        - List available tools\n` +
       `${chalk.cyan('/agents')}       - Show subagent status\n` +
       `${chalk.cyan('/stats')}        - Show statistics\n` +
       `${chalk.cyan('/cost')}         - Show cost breakdown\n` +
+      `${chalk.cyan('/new')}          - Start a fresh session\n` +
       `${chalk.cyan('/clear')}        - Clear conversation\n` +
       `${chalk.cyan('/save')}         - Save session\n` +
       `${chalk.cyan('/load')}         - Load session\n` +
       `${chalk.cyan('/history')}      - Show command history\n` +
       `${chalk.cyan('/paste')}        - Paste large text\n` +
-      `${chalk.cyan('/reset')}        - Reset session\n` +
+      `${chalk.cyan('/reset')}        - Alias for /new\n` +
       `${chalk.cyan('/help')}         - Show this help\n` +
       `${chalk.cyan('/exit')}         - Exit\n\n` +
       `${chalk.bold('Aliases')}\n\n` +
-      `${chalk.cyan('q')}=exit ${chalk.cyan('c')}=chat ${chalk.cyan('a')}=agent ${chalk.cyan('m')}=model ${chalk.cyan('s')}=stats ${chalk.cyan('h')}=help\n\n` +
+      `${chalk.cyan('q')}=exit ${chalk.cyan('c')}=chat ${chalk.cyan('a')}=agent ${chalk.cyan('n')}=new ${chalk.cyan('m')}=model ${chalk.cyan('s')}=stats ${chalk.cyan('h')}=help\n\n` +
       `${chalk.bold('Shortcuts')}\n\n` +
       `${chalk.cyan('! <cmd>')}       - Run shell command\n` +
       `${chalk.cyan('plain text')}    - Run as agentic task`,
@@ -1289,7 +1465,7 @@ ${g.title('╚══════════════════════
       `${chalk.bold('Session Cost')}\n\n` +
       `${chalk.cyan('Session Duration:')} ${sessionMinutes} minutes\n` +
       `${chalk.cyan('Total Requests:')} ${clientStats.requestCount}\n` +
-      `${chalk.cyan('Total Cost:')} $${clientStats.estimatedTotalCost}\n` +
+      `${chalk.cyan('Total Cost:')} $${clientStats.totalCost}\n` +
       `${chalk.cyan('Budget Used:')} $${clientStats.budgetUsed} / $${clientStats.budgetLimit}\n` +
       `${chalk.cyan('Budget Remaining:')} $${clientStats.budgetRemaining}\n` +
       `${chalk.cyan('Avg Duration:')} ${clientStats.avgDuration}\n` +
@@ -1306,15 +1482,33 @@ ${g.title('╚══════════════════════
     const { confirm } = await inquirer.prompt([{
       type: 'confirm',
       name: 'confirm',
-      message: 'Reset session? This will clear all conversation history.',
+      message: 'Reset session? This will start a brand-new session and clear the current conversation/task state.',
       default: false,
     }]);
     
     if (confirm) {
-      this.session.agent.clear();
-      this.session.agent.client.clearHistory();
+      const currentModel = this.session?.agent?.model || this.session?.model;
+      const saveDir = this.session?.saveDir;
+      const taskDir = this.session?.taskManager?.taskDir;
+      const openAgentDir = this.session?.workspaceManager?.openAgentDir;
+
+      await this.session?.taskManager?.reset();
+      this.createSession({
+        modelId: currentModel,
+        activeWorkspace: null,
+        saveDir,
+        taskDir,
+        openAgentDir,
+      });
+
       this.taskCount = 0;
-      console.log(chalk.green('✓ Session reset'));
+      this.history = [];
+      this.sessionStartTime = Date.now();
+      this.totalCost = 0;
+      this.totalTokens = 0;
+      this.currentTask = null;
+      this.taskStartTime = null;
+      console.log(chalk.green(`✓ Started new session ${chalk.cyan(this.session.sessionId)}`));
     }
   }
 

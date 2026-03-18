@@ -83,6 +83,14 @@ export class Agent {
       throw new Error('Model must be specified when creating an Agent. Use the ModelBrowser to select a model.');
     }
     this.messages = [];
+    this.cachedEstimatedTokens = 0;
+    this.contextStats = {
+      estimatedTokens: 0,
+      compactions: 0,
+      lastPromptTokens: 0,
+      lastCompletionTokens: 0,
+      lastTotalTokens: 0,
+    };
     this.maxIterations = normalizeOptionalLimit(options.maxIterations, CONFIG.AGENT_MAX_ITERATIONS);
     this.maxRuntimeMs = normalizeOptionalLimit(options.maxRuntimeMs, CONFIG.AGENT_MAX_RUNTIME_MS);
     this.maxToolCalls = normalizeOptionalLimit(options.maxToolCalls, CONFIG.AGENT_MAX_TOOL_CALLS);
@@ -95,6 +103,7 @@ export class Agent {
     this.onIterationStart = options.onIterationStart || null;
     this.onIterationEnd = options.onIterationEnd || null;
     this.onError = options.onError || null;
+    this.onStatus = options.onStatus || null;
     this.iterationCount = 0;
     this.totalTokensUsed = 0;
     this.totalCost = 0;
@@ -134,7 +143,7 @@ export class Agent {
     
     // Initialize with system prompt
     if (this.systemPrompt) {
-      this.messages.push({ role: 'system', content: this.systemPrompt });
+      this.pushMessage({ role: 'system', content: this.systemPrompt });
     }
   }
 
@@ -243,6 +252,158 @@ When you have completed the task, provide a clear summary of what was done.`;
     }
   }
 
+  hasExternalRenderer() {
+    return Boolean(
+      this.onToolStart ||
+      this.onToolEnd ||
+      this.onResponse ||
+      this.onIterationStart ||
+      this.onIterationEnd ||
+      this.onStatus
+    );
+  }
+
+  shouldEmitVerboseLogs() {
+    return this.verbose && !this.hasExternalRenderer();
+  }
+
+  emitStatus(type, message) {
+    if (!this.onStatus) {
+      return false;
+    }
+
+    this.onStatus({ type, message });
+    return true;
+  }
+
+  estimateMessageTokens(message = {}) {
+    let total = 0;
+
+    if (message.content) {
+      const content = typeof message.content === 'string'
+        ? message.content
+        : JSON.stringify(message.content);
+      const isCode = /[{}\[\]()=><]/.test(content);
+      total += isCode ? Math.ceil(content.length / 3) : Math.ceil(content.length / 4);
+    }
+
+    if (message.tool_calls) {
+      total += Math.ceil(JSON.stringify(message.tool_calls).length / 3);
+    }
+
+    return total;
+  }
+
+  recalculateEstimatedTokens() {
+    this.cachedEstimatedTokens = this.messages.reduce(
+      (sum, message) => sum + this.estimateMessageTokens(message),
+      0
+    );
+    this.contextStats.estimatedTokens = this.cachedEstimatedTokens;
+    return this.cachedEstimatedTokens;
+  }
+
+  setMessages(messages = []) {
+    this.messages = Array.isArray(messages) ? messages : [];
+    this.recalculateEstimatedTokens();
+  }
+
+  pushMessage(message) {
+    this.messages.push(message);
+    this.cachedEstimatedTokens += this.estimateMessageTokens(message);
+    this.contextStats.estimatedTokens = this.cachedEstimatedTokens;
+    return message;
+  }
+
+  setSystemPrompt(systemPrompt) {
+    this.systemPrompt = systemPrompt || '';
+    const systemMessageIndex = this.messages.findIndex(message => message.role === 'system');
+
+    if (systemMessageIndex >= 0) {
+      this.messages[systemMessageIndex].content = this.systemPrompt;
+      this.recalculateEstimatedTokens();
+      return;
+    }
+
+    if (this.systemPrompt) {
+      this.setMessages([{ role: 'system', content: this.systemPrompt }, ...this.messages]);
+    }
+  }
+
+  setMaxContextTokens(maxContextTokens) {
+    if (Number.isFinite(maxContextTokens) && maxContextTokens > 0) {
+      this.maxContextTokens = maxContextTokens;
+    }
+
+    return this.maxContextTokens;
+  }
+
+  updateUsageStats(usage) {
+    if (!usage) {
+      return;
+    }
+
+    this.totalTokensUsed += usage.total_tokens || 0;
+    this.contextStats.lastPromptTokens = usage.prompt_tokens || 0;
+    this.contextStats.lastCompletionTokens = usage.completion_tokens || 0;
+    this.contextStats.lastTotalTokens = usage.total_tokens || 0;
+  }
+
+  getContextStats(maxTokens = this.maxContextTokens) {
+    const usedTokens = this.estimateTokens();
+    const safeMax = Number.isFinite(maxTokens) && maxTokens > 0
+      ? maxTokens
+      : CONFIG.MAX_CONTEXT_TOKENS;
+    const percent = safeMax > 0
+      ? Math.min(100, Math.round((usedTokens / safeMax) * 100))
+      : 0;
+
+    return {
+      usedTokens,
+      maxTokens: safeMax,
+      percent,
+      compactThreshold: this.compactThreshold,
+      compactions: this.contextStats.compactions,
+      lastPromptTokens: this.contextStats.lastPromptTokens,
+      lastCompletionTokens: this.contextStats.lastCompletionTokens,
+      lastTotalTokens: this.contextStats.lastTotalTokens,
+    };
+  }
+
+  truncateText(text, maxLength = 160) {
+    if (!text || text.length <= maxLength) {
+      return text;
+    }
+
+    return `${text.substring(0, maxLength - 3).trimEnd()}...`;
+  }
+
+  buildCompactionSummary(olderMessages = []) {
+    const priorUserMessages = olderMessages
+      .filter(message => message.role === 'user' && message.content)
+      .slice(-3);
+    const recentHistory = this.history.slice(-6);
+    const lines = ['[Context compacted to preserve headroom.]'];
+
+    if (priorUserMessages.length > 0) {
+      lines.push('Recent user intents:');
+      for (const message of priorUserMessages) {
+        const normalized = String(message.content).replace(/\s+/g, ' ').trim();
+        lines.push(`- ${this.truncateText(normalized, 160)}`);
+      }
+    }
+
+    if (recentHistory.length > 0) {
+      lines.push('Recent tool work:');
+      for (const entry of recentHistory) {
+        const tools = entry.toolCalls.join(', ') || 'no tools';
+        lines.push(`- Iteration ${entry.iteration}: ${tools}`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
   formatRecentHistory(history, limit = 10) {
     if (!history || history.length === 0) {
       return '- No tool work was recorded.';
@@ -286,7 +447,7 @@ When you have completed the task, provide a clear summary of what was done.`;
     this.abortController = new AbortController();
     
     // Add user message
-    this.messages.push({ role: 'user', content: userInput });
+    this.pushMessage({ role: 'user', content: userInput });
     
     let finalResponse = null;
     const runHistory = [];
@@ -320,7 +481,7 @@ When you have completed the task, provide a clear summary of what was done.`;
         
         const iterationStart = Date.now();
         
-        if (this.verbose) {
+        if (this.shouldEmitVerboseLogs()) {
           console.log(chalk.dim(`\n── ${this.formatIterationLabel()} ──`));
         }
         
@@ -344,7 +505,7 @@ When you have completed the task, provide a clear summary of what was done.`;
         if (toolCalls.length === 0) {
           // No tool calls - this is the final response
           finalResponse = response.content;
-          this.messages.push({ role: 'assistant', content: response.content });
+          this.pushMessage({ role: 'assistant', content: response.content });
           this.stopReason = 'completed';
           
           if (this.onResponse) {
@@ -358,7 +519,7 @@ When you have completed the task, provide a clear summary of what was done.`;
         const toolResults = await this.executeToolCallsEnhanced(toolCalls);
         
         // Add assistant message with tool calls
-        this.messages.push({
+        this.pushMessage({
           role: 'assistant',
           content: response.content || null,
           tool_calls: toolCalls.map(tc => ({
@@ -381,12 +542,13 @@ When you have completed the task, provide a clear summary of what was done.`;
             content = content.substring(0, this.maxToolResultChars) + 
               '\n\n... [truncated - original was ' + original.length + ' chars]';
             
-            if (this.verbose) {
-              console.log(chalk.yellow(`   ⚠️ Tool result truncated (${original.length} → ${content.length} chars)`));
+            const truncationMessage = `Tool result truncated (${original.length} -> ${content.length} chars)`;
+            if (!this.emitStatus('truncate', truncationMessage) && this.shouldEmitVerboseLogs()) {
+              console.log(chalk.yellow(`   ⚠️ ${truncationMessage}`));
             }
           }
           
-          this.messages.push({
+          this.pushMessage({
             role: 'tool',
             tool_call_id: result.toolCallId,
             content,
@@ -474,9 +636,7 @@ When you have completed the task, provide a clear summary of what was done.`;
       );
       
       // Track usage
-      if (result.usage) {
-        this.totalTokensUsed += result.usage.total_tokens || 0;
-      }
+      this.updateUsageStats(result.usage);
       
       return result;
     } catch (error) {
@@ -487,7 +647,10 @@ When you have completed the task, provide a clear summary of what was done.`;
       
       if (isJsonError && retryCount < maxRetries) {
         this.performanceMetrics.totalRetries++;
-        console.log(chalk.yellow(`   ⚠️ Retrying with shorter response (attempt ${retryCount + 1}/${maxRetries})`));
+        const retryMessage = `Retrying with shorter response (attempt ${retryCount + 1}/${maxRetries})`;
+        if (!this.emitStatus('retry', retryMessage) && this.shouldEmitVerboseLogs()) {
+          console.log(chalk.yellow(`   ⚠️ ${retryMessage}`));
+        }
         
         // Compact context before retry
         await this.maybeCompactContext();
@@ -575,7 +738,7 @@ When you have completed the task, provide a clear summary of what was done.`;
     const args = toolCall.arguments;
     this.performanceMetrics.totalToolCalls++;
     
-    if (this.verbose) {
+    if (this.shouldEmitVerboseLogs()) {
       // Compact tool output - avoid clashing with subagent UI
       const argPreview = args?.path || args?.command?.substring(0, 40) || args?.query?.substring(0, 40) || '';
       console.log(chalk.yellow(`  🔧 ${toolName}`) + (argPreview ? chalk.dim(` ${argPreview}`) : ''));
@@ -592,7 +755,7 @@ When you have completed the task, provide a clear summary of what was done.`;
       try {
         const result = await this.tools.execute(toolName, args);
         
-        if (this.verbose) {
+        if (this.shouldEmitVerboseLogs()) {
           if (result.success !== false) {
             console.log(chalk.green(`     ✓`));
           } else {
@@ -616,14 +779,17 @@ When you have completed the task, provide a clear summary of what was done.`;
         this.performanceMetrics.totalRetries++;
         
         if (attempt < this.maxRetries) {
-          console.log(chalk.yellow(`   ⚠️ Retry ${attempt + 1}/${this.maxRetries} for ${toolName}`));
+          const retryMessage = `Retry ${attempt + 1}/${this.maxRetries} for ${toolName}`;
+          if (!this.emitStatus('retry', retryMessage) && this.shouldEmitVerboseLogs()) {
+            console.log(chalk.yellow(`   ⚠️ ${retryMessage}`));
+          }
           await this.sleep(this.retryDelay * Math.pow(this.retryBackoff, attempt));
         }
       }
     }
     
     // All retries failed
-    if (this.verbose) {
+    if (this.shouldEmitVerboseLogs()) {
       console.log(chalk.red(`   ✗ Failed after ${this.maxRetries} retries: ${lastError.message}`));
     }
     
@@ -643,7 +809,7 @@ When you have completed the task, provide a clear summary of what was done.`;
    * Run a streaming version of the agent
    */
   async *runStream(userInput) {
-    this.messages.push({ role: 'user', content: userInput });
+    this.pushMessage({ role: 'user', content: userInput });
     this.iterationCount = 0;
     this.stopReason = null;
     this.lastToolCallSignature = null;
@@ -691,15 +857,13 @@ When you have completed the task, provide a clear summary of what was done.`;
         } else if (chunk.type === 'tool_calls') {
           toolCalls = chunk.toolCalls;
         } else if (chunk.type === 'done') {
-          if (chunk.usage) {
-            this.totalTokensUsed += chunk.usage.total_tokens || 0;
-          }
+          this.updateUsageStats(chunk.usage);
         }
       }
       
       if (toolCalls.length === 0) {
         // Final response
-        this.messages.push({ role: 'assistant', content: fullContent });
+        this.pushMessage({ role: 'assistant', content: fullContent });
         this.stopReason = 'completed';
         yield { type: 'done', content: fullContent };
         return;
@@ -711,7 +875,7 @@ When you have completed the task, provide a clear summary of what was done.`;
       const results = await this.executeToolCallsEnhanced(toolCalls);
       
       // Add messages
-      this.messages.push({
+      this.pushMessage({
         role: 'assistant',
         content: fullContent || null,
         tool_calls: toolCalls.map(tc => ({
@@ -725,7 +889,7 @@ When you have completed the task, provide a clear summary of what was done.`;
       });
       
       for (const result of results) {
-        this.messages.push({
+        this.pushMessage({
           role: 'tool',
           tool_call_id: result.toolCallId,
           content: JSON.stringify(result.result),
@@ -752,57 +916,54 @@ When you have completed the task, provide a clear summary of what was done.`;
    * Estimate token count (improved estimation)
    */
   estimateTokens() {
-    let total = 0;
-    for (const msg of this.messages) {
-      if (msg.content) {
-        // More accurate estimation: ~4 chars per token for English, ~3 for code
-        const isCode = /[{}\[\]()=><]/.test(msg.content);
-        total += isCode ? Math.ceil(msg.content.length / 3) : Math.ceil(msg.content.length / 4);
-      }
-      if (msg.tool_calls) total += JSON.stringify(msg.tool_calls).length / 3;
+    if (!Number.isFinite(this.cachedEstimatedTokens)) {
+      this.recalculateEstimatedTokens();
     }
-    return Math.ceil(total);
+
+    return Math.ceil(this.cachedEstimatedTokens);
   }
 
   /**
    * Compact context when approaching limit
    */
   async maybeCompactContext() {
-    const estimatedTokens = this.estimateTokens();
+    const { usedTokens: estimatedTokens, maxTokens } = this.getContextStats();
     
-    if (estimatedTokens < this.maxContextTokens * this.compactThreshold) {
+    if (estimatedTokens < maxTokens * this.compactThreshold) {
       return; // Still have room
     }
     
-    if (this.verbose) {
-      console.log(chalk.yellow(`   ⚠️ Context compaction triggered (~${estimatedTokens} tokens)`));
+    const triggerMessage = `Context compaction triggered (~${estimatedTokens} tokens)`;
+    if (!this.emitStatus('compaction', triggerMessage) && this.shouldEmitVerboseLogs()) {
+      console.log(chalk.yellow(`   ⚠️ ${triggerMessage}`));
     }
     
-    // Keep system prompt + first user message + last N messages
+    // Keep the current system prompt and the most recent exchange window.
     const systemMsg = this.messages.find(m => m.role === 'system');
-    const userMsgs = this.messages.filter(m => m.role === 'user');
-    const firstUser = userMsgs[0];
-    
     // Keep last 10 messages (5 tool call rounds)
     const recentMessages = this.messages.slice(-20);
+    const olderMessages = this.messages
+      .slice(0, Math.max(0, this.messages.length - recentMessages.length))
+      .filter(message => message.role !== 'system');
     
     // Rebuild messages
     const newMessages = [];
     if (systemMsg) newMessages.push(systemMsg);
-    if (firstUser && !recentMessages.includes(firstUser)) {
-      newMessages.push(firstUser);
+    if (olderMessages.length > 0) {
       newMessages.push({
         role: 'assistant',
-        content: '[Context was compacted. Previous tool calls and results were summarized.]',
+        content: this.buildCompactionSummary(olderMessages),
       });
     }
-    newMessages.push(...recentMessages);
+    newMessages.push(...recentMessages.filter(message => message.role !== 'system'));
     
-    this.messages = newMessages;
+    this.setMessages(newMessages);
+    this.contextStats.compactions++;
     
     const newTokens = this.estimateTokens();
-    if (this.verbose) {
-      console.log(chalk.green(`   ✓ Context compacted: ~${estimatedTokens} → ~${newTokens} tokens`));
+    const compactedMessage = `Context compacted: ~${estimatedTokens} -> ~${newTokens} tokens`;
+    if (!this.emitStatus('compaction', compactedMessage) && this.shouldEmitVerboseLogs()) {
+      console.log(chalk.green(`   ✓ ${compactedMessage}`));
     }
   }
 
@@ -810,18 +971,15 @@ When you have completed the task, provide a clear summary of what was done.`;
    * Chat without tools (simple conversation)
    */
   async chat(message, options = {}) {
-    this.messages.push({ role: 'user', content: message });
+    this.pushMessage({ role: 'user', content: message });
     
     const result = await this.client.chat(this.messages, {
       model: options.model || this.model,
       temperature: options.temperature || 0.7,
     });
     
-    this.messages.push({ role: 'assistant', content: result.content });
-    
-    if (result.usage) {
-      this.totalTokensUsed += result.usage.total_tokens || 0;
-    }
+    this.pushMessage({ role: 'assistant', content: result.content });
+    this.updateUsageStats(result.usage);
     
     return result;
   }
@@ -830,6 +988,7 @@ When you have completed the task, provide a clear summary of what was done.`;
    * Get comprehensive session statistics
    */
   getStats() {
+    const contextStats = this.getContextStats();
     return {
       iterations: this.iterationCount,
       totalMessages: this.messages.length,
@@ -839,8 +998,9 @@ When you have completed the task, provide a clear summary of what was done.`;
       state: this.state,
       stopReason: this.stopReason,
       performance: this.performanceMetrics,
-      estimatedTokens: this.estimateTokens(),
-      contextUsage: `${Math.round((this.estimateTokens() / this.maxContextTokens) * 100)}%`,
+      estimatedTokens: contextStats.usedTokens,
+      contextUsage: `${contextStats.percent}%`,
+      contextCompactions: contextStats.compactions,
     };
   }
 
@@ -848,9 +1008,9 @@ When you have completed the task, provide a clear summary of what was done.`;
    * Clear conversation history
    */
   clear() {
-    this.messages = [];
+    this.setMessages([]);
     if (this.systemPrompt) {
-      this.messages.push({ role: 'system', content: this.systemPrompt });
+      this.pushMessage({ role: 'system', content: this.systemPrompt });
     }
     this.history = [];
     this.iterationCount = 0;
@@ -867,6 +1027,10 @@ When you have completed the task, provide a clear summary of what was done.`;
       avgIterationTime: 0,
       totalExecutionTime: 0,
     };
+    this.contextStats.compactions = 0;
+    this.contextStats.lastPromptTokens = 0;
+    this.contextStats.lastCompletionTokens = 0;
+    this.contextStats.lastTotalTokens = 0;
   }
 
   /**
@@ -892,11 +1056,16 @@ When you have completed the task, provide a clear summary of what was done.`;
    */
   import(data) {
     this.model = data.model || this.model;
-    this.messages = data.messages || [];
+    this.systemPrompt = data.systemPrompt || this.systemPrompt;
+    this.setMessages(data.messages || []);
     this.history = data.history || [];
     this.performanceMetrics = data.performance || this.performanceMetrics;
     this.state = data.state || 'idle';
     this.stopReason = data.stopReason || null;
+    this.contextStats.compactions = data.stats?.contextCompactions || 0;
+    this.contextStats.lastPromptTokens = 0;
+    this.contextStats.lastCompletionTokens = 0;
+    this.contextStats.lastTotalTokens = 0;
     return this;
   }
   

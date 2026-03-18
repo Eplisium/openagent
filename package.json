@@ -12,6 +12,7 @@
     "cli": "node src/cli.js",
     "demo": "node examples/demo.js",
     "test": "node tests/test-suite.js",
+    "test:regressions": "node tests/cli-regressions.js",
     "streaming": "node examples/streaming-demo.js",
     "tools": "node examples/tool-calling-demo.js",
     "vision": "node examples/vision-demo.js",

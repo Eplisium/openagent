@@ -26,6 +26,8 @@ export class ModelBrowser {
     this.recents = [];
     this.loaded = false;
     this.ownsClient = false;
+    this.lastLoadSource = 'uninitialized';
+    this.refreshPromise = null;
   }
 
   /**
@@ -54,12 +56,16 @@ export class ModelBrowser {
    * Load models from API or cache
    */
   async loadModels() {
+    let cachedModels = [];
+
     // Check cache first
     try {
       if (await fs.pathExists(CACHE_FILE)) {
         const cache = await fs.readJson(CACHE_FILE);
+        cachedModels = Array.isArray(cache.models) ? cache.models : [];
         if (Date.now() - cache.timestamp < CACHE_TTL) {
-          this.models = cache.models;
+          this.models = cachedModels;
+          this.lastLoadSource = 'cache';
           return;
         }
       }
@@ -67,43 +73,60 @@ export class ModelBrowser {
       // Cache read failed, fetch fresh
     }
 
-    // Fetch from API
+    if (cachedModels.length > 0) {
+      this.models = cachedModels;
+      this.lastLoadSource = 'stale-cache';
+      this.refreshPromise = this.refreshModels().catch((error) => {
+        console.log(chalk.yellow(`⚠ Failed to refresh models, using cache: ${error.message}`));
+        this.lastLoadSource = 'stale-cache';
+        return this.models;
+      });
+      return;
+    }
+
+    // Fetch from API when no usable cache exists
     try {
-      const client = await this.getClient();
-      const rawModels = await client.getModels();
-      
-      this.models = rawModels.map(m => ({
-        id: m.id,
-        name: m.name || m.id,
-        provider: this.extractProvider(m.id, m.name),
-        contextLength: m.context_length || m.top_provider?.context_length || 0,
-        maxOutput: m.top_provider?.max_completion_tokens || 4096,
-        inputPrice: parseFloat(m.pricing?.prompt || 0) * 1000000, // per million tokens
-        outputPrice: parseFloat(m.pricing?.completion || 0) * 1000000,
-        modality: m.architecture?.modality || 'text->text',
-        inputModalities: m.architecture?.input_modalities || ['text'],
-        supportsTools: (m.supported_parameters || []).includes('tools'),
-        supportsVision: (m.architecture?.input_modalities || []).includes('image'),
-        created: m.created,
-      }));
-
-      // Sort by provider then name
-      this.models.sort((a, b) => {
-        const providerCompare = a.provider.localeCompare(b.provider);
-        if (providerCompare !== 0) return providerCompare;
-        return a.name.localeCompare(b.name);
-      });
-
-      // Cache it
-      await fs.writeJson(CACHE_FILE, {
-        timestamp: Date.now(),
-        models: this.models,
-      });
-
+      await this.refreshModels();
     } catch (error) {
       console.log(chalk.yellow(`⚠ Failed to fetch models: ${error.message}`));
+      this.lastLoadSource = 'empty';
       this.models = [];
     }
+  }
+
+  async refreshModels() {
+    const client = await this.getClient();
+    const rawModels = await client.getModels();
+    
+    this.models = rawModels.map(m => ({
+      id: m.id,
+      name: m.name || m.id,
+      provider: this.extractProvider(m.id, m.name),
+      contextLength: m.context_length || m.top_provider?.context_length || 0,
+      maxOutput: m.top_provider?.max_completion_tokens || 4096,
+      inputPrice: parseFloat(m.pricing?.prompt || 0) * 1000000, // per million tokens
+      outputPrice: parseFloat(m.pricing?.completion || 0) * 1000000,
+      modality: m.architecture?.modality || 'text->text',
+      inputModalities: m.architecture?.input_modalities || ['text'],
+      supportsTools: (m.supported_parameters || []).includes('tools'),
+      supportsVision: (m.architecture?.input_modalities || []).includes('image'),
+      created: m.created,
+    }));
+
+    // Sort by provider then name
+    this.models.sort((a, b) => {
+      const providerCompare = a.provider.localeCompare(b.provider);
+      if (providerCompare !== 0) return providerCompare;
+      return a.name.localeCompare(b.name);
+    });
+
+    await fs.writeJson(CACHE_FILE, {
+      timestamp: Date.now(),
+      models: this.models,
+    });
+
+    this.lastLoadSource = 'api';
+    return this.models;
   }
 
   /**
@@ -258,6 +281,16 @@ export class ModelBrowser {
     const recentModels = this.recents
       .map(id => this.models.find(m => m.id === id))
       .filter(Boolean);
+
+    if (recentModels.length !== this.recents.length) {
+      this.recents = recentModels.map(model => model.id);
+      await fs.writeJson(RECENTS_FILE, this.recents);
+    }
+
+    if (recentModels.length === 0) {
+      console.log(chalk.gray('\nNo recent models are available in the current catalog.'));
+      return null;
+    }
 
     return await this.pickFromList(recentModels, currentModel, '🕐 Recent');
   }
@@ -539,6 +572,14 @@ export class ModelBrowser {
    */
   async addRecent(modelId) {
     this.recents = [modelId, ...this.recents.filter(id => id !== modelId)].slice(0, 20);
+    await fs.writeJson(RECENTS_FILE, this.recents);
+  }
+
+  /**
+   * Remove model from recents
+   */
+  async removeRecent(modelId) {
+    this.recents = this.recents.filter(id => id !== modelId);
     await fs.writeJson(RECENTS_FILE, this.recents);
   }
 
