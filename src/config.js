@@ -22,6 +22,29 @@ const __dirname = dirname(__filename);
 // Load environment variables
 dotenv.config({ path: join(__dirname, '../.env') });
 
+function parsePositiveInt(value, fallback) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseOptionalLimit(value, fallback = null) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized || ['0', 'none', 'null', 'unlimited', 'infinity', 'inf', 'auto'].includes(normalized)) {
+    return null;
+  }
+
+  const parsed = parseInt(normalized, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 /**
  * ⚙️ Default Configuration
  * All model settings are now dynamic from OpenRouter API
@@ -76,10 +99,17 @@ export const CONFIG = {
   // Context Management
   MAX_CONTEXT_TOKENS: parseInt(process.env.MAX_CONTEXT_TOKENS) || 800000,
   COMPACT_THRESHOLD: parseFloat(process.env.COMPACT_THRESHOLD) || 0.7,
+  AGENT_MAX_ITERATIONS: parseOptionalLimit(process.env.AGENT_MAX_ITERATIONS, null),
+  AGENT_MAX_RUNTIME_MS: parseOptionalLimit(process.env.AGENT_MAX_RUNTIME_MS, null),
+  AGENT_MAX_TOOL_CALLS: parseOptionalLimit(process.env.AGENT_MAX_TOOL_CALLS, null),
+  AGENT_MAX_STALL_ITERATIONS: parsePositiveInt(process.env.AGENT_MAX_STALL_ITERATIONS, 8),
   
   // Tool Settings
   TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 300000,
   MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS) || 15000,
+
+  // Workspace Settings
+  OPENAGENT_HOME: process.env.OPENAGENT_HOME || null,
   
   // Performance
   MIN_REQUEST_INTERVAL_MS: parseInt(process.env.MIN_REQUEST_INTERVAL_MS) || 100,

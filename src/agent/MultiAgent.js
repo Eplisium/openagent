@@ -4,11 +4,12 @@
  */
 
 import { Agent } from './Agent.js';
+import path from 'path';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
-import { fileTools } from '../tools/fileTools.js';
-import { shellTools } from '../tools/shellTools.js';
+import { createFileTools } from '../tools/fileTools.js';
+import { createShellTools } from '../tools/shellTools.js';
 import { webTools } from '../tools/webTools.js';
-import { gitTools } from '../tools/gitTools.js';
+import { createGitTools } from '../tools/gitTools.js';
 import chalk from 'chalk';
 
 /**
@@ -72,6 +73,8 @@ Suggest fixes for failing tests.`,
 export class MultiAgent {
   constructor(options = {}) {
     this.options = options;
+    this.workingDir = path.resolve(options.workingDir || process.cwd());
+    this.workspaceDir = options.workspaceDir ? path.resolve(options.workspaceDir) : null;
     this.agents = new Map();
     this.sharedMemory = new Map();
     this.executionLog = [];
@@ -80,10 +83,19 @@ export class MultiAgent {
     // Shared tool registry
     this.sharedTools = new ToolRegistry();
     this.sharedTools.registerAll([
-      ...fileTools,
-      ...shellTools,
+      ...createFileTools({
+        baseDir: this.workingDir,
+        getWorkspaceDir: () => this.workspaceDir,
+      }),
+      ...createShellTools({
+        baseDir: this.workingDir,
+        getWorkspaceDir: () => this.workspaceDir,
+      }),
       ...webTools,
-      ...gitTools,
+      ...createGitTools({
+        baseDir: this.workingDir,
+        getWorkspaceDir: () => this.workspaceDir,
+      }),
     ]);
   }
 
@@ -101,12 +113,20 @@ export class MultiAgent {
       throw new Error('Model must be specified. Pass model in options or customOptions.');
     }
     
+    const enhancedPrompt = `${customOptions.systemPrompt || roleConfig.systemPrompt}
+
+## Environment
+- Working directory: ${this.workingDir}
+- Task workspace: ${this.workspaceDir || 'not set'}
+- Relative paths resolve from the working directory
+- Use workspace: for notes, generated artifacts, and scratch files`;
+
     const agent = new Agent({
       tools: this.sharedTools,
       model,
-      systemPrompt: customOptions.systemPrompt || roleConfig.systemPrompt,
+      systemPrompt: enhancedPrompt,
       verbose: customOptions.verbose !== false,
-      maxIterations: customOptions.maxIterations || 15,
+      maxIterations: customOptions.maxIterations ?? this.options.maxIterations ?? 15,
       ...this.options,
       ...customOptions,
     });

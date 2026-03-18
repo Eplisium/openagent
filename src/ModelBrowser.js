@@ -16,7 +16,7 @@ const CACHE_FILE = path.join(__dirname, '../.model-cache.json');
 const FAVORITES_FILE = path.join(__dirname, '../.model-favorites.json');
 const RECENTS_FILE = path.join(__dirname, '../.model-recents.json');
 
-const CACHE_TTL = 1000 * 60 * 60; // 1 hour
+const CACHE_TTL = parseInt(process.env.MODEL_CACHE_TTL_MS) || 1000 * 60 * 15; // 15 minutes (configurable)
 
 export class ModelBrowser {
   constructor(client = null) {
@@ -173,6 +173,12 @@ export class ModelBrowser {
       choices: [
         { name: '⭐ Favorites', value: 'favorites' },
         { name: '🕐 Recently Used', value: 'recents' },
+        new inquirer.Separator(),
+        { name: '🆕 Recently Released', value: 'newest' },
+        { name: '💰 Cheapest', value: 'cheapest' },
+        { name: '📏 Largest Context', value: 'largest_context' },
+        { name: '🛠️ Best for Tools', value: 'tools' },
+        new inquirer.Separator(),
         { name: '🏢 Company', value: 'provider' },
         { name: '🔍 Search', value: 'search' },
         { name: '📋 All Models', value: 'all' },
@@ -197,6 +203,22 @@ export class ModelBrowser {
 
     if (sortMode === 'provider') {
       return await this.pickByProvider(currentModel);
+    }
+
+    if (sortMode === 'newest') {
+      return await this.pickNewest(currentModel);
+    }
+
+    if (sortMode === 'cheapest') {
+      return await this.pickCheapest(currentModel);
+    }
+
+    if (sortMode === 'largest_context') {
+      return await this.pickLargestContext(currentModel);
+    }
+
+    if (sortMode === 'tools') {
+      return await this.pickToolsOnly(currentModel);
     }
 
     // All models
@@ -263,6 +285,78 @@ export class ModelBrowser {
   }
 
   /**
+   * Pick newest (recently released) models
+   */
+  async pickNewest(currentModel) {
+    const sorted = [...this.models]
+      .filter(m => m.created) // Only models with creation date
+      .sort((a, b) => b.created - a.created) // Newest first
+      .slice(0, 50); // Top 50 newest
+
+    if (sorted.length === 0) {
+      console.log(chalk.gray('\nNo models with release dates found.'));
+      return null;
+    }
+
+    return await this.pickFromList(sorted, currentModel, '🆕 Recently Released');
+  }
+
+  /**
+   * Pick cheapest models by input price
+   */
+  async pickCheapest(currentModel) {
+    const sorted = [...this.models]
+      .filter(m => m.inputPrice >= 0) // Include free models
+      .sort((a, b) => a.inputPrice - b.inputPrice) // Cheapest first
+      .slice(0, 50); // Top 50 cheapest
+
+    if (sorted.length === 0) {
+      console.log(chalk.gray('\nNo models found.'));
+      return null;
+    }
+
+    return await this.pickFromList(sorted, currentModel, '💰 Cheapest (by input price)');
+  }
+
+  /**
+   * Pick models by largest context window
+   */
+  async pickLargestContext(currentModel) {
+    const sorted = [...this.models]
+      .filter(m => m.contextLength > 0)
+      .sort((a, b) => b.contextLength - a.contextLength) // Largest first
+      .slice(0, 50); // Top 50 largest
+
+    if (sorted.length === 0) {
+      console.log(chalk.gray('\nNo models found.'));
+      return null;
+    }
+
+    return await this.pickFromList(sorted, currentModel, '📏 Largest Context Window');
+  }
+
+  /**
+   * Pick models that support tool calling
+   */
+  async pickToolsOnly(currentModel) {
+    const toolsModels = this.models
+      .filter(m => m.supportsTools)
+      .sort((a, b) => {
+        // Sort by provider then name
+        const providerCompare = a.provider.localeCompare(b.provider);
+        if (providerCompare !== 0) return providerCompare;
+        return a.name.localeCompare(b.name);
+      });
+
+    if (toolsModels.length === 0) {
+      console.log(chalk.gray('\nNo tool-supporting models found.'));
+      return null;
+    }
+
+    return await this.pickFromList(toolsModels, currentModel, '🛠️ Tool-Enabled Models');
+  }
+
+  /**
    * Pick by provider
    */
   async pickByProvider(currentModel) {
@@ -289,18 +383,37 @@ export class ModelBrowser {
   /**
    * Pick from a list of models
    */
+  /**
+   * Format a relative release date
+   */
+  formatReleaseDate(timestamp) {
+    if (!timestamp) return '';
+    const now = Date.now();
+    const created = timestamp * 1000;
+    const diffMs = now - created;
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    
+    if (diffDays < 1) return 'today';
+    if (diffDays < 7) return `${diffDays}d ago`;
+    if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`;
+    if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo ago`;
+    return `${Math.floor(diffDays / 365)}y ago`;
+  }
+
   async pickFromList(models, currentModel, title = 'Models') {
     const choices = models.map(m => {
       const isFav = this.favorites.includes(m.id);
       const isCurrent = m.id === currentModel;
       const contextStr = this.formatContext(m.contextLength);
       const priceStr = m.inputPrice < 0.01 ? 'free' : `$${m.inputPrice.toFixed(2)}/M`;
+      const releaseStr = m.created ? this.formatReleaseDate(m.created) : '';
       
       let prefix = '';
       if (isFav) prefix += '⭐';
       if (isCurrent) prefix += ' ✓';
       
-      const label = `${prefix} ${chalk.cyan(m.id)} ${chalk.gray(`[${contextStr} · ${priceStr}]`)}`;
+      const releasePart = releaseStr ? ` · ${releaseStr}` : '';
+      const label = `${prefix} ${chalk.cyan(m.id)} ${chalk.gray(`[${contextStr} · ${priceStr}${releasePart}]`)}`;
       
       return {
         name: label,
@@ -363,6 +476,9 @@ export class ModelBrowser {
    */
   printModelDetails(model) {
     const isFav = this.favorites.includes(model.id);
+    const releaseDate = model.created
+      ? new Date(model.created * 1000).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+      : 'Unknown';
     
     console.log(boxen(
       `${chalk.bold(model.name)}\n\n` +
@@ -374,6 +490,7 @@ export class ModelBrowser {
       `${chalk.gray('Output Price:')} $${model.outputPrice.toFixed(2)}/M tokens\n` +
       `${chalk.gray('Vision:')} ${model.supportsVision ? '✓' : '✗'}\n` +
       `${chalk.gray('Tools:')} ${model.supportsTools ? '✓' : '✗'}\n` +
+      `${chalk.gray('Released:')} ${releaseDate}\n` +
       `${chalk.gray('Favorite:')} ${isFav ? '⭐' : '✗'}`,
       { padding: 1, borderStyle: 'round', borderColor: 'cyan' }
     ));
@@ -395,13 +512,24 @@ export class ModelBrowser {
   getProviderEmoji(provider) {
     const emojis = {
       'Openai': '🟢',
+      'OpenAI': '🟢',
       'Anthropic': '🟠',
       'Google': '🔵',
       'Meta': '🟣',
       'Mistral': '🔴',
       'Deepseek': '🟡',
+      'DeepSeek': '🟡',
       'Z-ai': '⚪',
       'Qwen': '🟤',
+      'Amazon': '📦',
+      'Cohere': '🔷',
+      'X-ai': '⬛',
+      'xAI': '⬛',
+      'Microsoft': '🪟',
+      'Nvidia': '💚',
+      'Alibaba': '🔶',
+      'ByteDance': '🎵',
+      'ByteDance Seed': '🎵',
     };
     return emojis[provider] || '🔘';
   }

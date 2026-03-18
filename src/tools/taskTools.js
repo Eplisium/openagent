@@ -39,7 +39,8 @@ After initialization, use create_feature_list to plan the task.`,
             success: true,
             message: 'Task environment initialized',
             taskDir: taskManager.taskDir,
-            status: result.status,
+            workspaceDir: taskManager.workspaceDir,
+            status: result.status || result.progress?.status || 'initialized',
           };
         } catch (error) {
           return {

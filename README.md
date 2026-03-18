@@ -60,6 +60,22 @@ node src/cli.js
 
 ## 🎯 Features
 
+### 🤖 Model Browser
+
+OpenAgent dynamically fetches **all available models** directly from the OpenRouter API — no hardcoded lists:
+
+- **⭐ Favorites** — Pin your most-used models
+- **🕐 Recently Used** — Quick access to your last 20 models
+- **🆕 Recently Released** — Browse by newest models first
+- **💰 Cheapest** — Sort by input price (includes free models)
+- **📏 Largest Context** — Sort by context window size
+- **🛠️ Best for Tools** — Filter to tool-calling capable models
+- **🏢 Company** — Browse by provider (OpenAI, Anthropic, Google, etc.)
+- **🔍 Search** — Fuzzy search across model IDs and names
+- **📋 All Models** — Full list with relative release dates
+
+Model cache refreshes every 15 minutes (configurable via `MODEL_CACHE_TTL_MS`).
+
 ### 🤖 Agentic Loop
 
 OpenAgent uses the same **gather → act → verify → repeat** loop as Claude Code:

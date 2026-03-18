@@ -17,11 +17,12 @@
  */
 
 import { Agent } from './Agent.js';
+import path from 'path';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
-import { fileTools } from '../tools/fileTools.js';
-import { shellTools } from '../tools/shellTools.js';
+import { createFileTools } from '../tools/fileTools.js';
+import { createShellTools } from '../tools/shellTools.js';
 import { webTools } from '../tools/webTools.js';
-import { gitTools } from '../tools/gitTools.js';
+import { createGitTools } from '../tools/gitTools.js';
 import chalk from 'chalk';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -338,7 +339,13 @@ class SubagentTask {
 export class SubagentManager {
   constructor(options = {}) {
     this.parentAgent = options.parentAgent || null;
-    this.workingDir = options.workingDir || process.cwd();
+    this.workingDir = path.resolve(options.workingDir || process.cwd());
+    this.workspaceDir = options.workspaceDir ? path.resolve(options.workspaceDir) : null;
+    const externalWorkspaceGetter = typeof options.getWorkspaceDir === 'function' ? options.getWorkspaceDir : null;
+    this.getWorkspaceDir = () => {
+      const workspaceDir = externalWorkspaceGetter ? externalWorkspaceGetter() : this.workspaceDir;
+      return workspaceDir ? path.resolve(workspaceDir) : null;
+    };
     this.maxConcurrent = options.maxConcurrent || 3;
     this.verbose = options.verbose !== false;
     
@@ -351,10 +358,19 @@ export class SubagentManager {
     // Shared tools - created once, reused by all subagents
     this.sharedTools = new ToolRegistry();
     this.sharedTools.registerAll([
-      ...fileTools,
-      ...shellTools,
+      ...createFileTools({
+        baseDir: this.workingDir,
+        getWorkspaceDir: () => this.getWorkspaceDir(),
+      }),
+      ...createShellTools({
+        baseDir: this.workingDir,
+        getWorkspaceDir: () => this.getWorkspaceDir(),
+      }),
       ...webTools,
-      ...gitTools,
+      ...createGitTools({
+        baseDir: this.workingDir,
+        getWorkspaceDir: () => this.getWorkspaceDir(),
+      }),
     ]);
     
     // Callbacks
@@ -377,6 +393,10 @@ export class SubagentManager {
     this.aborted = false;
     this.abortController = null;
     this.activeSubagents = new Set();
+  }
+
+  setWorkspaceDir(workspaceDir) {
+    this.workspaceDir = workspaceDir ? path.resolve(workspaceDir) : null;
   }
   
   /**
@@ -425,6 +445,7 @@ export class SubagentManager {
     const spec = SUBAGENT_SPECIALIZATIONS[specialization] || SUBAGENT_SPECIALIZATIONS.general;
     
     const model = customOptions.model || this.parentAgent?.model;
+    const workspaceDir = this.getWorkspaceDir();
     
     if (!model) {
       throw new Error('Model must be specified for subagent. Pass model in customOptions or set parentAgent.');
@@ -435,6 +456,9 @@ export class SubagentManager {
 
 ## Environment
 - Working directory: ${this.workingDir}
+- Task workspace: ${workspaceDir || 'not set'}
+- Relative paths resolve from the working directory
+- Use workspace: for notes, artifacts, temporary scripts, and scratch files
 - Platform: ${process.platform}
 - You are a SUBAGENT - complete your specific task and return results. Do not ask questions.
 - Be thorough but focused. Do exactly what was asked, nothing more.`;
@@ -444,10 +468,10 @@ export class SubagentManager {
       model: model,
       systemPrompt: enhancedPrompt,
       verbose: false, // Subagents are quiet - we handle their output
-      maxIterations: customOptions.maxIterations || spec.maxIterations,
+      maxIterations: customOptions.maxIterations ?? spec.maxIterations,
       streaming: false, // Subagents never stream
       workingDir: this.workingDir,
-      maxToolResultChars: customOptions.maxToolResultChars || 20000,
+      maxToolResultChars: customOptions.maxToolResultChars ?? 20000,
       // Use longer timeouts for subagents to handle complex tasks
       maxRetries: 2,
       retryDelay: 2000,

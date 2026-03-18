@@ -78,13 +78,21 @@ export async function createAgent(options = {}) {
   
   const { Agent } = await import('./agent/Agent.js');
   const { ToolRegistry } = await import('./tools/ToolRegistry.js');
-  const { fileTools } = await import('./tools/fileTools.js');
-  const { shellTools } = await import('./tools/shellTools.js');
+  const { createFileTools } = await import('./tools/fileTools.js');
+  const { createShellTools } = await import('./tools/shellTools.js');
   const { webTools } = await import('./tools/webTools.js');
-  const { gitTools } = await import('./tools/gitTools.js');
+  const { createGitTools } = await import('./tools/gitTools.js');
+
+  const workingDir = options.workingDir || process.cwd();
+  const workspaceDir = options.workspaceDir || null;
   
   const registry = new ToolRegistry();
-  registry.registerAll([...fileTools, ...shellTools, ...webTools, ...gitTools]);
+  registry.registerAll([
+    ...createFileTools({ baseDir: workingDir, workspaceDir }),
+    ...createShellTools({ baseDir: workingDir, workspaceDir }),
+    ...webTools,
+    ...createGitTools({ baseDir: workingDir, workspaceDir }),
+  ]);
   
   return new Agent({
     tools: registry,

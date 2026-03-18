@@ -382,6 +382,7 @@ export class CLI {
     }
 
     console.log(chalk.gray(`  Model: ${chalk.cyan(this.session.agent.model)}`));
+    console.log(chalk.gray(`  OpenAgent home: ${this.session.workspaceManager.openAgentDir}`));
 
     // Start auto-save timer
     if (this.autoSave) {
@@ -745,6 +746,14 @@ export class CLI {
     if (result.performance && result.performance.totalRetries > 0) {
       console.log(chalk.dim(`  └─ ${result.performance.totalRetries} retries`));
     }
+
+    if (result.stopReason && result.stopReason !== 'completed') {
+      console.log(chalk.dim(`  └─ stop reason: ${result.stopReason}`));
+    }
+
+    if (result.workspace?.workspaceDir) {
+      console.log(chalk.dim(`  └─ workspace: ${result.workspace.workspaceDir}`));
+    }
   }
 
   async printGoodbye() {
@@ -1065,7 +1074,9 @@ ${g.title('╚══════════════════════
   }
 
   async loadSession() {
-    const sessions = await AgentSession.listSessions();
+    const sessions = await AgentSession.listSessions(undefined, {
+      workingDir: this.workingDir,
+    });
 
     if (sessions.length === 0) {
       console.log(chalk.gray('No saved sessions'));
@@ -1084,7 +1095,9 @@ ${g.title('╚══════════════════════
       choices,
     }]);
 
-    const loaded = await AgentSession.load(sessionId);
+    const loaded = await AgentSession.load(sessionId, undefined, {
+      workingDir: this.workingDir,
+    });
     if (loaded) {
       this.session = loaded;
       console.log(chalk.green(`✓ Loaded ${sessionId}`));

@@ -5,14 +5,16 @@
 
 import fs from 'fs-extra';
 import path from 'path';
+import { CONFIG } from '../config.js';
 import { Agent } from './Agent.js';
 import { SubagentManager } from './SubagentManager.js';
 import { TaskManager } from './TaskManager.js';
+import { WorkspaceManager } from './WorkspaceManager.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
-import { fileTools } from '../tools/fileTools.js';
-import { shellTools } from '../tools/shellTools.js';
+import { createFileTools } from '../tools/fileTools.js';
+import { createShellTools } from '../tools/shellTools.js';
 import { webTools } from '../tools/webTools.js';
-import { gitTools } from '../tools/gitTools.js';
+import { createGitTools } from '../tools/gitTools.js';
 import { createSubagentTools } from '../tools/subagentTools.js';
 import { createTaskTools } from '../tools/taskTools.js';
 import chalk from 'chalk';
@@ -20,28 +22,45 @@ import chalk from 'chalk';
 export class AgentSession {
   constructor(options = {}) {
     this.sessionId = options.sessionId || `session_${Date.now()}`;
-    this.workingDir = options.workingDir || process.cwd();
-    this.saveDir = options.saveDir || path.join(process.cwd(), '.sessions');
+    this.workingDir = path.resolve(options.workingDir || process.cwd());
+    this.workspaceManager = options.workspaceManager || new WorkspaceManager({
+      workingDir: this.workingDir,
+      openAgentDir: options.openAgentDir || CONFIG.OPENAGENT_HOME,
+      saveDir: options.saveDir,
+      taskDir: options.taskDir,
+      verbose: options.verbose !== false,
+    });
+    this.saveDir = options.saveDir || this.workspaceManager.sessionsDir;
     this.model = options.model;
+    this.activeWorkspace = options.activeWorkspace || null;
     this.checkpoints = [];
     this.metadata = {
       created: new Date().toISOString(),
       updated: new Date().toISOString(),
       workingDir: this.workingDir,
+      activeWorkspaceDir: this.activeWorkspace?.workspaceDir || null,
+    };
+
+    const toolPathOptions = {
+      getBaseDir: () => this.workingDir,
+      getWorkspaceDir: () => this.activeWorkspace?.workspaceDir || null,
     };
     
     // Create tool registry with all tools
     this.toolRegistry = new ToolRegistry();
     this.toolRegistry.registerAll([
-      ...fileTools,
-      ...shellTools,
+      ...createFileTools(toolPathOptions),
+      ...createShellTools(toolPathOptions),
       ...webTools,
-      ...gitTools,
+      ...createGitTools(toolPathOptions),
     ]);
     
     // Initialize task manager for long-running tasks
     this.taskManager = new TaskManager({
       workingDir: this.workingDir,
+      taskDir: options.taskDir || this.workspaceManager.taskStateDir,
+      workspaceDir: this.activeWorkspace?.workspaceDir || null,
+      openAgentDir: this.workspaceManager.openAgentDir,
       verbose: options.verbose !== false,
     });
     
@@ -52,6 +71,9 @@ export class AgentSession {
     // Initialize subagent manager
     this.subagentManager = new SubagentManager({
       workingDir: this.workingDir,
+      workspaceDir: this.activeWorkspace?.workspaceDir || null,
+      getWorkspaceDir: () => this.activeWorkspace?.workspaceDir || null,
+      openAgentDir: this.workspaceManager.openAgentDir,
       verbose: options.verbose !== false,
       maxConcurrent: options.maxSubagents || 3,
       parentAgent: null, // Will be set after agent creation
@@ -63,13 +85,12 @@ export class AgentSession {
     
     // Create agent
     this.agent = new Agent({
+      ...options,
       tools: this.toolRegistry,
       model: this.model,
       verbose: options.verbose !== false,
       streaming: options.streaming !== false,
-      maxIterations: options.maxIterations || 30,
       systemPrompt: options.systemPrompt || this.buildSystemPrompt(),
-      ...options,
     });
     
     // Set parent agent reference for subagents to inherit model
@@ -80,8 +101,18 @@ export class AgentSession {
    * Build system prompt with working directory context and enhanced delegation guidance
    */
   buildSystemPrompt() {
+    const workspaceDir = this.activeWorkspace?.workspaceDir || path.join(this.workspaceManager.workspacesDir, '<created-on-run>');
+
     return `You are an advanced AI coding assistant running in a terminal session.
-Your working directory is: ${this.workingDir}
+Your project working directory is: ${this.workingDir}
+Your task workspace is: ${workspaceDir}
+
+## Pathing Rules
+- Relative file paths resolve from the project working directory
+- Use \`workspace:\` to read or write scratch files inside the task workspace
+- Use \`project:\` or \`workdir:\` if you want to be explicit about project files
+- Prefer the task workspace for notes, research dumps, generated assets, temporary scripts, downloads, and other artifacts that should not clutter the repo root
+- The task workspace already contains \`workspace:notes\`, \`workspace:artifacts\`, and \`workspace:scratch\`
 
 ## Your Capabilities
 You have access to powerful tools for:
@@ -165,13 +196,49 @@ You can delegate tasks to specialized subagents that work independently:
 
 ## Important
 - You are running on Windows. Use Windows-style paths (C:\\Users\\...)
-- Paths with spaces must be quoted`;
+- Paths with spaces must be quoted
+- OpenAgent keeps its internal state under .openagent; avoid writing scratch files into the repo root unless the user explicitly asks for that`;
+  }
+
+  refreshSystemPrompt() {
+    const systemPrompt = this.buildSystemPrompt();
+    this.agent.systemPrompt = systemPrompt;
+
+    const systemMessageIndex = this.agent.messages.findIndex(message => message.role === 'system');
+    if (systemMessageIndex >= 0) {
+      this.agent.messages[systemMessageIndex].content = systemPrompt;
+    } else {
+      this.agent.messages.unshift({ role: 'system', content: systemPrompt });
+    }
+  }
+
+  async prepareTaskWorkspace(task) {
+    const progress = await this.taskManager.loadProgress();
+    const shouldReuseWorkspace = progress.status !== 'not_initialized' &&
+      progress.status !== 'complete' &&
+      progress.workspaceDir;
+
+    const workspace = await this.workspaceManager.prepareTaskWorkspace(task, {
+      workspaceDir: shouldReuseWorkspace ? progress.workspaceDir : undefined,
+      task,
+      sessionId: this.sessionId,
+      source: 'agent-session',
+    });
+
+    this.activeWorkspace = workspace;
+    this.metadata.activeWorkspaceDir = workspace.workspaceDir;
+    this.taskManager.setWorkspaceDir(workspace.workspaceDir);
+    this.subagentManager.setWorkspaceDir(workspace.workspaceDir);
+    this.refreshSystemPrompt();
+
+    return workspace;
   }
 
   /**
    * Run a task
    */
   async run(task) {
+    await this.prepareTaskWorkspace(task);
     this.metadata.updated = new Date().toISOString();
     this.metadata.lastTask = task.substring(0, 100);
     
@@ -180,6 +247,7 @@ You can delegate tasks to specialized subagents that work independently:
     
     try {
       const result = await this.agent.run(task);
+      result.workspace = this.activeWorkspace;
       
       // Create checkpoint after successful run
       this.createCheckpoint('after_task');
@@ -195,6 +263,7 @@ You can delegate tasks to specialized subagents that work independently:
    * Run with streaming
    */
   async *runStream(task) {
+    await this.prepareTaskWorkspace(task);
     this.metadata.updated = new Date().toISOString();
     
     for await (const chunk of this.agent.runStream(task)) {
@@ -257,7 +326,7 @@ You can delegate tasks to specialized subagents that work independently:
    * Save session to disk
    */
   async save() {
-    await fs.ensureDir(this.saveDir);
+    await this.workspaceManager.ensureBaseDirs();
     
     const sessionData = {
       sessionId: this.sessionId,
@@ -265,6 +334,8 @@ You can delegate tasks to specialized subagents that work independently:
       agent: this.agent.export(),
       checkpoints: this.checkpoints,
       workingDir: this.workingDir,
+      activeWorkspace: this.activeWorkspace,
+      workspaceManager: this.workspaceManager.getInfo(),
     };
     
     const filePath = path.join(this.saveDir, `${this.sessionId}.json`);
@@ -276,8 +347,11 @@ You can delegate tasks to specialized subagents that work independently:
   /**
    * Load session from disk
    */
-  static async load(sessionId, saveDir) {
-    const dir = saveDir || path.join(process.cwd(), '.sessions');
+  static async load(sessionId, saveDir, options = {}) {
+    const dir = saveDir || new WorkspaceManager({
+      workingDir: options.workingDir || process.cwd(),
+      openAgentDir: options.openAgentDir || CONFIG.OPENAGENT_HOME,
+    }).sessionsDir;
     const filePath = path.join(dir, `${sessionId}.json`);
     
     if (!await fs.pathExists(filePath)) {
@@ -290,11 +364,18 @@ You can delegate tasks to specialized subagents that work independently:
       sessionId: data.sessionId,
       workingDir: data.workingDir,
       saveDir: dir,
+      model: data.agent?.model,
+      openAgentDir: options.openAgentDir || data.workspaceManager?.openAgentDir || CONFIG.OPENAGENT_HOME,
+      activeWorkspace: data.activeWorkspace || null,
     });
     
     session.agent.import(data.agent);
     session.checkpoints = data.checkpoints || [];
-    session.metadata = data.metadata;
+    session.metadata = data.metadata || session.metadata;
+    session.activeWorkspace = data.activeWorkspace || null;
+    session.taskManager.setWorkspaceDir(session.activeWorkspace?.workspaceDir || null);
+    session.subagentManager.setWorkspaceDir(session.activeWorkspace?.workspaceDir || null);
+    session.refreshSystemPrompt();
     
     return session;
   }
@@ -302,8 +383,11 @@ You can delegate tasks to specialized subagents that work independently:
   /**
    * List saved sessions
    */
-  static async listSessions(saveDir) {
-    const dir = saveDir || path.join(process.cwd(), '.sessions');
+  static async listSessions(saveDir, options = {}) {
+    const dir = saveDir || new WorkspaceManager({
+      workingDir: options.workingDir || process.cwd(),
+      openAgentDir: options.openAgentDir || CONFIG.OPENAGENT_HOME,
+    }).sessionsDir;
     
     if (!await fs.pathExists(dir)) {
       return [];
@@ -322,6 +406,7 @@ You can delegate tasks to specialized subagents that work independently:
             updated: data.metadata?.updated,
             lastTask: data.metadata?.lastTask,
             iterations: data.agent?.stats?.iterations || 0,
+            activeWorkspaceDir: data.metadata?.activeWorkspaceDir || data.activeWorkspace?.workspaceDir || null,
           });
         } catch {}
       }
@@ -337,12 +422,14 @@ You can delegate tasks to specialized subagents that work independently:
     return {
       sessionId: this.sessionId,
       workingDir: this.workingDir,
+      workspace: this.activeWorkspace,
       model: this.agent.model,
       stats: this.agent.getStats(),
       checkpoints: this.checkpoints.length,
       metadata: this.metadata,
       tools: this.toolRegistry.list().map(t => t.name),
       subagentStats: this.subagentManager.getStats(),
+      paths: this.workspaceManager.getInfo(),
     };
   }
 }

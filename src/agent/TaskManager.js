@@ -13,6 +13,7 @@
 import fs from 'fs-extra';
 import path from 'path';
 import chalk from 'chalk';
+import { getDefaultTaskStateDir } from '../paths.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // 📊 Feature Status
@@ -33,13 +34,20 @@ const FeatureStatus = {
 
 export class TaskManager {
   constructor(options = {}) {
-    this.workingDir = options.workingDir || process.cwd();
-    this.taskDir = options.taskDir || path.join(this.workingDir, '.openagent-tasks');
+    this.workingDir = path.resolve(options.workingDir || process.cwd());
+    this.taskDir = path.resolve(options.taskDir || getDefaultTaskStateDir(this.workingDir, {
+      openAgentDir: options.openAgentDir,
+    }));
     this.progressFile = path.join(this.taskDir, 'progress.json');
     this.featuresFile = path.join(this.taskDir, 'features.json');
     this.planFile = path.join(this.taskDir, 'plan.md');
     this.sessionLog = [];
     this.verbose = options.verbose !== false;
+    this.workspaceDir = options.workspaceDir ? path.resolve(options.workspaceDir) : null;
+  }
+
+  setWorkspaceDir(workspaceDir) {
+    this.workspaceDir = workspaceDir ? path.resolve(workspaceDir) : null;
   }
 
   /**
@@ -50,10 +58,15 @@ export class TaskManager {
 
     // Check if already initialized
     if (await fs.pathExists(this.featuresFile)) {
+      const state = await this.loadState();
+      if (!state.progress.workspaceDir && this.workspaceDir) {
+        state.progress.workspaceDir = this.workspaceDir;
+        await this.saveProgress(state.progress);
+      }
       if (this.verbose) {
         console.log(chalk.dim('   Task environment already initialized'));
       }
-      return await this.loadState();
+      return state;
     }
 
     // Create initial progress file
@@ -66,6 +79,7 @@ export class TaskManager {
       totalFeatures: 0,
       completedFeatures: 0,
       status: 'initialized',
+      workspaceDir: this.workspaceDir,
     };
 
     await fs.writeJson(this.progressFile, progress, { spaces: 2 });
@@ -306,6 +320,7 @@ export class TaskManager {
       task: progress.task,
       created: progress.created,
       updated: progress.updated,
+      workspaceDir: progress.workspaceDir || this.workspaceDir || null,
       progress: {
         total: features.length,
         completed: statusCounts.passing,
@@ -342,6 +357,9 @@ export class TaskManager {
     report += `**Task**: ${status.task}\n`;
     report += `**Status**: ${status.status}\n`;
     report += `**Progress**: ${status.progress.completed}/${status.progress.total} features (${status.progress.percentage}%)\n\n`;
+    if (status.workspaceDir) {
+      report += `**Workspace**: ${status.workspaceDir}\n\n`;
+    }
 
     report += `### Feature Status\n`;
     report += `- ✅ Passing: ${status.statusCounts.passing}\n`;
@@ -391,7 +409,11 @@ export class TaskManager {
   async loadProgress() {
     try {
       if (await fs.pathExists(this.progressFile)) {
-        return await fs.readJson(this.progressFile);
+        const progress = await fs.readJson(this.progressFile);
+        if (!progress.workspaceDir && this.workspaceDir) {
+          progress.workspaceDir = this.workspaceDir;
+        }
+        return progress;
       }
     } catch (error) {
       // Ignore read errors
@@ -402,6 +424,7 @@ export class TaskManager {
       currentFeature: null,
       totalFeatures: 0,
       completedFeatures: 0,
+      workspaceDir: this.workspaceDir || null,
     };
   }
 
@@ -409,6 +432,9 @@ export class TaskManager {
    * Save progress to disk
    */
   async saveProgress(progress) {
+    if (!progress.workspaceDir && this.workspaceDir) {
+      progress.workspaceDir = this.workspaceDir;
+    }
     await fs.writeJson(this.progressFile, progress, { spaces: 2 });
   }
 

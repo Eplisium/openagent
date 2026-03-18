@@ -6,6 +6,8 @@ node_modules/
 
 # Session files
 .sessions/
+.openagent/
+.openagent-tasks/
 
 # Model cache
 .model-cache.json
@@ -33,3 +35,4 @@ coverage/
 # Build
 dist/
 build/
+docs/

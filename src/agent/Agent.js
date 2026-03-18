@@ -2,7 +2,35 @@
 
 import { OpenRouterClient, AbortError } from '../OpenRouterClient.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
+import { CONFIG } from '../config.js';
 import chalk from 'chalk';
+
+function normalizeOptionalLimit(value, fallback = null) {
+  const candidate = value ?? fallback;
+
+  if (candidate === undefined || candidate === null || candidate === '') {
+    return null;
+  }
+
+  const normalized = String(candidate).trim().toLowerCase();
+  if (!normalized || ['0', 'none', 'null', 'unlimited', 'infinity', 'inf', 'auto'].includes(normalized)) {
+    return null;
+  }
+
+  const parsed = parseInt(normalized, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizePositiveInt(value, fallback) {
+  const candidate = value ?? fallback;
+
+  if (candidate === undefined || candidate === null || candidate === '') {
+    return fallback;
+  }
+
+  const parsed = parseInt(candidate, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 /**
  * Custom error types for better error handling
@@ -55,7 +83,10 @@ export class Agent {
       throw new Error('Model must be specified when creating an Agent. Use the ModelBrowser to select a model.');
     }
     this.messages = [];
-    this.maxIterations = options.maxIterations || 30;
+    this.maxIterations = normalizeOptionalLimit(options.maxIterations, CONFIG.AGENT_MAX_ITERATIONS);
+    this.maxRuntimeMs = normalizeOptionalLimit(options.maxRuntimeMs, CONFIG.AGENT_MAX_RUNTIME_MS);
+    this.maxToolCalls = normalizeOptionalLimit(options.maxToolCalls, CONFIG.AGENT_MAX_TOOL_CALLS);
+    this.maxStallIterations = normalizePositiveInt(options.maxStallIterations, CONFIG.AGENT_MAX_STALL_ITERATIONS);
     this.verbose = options.verbose !== false;
     this.streaming = options.streaming !== false;
     this.onToolStart = options.onToolStart || null;
@@ -68,11 +99,14 @@ export class Agent {
     this.totalTokensUsed = 0;
     this.totalCost = 0;
     this.history = [];
+    this.stopReason = null;
+    this.lastToolCallSignature = null;
+    this.repeatedToolRoundCount = 0;
     
     // Context management settings
-    this.maxContextTokens = options.maxContextTokens || 800000;
-    this.maxToolResultChars = options.maxToolResultChars || 15000;
-    this.compactThreshold = options.compactThreshold || 0.7;
+    this.maxContextTokens = options.maxContextTokens || CONFIG.MAX_CONTEXT_TOKENS;
+    this.maxToolResultChars = options.maxToolResultChars || CONFIG.MAX_TOOL_RESULT_CHARS;
+    this.compactThreshold = options.compactThreshold || CONFIG.COMPACT_THRESHOLD;
     
     // Retry configuration
     this.maxRetries = options.maxRetries || 3;
@@ -170,6 +204,72 @@ When you have completed the task, provide a clear summary of what was done.`;
       throw new AgentAbortError('Agent execution was aborted');
     }
   }
+
+  hasReachedIterationLimit() {
+    return this.maxIterations !== null && this.iterationCount >= this.maxIterations;
+  }
+
+  hasReachedRuntimeLimit(startTime) {
+    return this.maxRuntimeMs !== null && (Date.now() - startTime) >= this.maxRuntimeMs;
+  }
+
+  hasReachedToolCallLimit() {
+    return this.maxToolCalls !== null && this.performanceMetrics.totalToolCalls >= this.maxToolCalls;
+  }
+
+  hasStalled() {
+    return this.repeatedToolRoundCount >= this.maxStallIterations;
+  }
+
+  formatIterationLabel() {
+    return this.maxIterations !== null
+      ? `iteration ${this.iterationCount}/${this.maxIterations}`
+      : `iteration ${this.iterationCount}`;
+  }
+
+  recordToolRound(toolCalls) {
+    const signature = JSON.stringify(
+      toolCalls.map(toolCall => ({
+        name: toolCall.name,
+        arguments: toolCall.arguments,
+      }))
+    );
+
+    if (signature === this.lastToolCallSignature) {
+      this.repeatedToolRoundCount++;
+    } else {
+      this.lastToolCallSignature = signature;
+      this.repeatedToolRoundCount = 1;
+    }
+  }
+
+  formatRecentHistory(history, limit = 10) {
+    if (!history || history.length === 0) {
+      return '- No tool work was recorded.';
+    }
+
+    return history
+      .slice(-limit)
+      .map(entry => `- Iteration ${entry.iteration}: Used tools: ${entry.toolCalls.join(', ') || 'none'}`)
+      .join('\n');
+  }
+
+  buildStopMessage(reason, history, startTime) {
+    switch (reason) {
+      case 'max_iterations':
+        return `I stopped after reaching the configured iteration limit (${this.maxIterations}).\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+      case 'max_runtime':
+        return `I stopped after reaching the configured runtime limit (${Math.round((Date.now() - startTime) / 1000)}s).\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+      case 'max_tool_calls':
+        return `I stopped after reaching the configured tool-call limit (${this.maxToolCalls}).\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+      case 'stalled':
+        return `I stopped because I appeared to be repeating the same tool workflow without making progress.\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+      case 'aborted':
+        return 'Agent execution was aborted.';
+      default:
+        return `I stopped before producing a final answer.\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+    }
+  }
   
   /**
    * Run the agentic loop with enhanced error handling and performance tracking
@@ -180,16 +280,40 @@ When you have completed the task, provide a clear summary of what was done.`;
     this.iterationCount = 0;
     this.lastError = null;
     this.aborted = false;
+    this.stopReason = null;
+    this.lastToolCallSignature = null;
+    this.repeatedToolRoundCount = 0;
     this.abortController = new AbortController();
     
     // Add user message
     this.messages.push({ role: 'user', content: userInput });
     
     let finalResponse = null;
+    const runHistory = [];
     
     try {
-      while (this.iterationCount < this.maxIterations) {
+      while (true) {
         this.checkAborted();
+
+        if (this.hasReachedIterationLimit()) {
+          this.stopReason = 'max_iterations';
+          break;
+        }
+
+        if (this.hasReachedRuntimeLimit(startTime)) {
+          this.stopReason = 'max_runtime';
+          break;
+        }
+
+        if (this.hasReachedToolCallLimit()) {
+          this.stopReason = 'max_tool_calls';
+          break;
+        }
+
+        if (this.hasStalled()) {
+          this.stopReason = 'stalled';
+          break;
+        }
         
         this.iterationCount++;
         this.performanceMetrics.totalIterations++;
@@ -197,7 +321,7 @@ When you have completed the task, provide a clear summary of what was done.`;
         const iterationStart = Date.now();
         
         if (this.verbose) {
-          console.log(chalk.dim(`\n── iteration ${this.iterationCount}/${this.maxIterations} ──`));
+          console.log(chalk.dim(`\n── ${this.formatIterationLabel()} ──`));
         }
         
         if (this.onIterationStart) {
@@ -221,6 +345,7 @@ When you have completed the task, provide a clear summary of what was done.`;
           // No tool calls - this is the final response
           finalResponse = response.content;
           this.messages.push({ role: 'assistant', content: response.content });
+          this.stopReason = 'completed';
           
           if (this.onResponse) {
             this.onResponse(response.content);
@@ -269,13 +394,16 @@ When you have completed the task, provide a clear summary of what was done.`;
         }
         
         // Record in history
-        this.history.push({
+        const iterationRecord = {
           iteration: this.iterationCount,
           response: response.content,
           toolCalls: toolCalls.map(tc => tc.name),
           toolResults: toolResults.map(tr => ({ tool: tr.toolName, success: tr.result.success })),
           duration: Date.now() - iterationStart,
-        });
+        };
+        this.history.push(iterationRecord);
+        runHistory.push(iterationRecord);
+        this.recordToolRound(toolCalls);
         
         // Update performance metrics
         this.performanceMetrics.avgIterationTime = 
@@ -287,9 +415,8 @@ When you have completed the task, provide a clear summary of what was done.`;
         }
       }
       
-      if (!finalResponse && this.iterationCount >= this.maxIterations) {
-        finalResponse = 'I reached the maximum number of iterations. Here\'s what I accomplished so far:\n\n' +
-          this.history.map(h => `- Iteration ${h.iteration}: Used tools: ${h.toolCalls.join(', ')}`).join('\n');
+      if (!finalResponse) {
+        finalResponse = this.buildStopMessage(this.stopReason, runHistory, startTime);
       }
       
       this.state = 'completed';
@@ -298,15 +425,18 @@ When you have completed the task, provide a clear summary of what was done.`;
       return {
         response: finalResponse,
         iterations: this.iterationCount,
-        history: this.history,
+        history: runHistory,
         messages: this.messages,
         stats: this.getStats(),
         performance: this.performanceMetrics,
+        stopReason: this.stopReason,
+        completed: this.stopReason === 'completed',
       };
       
     } catch (error) {
       if (error instanceof AgentAbortError || error instanceof AbortError) {
         this.state = 'aborted';
+        this.stopReason = 'aborted';
       } else {
         this.state = 'error';
       }
@@ -515,8 +645,32 @@ When you have completed the task, provide a clear summary of what was done.`;
   async *runStream(userInput) {
     this.messages.push({ role: 'user', content: userInput });
     this.iterationCount = 0;
+    this.stopReason = null;
+    this.lastToolCallSignature = null;
+    this.repeatedToolRoundCount = 0;
+    const startTime = Date.now();
     
-    while (this.iterationCount < this.maxIterations) {
+    while (true) {
+      if (this.hasReachedIterationLimit()) {
+        this.stopReason = 'max_iterations';
+        break;
+      }
+
+      if (this.hasReachedRuntimeLimit(startTime)) {
+        this.stopReason = 'max_runtime';
+        break;
+      }
+
+      if (this.hasReachedToolCallLimit()) {
+        this.stopReason = 'max_tool_calls';
+        break;
+      }
+
+      if (this.hasStalled()) {
+        this.stopReason = 'stalled';
+        break;
+      }
+
       this.iterationCount++;
       
       yield { type: 'iteration', iteration: this.iterationCount };
@@ -546,6 +700,7 @@ When you have completed the task, provide a clear summary of what was done.`;
       if (toolCalls.length === 0) {
         // Final response
         this.messages.push({ role: 'assistant', content: fullContent });
+        this.stopReason = 'completed';
         yield { type: 'done', content: fullContent };
         return;
       }
@@ -581,9 +736,16 @@ When you have completed the task, provide a clear summary of what was done.`;
         type: 'tools_done',
         results: results.map(r => ({ tool: r.toolName, success: r.result.success })),
       };
+
+      this.recordToolRound(toolCalls);
     }
     
-    yield { type: 'max_iterations', iterations: this.iterationCount };
+    if (this.stopReason === 'max_iterations') {
+      yield { type: 'max_iterations', iterations: this.iterationCount, reason: this.stopReason };
+      return;
+    }
+
+    yield { type: 'stopped', iterations: this.iterationCount, reason: this.stopReason };
   }
 
   /**
@@ -675,6 +837,7 @@ When you have completed the task, provide a clear summary of what was done.`;
       toolExecutions: this.history.reduce((sum, h) => sum + h.toolCalls.length, 0),
       toolsUsed: [...new Set(this.history.flatMap(h => h.toolCalls))],
       state: this.state,
+      stopReason: this.stopReason,
       performance: this.performanceMetrics,
       estimatedTokens: this.estimateTokens(),
       contextUsage: `${Math.round((this.estimateTokens() / this.maxContextTokens) * 100)}%`,
@@ -693,6 +856,9 @@ When you have completed the task, provide a clear summary of what was done.`;
     this.iterationCount = 0;
     this.state = 'idle';
     this.lastError = null;
+    this.stopReason = null;
+    this.lastToolCallSignature = null;
+    this.repeatedToolRoundCount = 0;
     this.performanceMetrics = {
       totalIterations: 0,
       totalToolCalls: 0,
@@ -715,6 +881,7 @@ When you have completed the task, provide a clear summary of what was done.`;
       stats: this.getStats(),
       performance: this.performanceMetrics,
       state: this.state,
+      stopReason: this.stopReason,
       timestamp: new Date().toISOString(),
       version: '4.0',
     };
@@ -729,6 +896,7 @@ When you have completed the task, provide a clear summary of what was done.`;
     this.history = data.history || [];
     this.performanceMetrics = data.performance || this.performanceMetrics;
     this.state = data.state || 'idle';
+    this.stopReason = data.stopReason || null;
     return this;
   }
   
