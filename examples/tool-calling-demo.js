@@ -1,16 +1,17 @@
 /**
  * 🛠️ Tool Calling Demo
  * Advanced function calling with OpenRouter
+ * 
+ * NOTE: Set DEFAULT_MODEL in .env before running this demo
  */
 
 import { OpenRouterClient } from '../src/OpenRouterClient.js';
-import { MODELS } from '../src/config.js';
+import { CONFIG } from '../src/config.js';
 import * as ui from '../src/utils.js';
 
 // Simulated function implementations
 const tools = {
   get_weather: async ({ location, unit = 'celsius' }) => {
-    // Simulated weather data
     const conditions = ['sunny', 'cloudy', 'rainy', 'snowy', 'windy'];
     const temp = Math.floor(Math.random() * 35) - 5;
     const condition = conditions[Math.floor(Math.random() * conditions.length)];
@@ -25,66 +26,30 @@ const tools = {
     };
   },
   
-  search_web: async ({ query, num_results = 5 }) => {
-    // Simulated search results
-    return {
-      query,
-      results: [
-        { title: `Result 1 for "${query}"`, url: 'https://example.com/1', snippet: 'This is a simulated search result...' },
-        { title: `Result 2 for "${query}"`, url: 'https://example.com/2', snippet: 'Another simulated result...' },
-      ],
-      total_results: num_results,
-    };
-  },
-  
   calculate: async ({ expression }) => {
     try {
-      // Safe evaluation (in production, use a proper math parser)
+      // Safe evaluation for demo purposes
       const result = Function('"use strict"; return (' + expression + ')')();
-      return { expression, result, success: true };
-    } catch (e) {
-      return { expression, error: e.message, success: false };
+      return { expression, result };
+    } catch (error) {
+      return { expression, error: error.message };
     }
-  },
-  
-  get_datetime: async ({ timezone = 'UTC' }) => {
-    const now = new Date();
-    return {
-      datetime: now.toISOString(),
-      timezone,
-      formatted: now.toLocaleString('en-US', { timeZone: timezone }),
-    };
-  },
-  
-  send_email: async ({ to, subject, body }) => {
-    // Simulated email sending
-    return {
-      success: true,
-      message_id: `msg_${Date.now()}`,
-      to,
-      subject,
-      sent_at: new Date().toISOString(),
-    };
   },
 };
 
-async function runToolDemo() {
-  ui.clearScreen();
-  ui.printTitle('🛠️ TOOL CALLING DEMO');
-  
-  const client = new OpenRouterClient();
-  
-  // Define available tools
-  const availableTools = [
-    {
+// Tool definitions for the API
+const toolDefinitions = [
+  {
+    type: 'function',
+    function: {
       name: 'get_weather',
-      description: 'Get current weather information for a location',
+      description: 'Get the current weather in a given location',
       parameters: {
         type: 'object',
         properties: {
           location: {
             type: 'string',
-            description: 'City name, e.g., "Tokyo, Japan" or "New York"',
+            description: 'The city and state, e.g. San Francisco, CA',
           },
           unit: {
             type: 'string',
@@ -95,194 +60,107 @@ async function runToolDemo() {
         required: ['location'],
       },
     },
-    {
-      name: 'search_web',
-      description: 'Search the web for information',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: {
-            type: 'string',
-            description: 'Search query',
-          },
-          num_results: {
-            type: 'integer',
-            description: 'Number of results to return (1-10)',
-            minimum: 1,
-            maximum: 10,
-          },
-        },
-        required: ['query'],
-      },
-    },
-    {
+  },
+  {
+    type: 'function',
+    function: {
       name: 'calculate',
-      description: 'Perform mathematical calculations',
+      description: 'Perform a mathematical calculation',
       parameters: {
         type: 'object',
         properties: {
           expression: {
             type: 'string',
-            description: 'Mathematical expression to evaluate, e.g., "2 + 2" or "sqrt(16)"',
+            description: 'Mathematical expression to evaluate, e.g. "2 + 2" or "15 * 243"',
           },
         },
         required: ['expression'],
       },
     },
-    {
-      name: 'get_datetime',
-      description: 'Get current date and time',
-      parameters: {
-        type: 'object',
-        properties: {
-          timezone: {
-            type: 'string',
-            description: 'Timezone, e.g., "America/New_York", "Europe/London", "UTC"',
-          },
-        },
-      },
-    },
-    {
-      name: 'send_email',
-      description: 'Send an email message',
-      parameters: {
-        type: 'object',
-        properties: {
-          to: {
-            type: 'string',
-            description: 'Recipient email address',
-          },
-          subject: {
-            type: 'string',
-            description: 'Email subject',
-          },
-          body: {
-            type: 'string',
-            description: 'Email body content',
-          },
-        },
-        required: ['to', 'subject', 'body'],
-      },
-    },
-  ];
+  },
+];
+
+async function runToolCallingDemo() {
+  ui.clearScreen();
+  ui.printTitle('🛠️ TOOL CALLING DEMO');
   
-  // Demo conversations
-  const demos = [
-    {
-      title: '🌤️ Weather Query',
-      message: "What's the weather like in San Francisco and Tokyo?",
-    },
-    {
-      title: '🧮 Math Problem',
-      message: "Calculate 155 * 23 and then divide by 5. Also, what's 17 squared?",
-    },
-    {
-      title: '🌍 Multi-Tool Query',
-      message: "What's the current time in New York? And what's the weather there?",
-    },
-    {
-      title: '📧 Complex Task',
-      message: "Send an email to john@example.com about the meeting tomorrow at 2pm.",
-    },
-  ];
+  const model = process.env.DEFAULT_MODEL || CONFIG.FALLBACK_MODEL;
+  if (!model) {
+    ui.printError('No model specified. Set DEFAULT_MODEL in .env');
+    process.exit(1);
+  }
   
-  for (const demo of demos) {
-    ui.printBox(demo.title, 'info');
-    ui.printInfo(`User: ${demo.message}\n`);
-    
-    const spinner = ui.createSpinner('AI is thinking...');
-    spinner.start();
-    
-    const result = await client.chatWithTools(
-      demo.message,
-      availableTools,
-      { model: MODELS.GPT_5_4 }
+  ui.printInfo(`Using model: ${model}\n`);
+  
+  const client = new OpenRouterClient();
+  
+  // ========================================
+  // Demo 1: Single Tool Call
+  // ========================================
+  ui.printBox('📍 DEMO 1: Single Tool Call', 'info');
+  
+  let spinner = ui.createSpinner('Requesting weather...');
+  spinner.start();
+  
+  const result1 = await client.chatWithTools(
+    'What is the weather in Tokyo?',
+    toolDefinitions,
+    { model }
+  );
+  
+  spinner.succeed('Response received!');
+  
+  if (result1.toolCalls && result1.toolCalls.length > 0) {
+    ui.printBox(
+      `${ui.colors.secondary('Tool Calls:')}\n${JSON.stringify(result1.toolCalls, null, 2)}`,
+      'default'
     );
     
-    spinner.stop();
-    
-    if (result.content) {
-      ui.printBox(`${ui.colors.secondary('AI Response:')}\n${result.content}`, 'default');
-    }
-    
-    // Execute tool calls
-    if (result.toolCalls.length > 0) {
-      ui.printInfo(`Executing ${result.toolCalls.length} tool call(s)...\n`);
-      
-      for (const toolCall of result.toolCalls) {
-        ui.printToolCall(toolCall);
-        
-        const toolFn = tools[toolCall.name];
-        if (toolFn) {
-          try {
-            const toolResult = await toolFn(toolCall.arguments);
-            ui.printBox(
-              `${ui.colors.success('Tool Result:')}\n${ui.formatJSON(toolResult)}`,
-              'success'
-            );
-            
-            // Optionally continue conversation with tool results
-            // This would be implemented in a full agent loop
-          } catch (error) {
-            ui.printError(`Tool execution failed: ${error.message}`);
-          }
-        } else {
-          ui.printWarning(`Tool "${toolCall.name}" not implemented`);
-        }
+    // Execute the tool calls
+    for (const tc of result1.toolCalls) {
+      if (tools[tc.name]) {
+        const toolResult = await tools[tc.name](tc.arguments);
+        ui.printBox(
+          `${ui.colors.secondary(`Tool Result (${tc.name}):`)}\n${JSON.stringify(toolResult, null, 2)}`,
+          'success'
+        );
       }
     }
-    
-    ui.printDivider();
-    await ui.sleep(1500);
   }
   
-  // Interactive tool demo
-  ui.printBox('💬 Interactive Tool Demo', 'info');
-  ui.printInfo('Available tools: weather, search, calculate, datetime, email');
-  ui.printInfo('Try: "What\'s the weather in Paris?" or "Calculate 123 * 456"');
-  ui.printInfo('Type "exit" to quit\n');
+  ui.printUsageStats(result1.usage, result1.duration);
+  ui.printDivider();
   
-  const readline = await import('readline');
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
+  // ========================================
+  // Demo 2: Multiple Tool Calls
+  // ========================================
+  ui.printBox('📍 DEMO 2: Multiple Tool Calls', 'info');
   
-  const askQuestion = () => {
-    return new Promise((resolve) => {
-      rl.question(ui.colors.primary('You: '), resolve);
-    });
-  };
+  spinner = ui.createSpinner('Requesting multiple operations...');
+  spinner.start();
   
-  while (true) {
-    const message = await askQuestion();
-    
-    if (message.toLowerCase() === 'exit') break;
-    if (!message.trim()) continue;
-    
-    console.log('');
-    const spinner = ui.createSpinner('Processing...');
-    spinner.start();
-    
-    const result = await client.chatWithTools(message, availableTools, {
-      model: MODELS.GPT_5_MINI,
-    });
-    
-    spinner.stop();
-    
-    if (result.content) {
-      console.log(ui.formatMessage('assistant', result.content));
-    }
-    
-    if (result.toolCalls.length > 0) {
-      result.toolCalls.forEach(tc => ui.printToolCall(tc));
-    }
-    
-    console.log('');
+  const result2 = await client.chatWithTools(
+    'What is the weather in New York and London? Also calculate 243 * 15.',
+    toolDefinitions,
+    { model }
+  );
+  
+  spinner.succeed('Response received!');
+  
+  if (result2.toolCalls && result2.toolCalls.length > 0) {
+    ui.printBox(
+      `${ui.colors.secondary('Tool Calls:')}\n${result2.toolCalls.map(tc => `• ${tc.name}(${JSON.stringify(tc.arguments)})`).join('\n')}`,
+      'default'
+    );
   }
   
-  rl.close();
-  ui.printSuccess('Tool calling demo complete!');
+  ui.printUsageStats(result2.usage, result2.duration);
+  ui.printDivider();
+  
+  ui.printBox('✨ Tool Calling Demo Complete!', 'success');
 }
 
-runToolDemo().catch(console.error);
+runToolCallingDemo().catch(error => {
+  console.error('Demo failed:', error);
+  process.exit(1);
+});

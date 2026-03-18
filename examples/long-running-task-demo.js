@@ -202,9 +202,10 @@ async function runLongTaskDemo() {
   }
 
   // Create session with task management
+  // Model must be specified - use ModelBrowser or pass explicitly
   const session = new AgentSession({
     workingDir: process.cwd(),
-    model: 'anthropic/claude-sonnet-4', // Or your preferred model
+    model: process.env.DEFAULT_MODEL, // Set via .env or pass explicitly
     verbose: true,
     maxIterations: 30,
   });

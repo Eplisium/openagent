@@ -141,7 +141,7 @@ import { AgentSession } from './src/index.js';
 
 const session = new AgentSession({
   workingDir: './my-project',
-  model: 'anthropic/claude-sonnet-4',
+  model: 'your-model-id', // e.g., 'anthropic/claude-sonnet-4', 'openai/gpt-4o'
 });
 
 // First session - complex task
@@ -264,7 +264,7 @@ import { Agent, createDefaultRegistry } from './src/index.js';
 const registry = createDefaultRegistry();
 const agent = new Agent({
   tools: registry,
-  model: 'anthropic/claude-sonnet-4',
+  model: 'your-model-id', // Must specify a model
 });
 
 // Run an agentic task
@@ -317,7 +317,7 @@ import { AgentSession } from './src/index.js';
 
 const session = new AgentSession({
   workingDir: '/path/to/project',
-  model: 'anthropic/claude-sonnet-4',
+  model: 'your-model-id', // Must specify a model
 });
 
 // Run with automatic checkpoints

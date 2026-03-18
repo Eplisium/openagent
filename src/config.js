@@ -37,8 +37,8 @@ export const CONFIG = {
     'X-OpenRouter-Title': process.env.SITE_NAME || 'OpenAgent',
   },
   
-  // Fallback model for routing
-  FALLBACK_MODEL: process.env.FALLBACK_MODEL || 'anthropic/claude-sonnet-4',
+  // Fallback model for routing (must be set via env or explicitly)
+  FALLBACK_MODEL: process.env.FALLBACK_MODEL || null,
   
   // Request Settings
   MAX_RETRIES: parseInt(process.env.MAX_RETRIES) || 3,

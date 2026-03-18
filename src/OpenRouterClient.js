@@ -599,9 +599,12 @@ export class OpenRouterClient {
    * 🧠 Reasoning Mode (for o1, o3, etc.)
    */
   async reasoningChat(messages, options = {}) {
+    if (!options.model && !this.defaultModel) {
+      throw new Error('Model must be specified for reasoning chat. Pass model in options or set defaultModel on client.');
+    }
     return this.chat(messages, {
       ...options,
-      model: options.model || 'openai/o1',
+      model: options.model || this.defaultModel,
       reasoning_effort: options.reasoning_effort || 'medium',
     });
   }

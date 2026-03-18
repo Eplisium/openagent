@@ -1,15 +1,27 @@
 /**
  * 🎭 Full Feature Demo
  * Showcases all OpenRouter capabilities
+ * 
+ * NOTE: Set DEFAULT_MODEL in .env before running this demo
  */
 
 import { OpenRouterClient } from '../src/OpenRouterClient.js';
-import { MODELS } from '../src/config.js';
+import { CONFIG } from '../src/config.js';
 import * as ui from '../src/utils.js';
 
 async function runDemo() {
   ui.clearScreen();
   ui.printTitle('🎭 OPENROUTER FULL FEATURE DEMO');
+  
+  // Model must be specified via environment
+  const model = process.env.DEFAULT_MODEL || CONFIG.FALLBACK_MODEL;
+  if (!model) {
+    ui.printError('No model specified. Set DEFAULT_MODEL in .env');
+    ui.printInfo('Example: DEFAULT_MODEL=anthropic/claude-sonnet-4');
+    process.exit(1);
+  }
+  
+  ui.printInfo(`Using model: ${model}\n`);
   
   const client = new OpenRouterClient();
   
@@ -23,7 +35,7 @@ async function runDemo() {
   
   const basicResult = await client.chat(
     'Explain quantum computing in 2 sentences.',
-    { model: MODELS.GPT_5_MINI }
+    { model }
   );
   
   spinner.succeed('Basic chat complete!');
@@ -37,16 +49,15 @@ async function runDemo() {
   ui.printBox('📍 DEMO 2: Multi-turn Conversation', 'info');
   
   const messages = [
-    { role: 'system', content: 'You are a helpful coding assistant.' },
-    { role: 'user', content: 'What is a closure in JavaScript?' },
-    { role: 'assistant', content: 'A closure is a function that has access to variables in its outer scope even after the outer function has returned.' },
-    { role: 'user', content: 'Give me a simple code example.' },
+    { role: 'user', content: 'What is the capital of France?' },
+    { role: 'assistant', content: 'The capital of France is Paris.' },
+    { role: 'user', content: 'What famous tower is located there?' },
   ];
   
   spinner = ui.createSpinner('Continuing conversation...');
   spinner.start();
   
-  const convResult = await client.chat(messages, { model: MODELS.CLAUDE_SONNET_4 });
+  const convResult = await client.chat(messages, { model });
   spinner.succeed('Conversation complete!');
   
   ui.printBox(`${ui.colors.secondary('Response:')}\n${convResult.content}`, 'default');
@@ -54,7 +65,7 @@ async function runDemo() {
   ui.printDivider();
   
   // ========================================
-  // 3. Streaming Response
+  // 3. Streaming
   // ========================================
   ui.printBox('📍 DEMO 3: Streaming Response', 'info');
   
@@ -62,35 +73,31 @@ async function runDemo() {
   
   const stream = client.chatStream(
     'Count from 1 to 5, one number per line.',
-    { model: MODELS.GPT_5_MINI }
+    { model }
   );
   
   let fullResponse = '';
   for await (const chunk of stream) {
     if (chunk.type === 'content') {
-      ui.printStreamingChunk(chunk.content, fullResponse === '');
+      process.stdout.write(chunk.content);
       fullResponse += chunk.content;
-    } else if (chunk.type === 'done') {
-      console.log('\n');
-      if (chunk.usage) {
-        ui.printUsageStats(chunk.usage, 0);
-      }
     }
   }
   
+  console.log('\n');
+  ui.printUsageStats(stream.usage, stream.duration);
   ui.printDivider();
   
   // ========================================
-  // 4. Structured Output (JSON)
+  // 4. Structured Output (JSON Schema)
   // ========================================
-  ui.printBox('📍 DEMO 4: Structured JSON Output', 'info');
+  ui.printBox('📍 DEMO 4: Structured Output (JSON Schema)', 'info');
   
   spinner = ui.createSpinner('Generating structured data...');
   spinner.start();
   
   const schema = {
-    name: 'movie_recommendation',
-    strict: true,
+    name: 'movie_recommendations',
     definition: {
       type: 'object',
       properties: {
@@ -100,15 +107,12 @@ async function runDemo() {
             type: 'object',
             properties: {
               title: { type: 'string' },
-              year: { type: 'integer' },
+              year: { type: 'number' },
               genre: { type: 'string' },
-              rating: { type: 'number', minimum: 0, maximum: 10 },
-              reason: { type: 'string' },
+              rating: { type: 'number' },
             },
-            required: ['title', 'year', 'genre', 'rating', 'reason'],
+            required: ['title', 'year', 'genre', 'rating'],
           },
-          minItems: 3,
-          maxItems: 3,
         },
       },
       required: ['movies'],
@@ -118,16 +122,16 @@ async function runDemo() {
   const structuredResult = await client.structuredOutput(
     'Recommend 3 sci-fi movies from the 2010s with high ratings.',
     schema,
-    { model: MODELS.GPT_5_4 }
+    { model }
   );
   
   spinner.succeed('Structured data generated!');
   
   ui.printBox(
-    `${ui.colors.success('Parsed JSON:')}\n${ui.formatJSON(structuredResult.data)}`,
-    'success'
+    `${ui.colors.secondary('Movies:')}\n${JSON.stringify(structuredResult.data, null, 2)}`,
+    'default'
   );
-  ui.printUsageStats(structuredResult.usage, 0);
+  ui.printUsageStats(structuredResult.usage);
   ui.printDivider();
   
   // ========================================
@@ -135,41 +139,46 @@ async function runDemo() {
   // ========================================
   ui.printBox('📍 DEMO 5: Tool/Function Calling', 'info');
   
-  spinner = ui.createSpinner('Calling tools...');
+  spinner = ui.createSpinner('Sending request with tools...');
   spinner.start();
   
   const tools = [
     {
-      name: 'get_weather',
-      description: 'Get the current weather for a location',
-      parameters: {
-        type: 'object',
-        properties: {
-          location: {
-            type: 'string',
-            description: 'City and state, e.g., San Francisco, CA',
+      type: 'function',
+      function: {
+        name: 'get_weather',
+        description: 'Get the current weather in a given location',
+        parameters: {
+          type: 'object',
+          properties: {
+            location: {
+              type: 'string',
+              description: 'The city and state, e.g. San Francisco, CA',
+            },
+            unit: {
+              type: 'string',
+              enum: ['celsius', 'fahrenheit'],
+            },
           },
-          unit: {
-            type: 'string',
-            enum: ['celsius', 'fahrenheit'],
-            description: 'Temperature unit',
-          },
+          required: ['location'],
         },
-        required: ['location'],
       },
     },
     {
-      name: 'calculate',
-      description: 'Perform a mathematical calculation',
-      parameters: {
-        type: 'object',
-        properties: {
-          expression: {
-            type: 'string',
-            description: 'Mathematical expression to evaluate',
+      type: 'function',
+      function: {
+        name: 'calculate',
+        description: 'Perform a mathematical calculation',
+        parameters: {
+          type: 'object',
+          properties: {
+            expression: {
+              type: 'string',
+              description: 'Mathematical expression to evaluate',
+            },
           },
+          required: ['expression'],
         },
-        required: ['expression'],
       },
     },
   ];
@@ -177,50 +186,29 @@ async function runDemo() {
   const toolResult = await client.chatWithTools(
     'What\'s the weather in Tokyo and what is 243 * 15?',
     tools,
-    { model: MODELS.GPT_5_4 }
+    { model }
   );
   
   spinner.succeed('Tool calls received!');
   
   if (toolResult.content) {
-    ui.printBox(`${ui.colors.secondary('Assistant says:')}\n${toolResult.content}`, 'default');
+    ui.printBox(`${ui.colors.secondary('Content:')}\n${toolResult.content}`, 'default');
   }
   
-  if (toolResult.toolCalls.length > 0) {
-    toolResult.toolCalls.forEach(tc => ui.printToolCall(tc));
-  }
-  
-  ui.printDivider();
-  
-  // ========================================
-  // 6. Model Comparison
-  // ========================================
-  ui.printBox('📍 DEMO 6: Model Comparison', 'info');
-  
-  const prompt = 'Write a haiku about artificial intelligence.';
-  const modelsToCompare = [MODELS.GPT_5_MINI, MODELS.CLAUDE_HAIKU_3, MODELS.GEMINI_2_FLASH];
-  
-  ui.printInfo(`Prompt: "${prompt}"\n`);
-  
-  for (const model of modelsToCompare) {
-    spinner = ui.createSpinner(`Testing ${model}...`);
-    spinner.start();
-    
-    const result = await client.chat(prompt, { model });
-    spinner.succeed(`${model} responded!`);
-    
+  if (toolResult.toolCalls && toolResult.toolCalls.length > 0) {
     ui.printBox(
-      `${ui.colors.primary.bold(model)}\n${result.content}`,
-      'info'
+      `${ui.colors.secondary('Tool Calls:')}\n${JSON.stringify(toolResult.toolCalls, null, 2)}`,
+      'default'
     );
   }
   
+  ui.printUsageStats(toolResult.usage, toolResult.duration);
   ui.printDivider();
   
   // ========================================
-  // 7. Get Available Models
+  // 6. Get Available Models
   // ========================================
-  ui.printBox('📍 DEMO 7: Fetch Available Models', 'info');
+  ui.printBox('📍 DEMO 6: Fetch Available Models', 'info');
   
   spinner = ui.createSpinner('Fetching models...');
   spinner.start();
@@ -228,34 +216,23 @@ async function runDemo() {
   const models = await client.getModels();
   spinner.succeed(`Found ${models.length} models!`);
   
-  // Show top 5 models
-  ui.printInfo('Top 5 Models:');
-  models.slice(0, 5).forEach((model, i) => {
-    console.log(`  ${i + 1}. ${ui.colors.primary(model.id)} - ${model.name}`);
-  });
-  
+  // Show first 10 models
+  const sampleModels = models.slice(0, 10);
+  ui.printBox(
+    `${ui.colors.secondary('Sample Models:')}\n${sampleModels.map(m => `• ${m.id}`).join('\n')}\n\n... and ${models.length - 10} more`,
+    'default'
+  );
   ui.printDivider();
   
   // ========================================
-  // Final Stats
+  // Summary
   // ========================================
-  ui.printBox('📊 SESSION STATISTICS', 'success');
-  
-  const stats = client.getStats();
-  const table = ui.createTable(['Metric', 'Value'], [
-    ['Total Requests', stats.requestCount.toString()],
-    ['Estimated Cost', ui.formatCost(parseFloat(stats.estimatedTotalCost))],
-    ['Success Rate', '100%'],
-  ]);
-  
-  console.log(table.toString());
-  
-  ui.printTitle('✨ DEMO COMPLETE!');
-  ui.printSuccess('All features demonstrated successfully!');
+  ui.printBox('✨ Demo Complete!', 'success');
+  ui.printInfo('All features demonstrated successfully!');
+  ui.printInfo(`Total cost: $${client.totalCost.toFixed(4)}`);
 }
 
 runDemo().catch(error => {
-  ui.printError(`Demo failed: ${error.message}`);
-  console.error(error);
+  console.error('Demo failed:', error);
   process.exit(1);
 });

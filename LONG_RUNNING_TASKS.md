@@ -138,7 +138,7 @@ import { AgentSession } from './src/index.js';
 // Create session with task management
 const session = new AgentSession({
   workingDir: './my-project',
-  model: 'anthropic/claude-sonnet-4',
+  model: 'your-model-id', // Must specify a model (e.g., 'anthropic/claude-sonnet-4')
   verbose: true,
 });
 

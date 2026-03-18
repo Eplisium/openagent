@@ -49,9 +49,10 @@ const subagentTools = createSubagentTools(subagentManager);
 toolRegistry.registerAll(subagentTools);
 
 // Create main agent with subagent capabilities
+// Model must be specified - set DEFAULT_MODEL in .env
 const mainAgent = new Agent({
   tools: toolRegistry,
-  model: 'anthropic/claude-sonnet-4',
+  model: process.env.DEFAULT_MODEL,
   verbose: true,
   maxIterations: 20,
   systemPrompt: `You are a helpful AI assistant with the ability to delegate tasks to specialized subagents.
