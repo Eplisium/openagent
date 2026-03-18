@@ -340,7 +340,17 @@ You can delegate tasks to specialized subagents that work independently:
     
     const filePath = path.join(this.saveDir, `${this.sessionId}.json`);
     await fs.writeJson(filePath, sessionData, { spaces: 2 });
-    
+
+    // Write lightweight meta file for fast startup recovery checks
+    const metaPath = path.join(this.saveDir, '_meta.json');
+    const meta = {
+      lastSave: new Date().toISOString(),
+      sessionId: this.sessionId,
+      model: this.model,
+      workingDir: this.workingDir,
+    };
+    await fs.writeJson(metaPath, meta, { spaces: 0 });
+
     return { success: true, path: filePath };
   }
 
@@ -381,6 +391,58 @@ You can delegate tasks to specialized subagents that work independently:
   }
 
   /**
+   * Read the lightweight _meta.json file for fast session recovery checks.
+   * Returns null if no meta file exists or it cannot be parsed.
+   */
+  static async getLastSessionMeta(workingDir, options = {}) {
+    const dir = options.saveDir || new WorkspaceManager({
+      workingDir: workingDir || process.cwd(),
+      openAgentDir: options.openAgentDir || CONFIG.OPENAGENT_HOME,
+    }).sessionsDir;
+
+    const metaPath = path.join(dir, '_meta.json');
+    if (!await fs.pathExists(metaPath)) {
+      return null;
+    }
+
+    try {
+      const meta = await fs.readJson(metaPath);
+      return meta;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Recover the most recently updated session.
+   * Returns the loaded AgentSession, or null if no sessions exist.
+   */
+  static async recoverLastSession(workingDir, options = {}) {
+    const sessions = await AgentSession.listSessions(options.saveDir, {
+      workingDir,
+      openAgentDir: options.openAgentDir,
+    });
+
+    if (!sessions.length) {
+      return null;
+    }
+
+    // sessions are already sorted by updated descending
+    const mostRecent = sessions[0];
+    const dir = options.saveDir || new WorkspaceManager({
+      workingDir: workingDir || process.cwd(),
+      openAgentDir: options.openAgentDir || CONFIG.OPENAGENT_HOME,
+    }).sessionsDir;
+
+    const session = await AgentSession.load(mostRecent.sessionId, dir, {
+      workingDir,
+      openAgentDir: options.openAgentDir,
+    });
+
+    return session;
+  }
+
+  /**
    * List saved sessions
    */
   static async listSessions(saveDir, options = {}) {
@@ -397,7 +459,7 @@ You can delegate tasks to specialized subagents that work independently:
     const sessions = [];
     
     for (const file of files) {
-      if (file.endsWith('.json')) {
+      if (file.endsWith('.json') && !file.startsWith('_')) {
         try {
           const data = await fs.readJson(path.join(dir, file));
           sessions.push({

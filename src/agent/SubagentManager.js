@@ -393,6 +393,19 @@ export class SubagentManager {
     this.aborted = false;
     this.abortController = null;
     this.activeSubagents = new Set();
+    this.subagentTimers = new Map(); // subagent -> timeout timer ID
+    
+    // Periodic cleanup of stale subagents (every 60 seconds)
+    this._cleanupInterval = setInterval(() => {
+      try {
+        this.cleanupStaleSubagents();
+      } catch (err) {
+        // Swallow errors from cleanup to avoid crashing the interval
+        if (this.verbose) {
+          console.error(chalk.red(`[SubagentManager] Cleanup error: ${err.message}`));
+        }
+      }
+    }, 60000);
   }
 
   setWorkspaceDir(workspaceDir) {
@@ -477,6 +490,21 @@ export class SubagentManager {
       retryDelay: 2000,
     });
     
+    // Enforce max runtime timeout (default: 5 minutes)
+    const maxRuntime = customOptions.maxRuntime || 300000;
+    const timeoutTimer = setTimeout(() => {
+      if (this.verbose) {
+        console.log(UI.progress(chalk.red(`⏰ Subagent exceeded max runtime (${maxRuntime}ms) - aborting`)));
+      }
+      if (typeof agent.abort === 'function') {
+        agent.abort();
+      }
+      this.subagentTimers.delete(agent);
+    }, maxRuntime);
+    
+    // Store timer reference so we can clear it on normal completion
+    this.subagentTimers.set(agent, timeoutTimer);
+    
     return agent;
   }
 
@@ -510,7 +538,22 @@ export class SubagentManager {
       console.log(UI.header(spec.name, task.substring(0, 100)));
     }
     
-    const result = await this.executeTask(subagentTask);
+    let result = await this.executeTask(subagentTask);
+    
+    // Validate result - check for non-empty response on success
+    if (result.success && (!result.response || result.response.trim() === '')) {
+      if (this.verbose) {
+        console.log(UI.progress(chalk.yellow('⚠ Empty response from subagent - retrying once')));
+      }
+      // Reset task state for a single retry
+      subagentTask.state = TaskState.QUEUED;
+      subagentTask.retryCount = 0;
+      subagentTask.maxRetries = 1;
+      subagentTask.startTime = null;
+      subagentTask.endTime = null;
+      subagentTask.error = null;
+      result = await this.executeTask(subagentTask);
+    }
     
     if (this.verbose) {
       console.log(UI.footer(
@@ -575,7 +618,13 @@ export class SubagentManager {
         }
         
         // Run the task
-        const result = await subagent.run(subagentTask.task);
+        let result;
+        try {
+          result = await subagent.run(subagentTask.task);
+        } finally {
+          // Always clean up the subagent's resources, even on failure
+          this.cleanupSubagent(subagent);
+        }
         
         // Success
         subagentTask.state = TaskState.COMPLETED;
@@ -610,6 +659,11 @@ export class SubagentManager {
         
       } catch (error) {
         lastError = error;
+        
+        // Clean up subagent resources on error
+        if (subagent) {
+          this.cleanupSubagent(subagent);
+        }
         
         if (this.verbose && attempt < subagentTask.maxRetries) {
           console.log(UI.progress(`${chalk.yellow('⚠')} ${chalk.yellow(error.message.substring(0, 80))}`));
@@ -920,6 +974,107 @@ Please synthesize these results into a single coherent, well-organized response.
       description: spec.description,
       maxIterations: spec.maxIterations,
     }));
+  }
+
+  // ─── Stale Subagent Cleanup ─────────────────────────────────────
+
+  /**
+   * Clean up subagents that have been running longer than expected.
+   * Kills stale subagents and marks their tasks as failed.
+   * @param {number} [maxRuntimeMs=600000] - Max allowed runtime in ms (default: 10 minutes)
+   */
+  cleanupStaleSubagents(maxRuntimeMs = 600000) {
+    const now = Date.now();
+    
+    for (const [taskId, task] of this.tasks) {
+      if (task.state !== TaskState.RUNNING && task.state !== TaskState.RETRYING) {
+        continue;
+      }
+      
+      if (!task.startTime) continue;
+      
+      const elapsed = now - task.startTime;
+      if (elapsed > maxRuntimeMs) {
+        if (this.verbose) {
+          console.log(UI.progress(
+            chalk.red(`🗑 Cleaning up stale subagent ${task.id} (running ${(elapsed / 1000).toFixed(0)}s)`)
+          ));
+        }
+        
+        // Abort the subagent if it exists
+        if (task.subagent) {
+          this.cleanupSubagent(task.subagent);
+          this.activeSubagents.delete(task.subagent);
+        }
+        
+        // Mark task as failed
+        task.state = TaskState.FAILED;
+        task.endTime = now;
+        task.error = `Subagent exceeded max runtime of ${maxRuntimeMs}ms`;
+        
+        this.runningTasks.delete(taskId);
+        this.completedTasks.push(task);
+        this.stats.failedTasks++;
+        if (this.stats.bySpecialization[task.specialization]) {
+          this.stats.bySpecialization[task.specialization].failed++;
+        }
+      }
+    }
+  }
+
+  /**
+   * Clean up a single subagent's resources: clear its timeout timer and abort it.
+   * @param {Agent} subagent
+   */
+  cleanupSubagent(subagent) {
+    if (!subagent) return;
+    
+    // Clear the timeout timer if one exists
+    const timer = this.subagentTimers.get(subagent);
+    if (timer) {
+      clearTimeout(timer);
+      this.subagentTimers.delete(subagent);
+    }
+    
+    // Abort the subagent if it supports abort
+    if (typeof subagent.abort === 'function') {
+      try {
+        subagent.abort();
+      } catch (err) {
+        // Ignore abort errors - subagent may have already finished
+      }
+    }
+  }
+
+  /**
+   * Shut down the SubagentManager: clear the cleanup interval and abort all
+   * running subagents. Call this when the parent agent is shutting down.
+   */
+  shutdown() {
+    // Stop the periodic cleanup interval
+    if (this._cleanupInterval) {
+      clearInterval(this._cleanupInterval);
+      this._cleanupInterval = null;
+    }
+    
+    // Abort all active subagents and clear their timers
+    for (const subagent of this.activeSubagents) {
+      this.cleanupSubagent(subagent);
+    }
+    this.activeSubagents.clear();
+    
+    // Mark any running tasks as cancelled
+    for (const [taskId, task] of this.tasks) {
+      if (task.state === TaskState.RUNNING || task.state === TaskState.RETRYING) {
+        task.state = TaskState.CANCELLED;
+        task.endTime = Date.now();
+        task.error = 'SubagentManager shut down';
+        this.runningTasks.delete(taskId);
+        this.completedTasks.push(task);
+      }
+    }
+    
+    this.aborted = true;
   }
 
   // ─── Utilities ─────────────────────────────────────────────────

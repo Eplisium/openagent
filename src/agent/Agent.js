@@ -140,7 +140,17 @@ export class Agent {
     // AbortController for cancelling execution
     this.abortController = null;
     this.aborted = false;
-    
+
+    // Circuit breaker: track consecutive failures by error type
+    this.consecutiveFailures = {}; // { errorCategory: count }
+    this.circuitBreakerThreshold = 3;
+    this.circuitBreakerTripped = false;
+
+    // Stall detection: track last tool call for repeated identical calls
+    this.lastSingleToolSignature = null;
+    this.repeatedSingleToolCount = 0;
+    this.singleToolStallThreshold = 3;
+
     // Initialize with system prompt
     if (this.systemPrompt) {
       this.pushMessage({ role: 'system', content: this.systemPrompt });
@@ -280,16 +290,34 @@ When you have completed the task, provide a clear summary of what was done.`;
     let total = 0;
 
     if (message.content) {
-      const content = typeof message.content === 'string'
-        ? message.content
-        : JSON.stringify(message.content);
-      const isCode = /[{}\[\]()=><]/.test(content);
-      total += isCode ? Math.ceil(content.length / 3) : Math.ceil(content.length / 4);
+      if (typeof message.content === 'string') {
+        // String content: estimate based on character patterns
+        const content = message.content;
+        const isCode = /[{}\[\]()=><;]/.test(content);
+        // Code is ~3 chars/token, prose is ~4 chars/token
+        total += isCode ? Math.ceil(content.length / 3) : Math.ceil(content.length / 4);
+      } else if (Array.isArray(message.content)) {
+        // Multimodal content (text + images)
+        for (const part of message.content) {
+          if (part.type === 'text' && part.text) {
+            total += Math.ceil(part.text.length / 4);
+          } else if (part.type === 'image_url') {
+            // Images cost ~85 tokens for low-res, ~765 for high-res
+            // Estimate ~85 tokens per image as baseline
+            total += 85;
+          }
+        }
+      } else {
+        total += Math.ceil(JSON.stringify(message.content).length / 4);
+      }
     }
 
     if (message.tool_calls) {
       total += Math.ceil(JSON.stringify(message.tool_calls).length / 3);
     }
+
+    // Add overhead per message (~4 tokens for role/metadata)
+    total += 4;
 
     return total;
   }
@@ -370,6 +398,13 @@ When you have completed the task, provide a clear summary of what was done.`;
     };
   }
 
+  formatCompactNumber(value) {
+    if (!Number.isFinite(value)) return '0';
+    if (value >= 1000000) return `${(value / 1000000).toFixed(1)}M`;
+    if (value >= 1000) return `${(value / 1000).toFixed(0)}K`;
+    return Math.round(value).toString();
+  }
+
   truncateText(text, maxLength = 160) {
     if (!text || text.length <= maxLength) {
       return text;
@@ -446,8 +481,10 @@ When you have completed the task, provide a clear summary of what was done.`;
     this.repeatedToolRoundCount = 0;
     this.abortController = new AbortController();
     
-    // Add user message
-    this.pushMessage({ role: 'user', content: userInput });
+    // Add user message (skip if already pushed, e.g. multimodal messages)
+    if (userInput !== undefined && userInput !== null) {
+      this.pushMessage({ role: 'user', content: userInput });
+    }
     
     let finalResponse = null;
     const runHistory = [];
@@ -492,6 +529,15 @@ When you have completed the task, provide a clear summary of what was done.`;
         // Check context size BEFORE calling LLM
         await this.maybeCompactContext();
         
+        // Proactive context warning at 60% usage
+        const ctxStats = this.getContextStats();
+        if (ctxStats.percent > 60 && ctxStats.percent <= 70) {
+          const warnMsg = `Context usage at ${ctxStats.percent}% (~${this.formatCompactNumber(ctxStats.usedTokens)} tokens). Consider wrapping up soon.`;
+          if (!this.emitStatus('context_warning', warnMsg) && this.shouldEmitVerboseLogs()) {
+            console.log(chalk.yellow(`   ⚠️ ${warnMsg}`));
+          }
+        }
+        
         // Get LLM response with tools (with retry logic)
         const response = await this.getLLMResponseWithRetry();
         
@@ -517,7 +563,46 @@ When you have completed the task, provide a clear summary of what was done.`;
         
         // Execute tool calls with enhanced error handling
         const toolResults = await this.executeToolCallsEnhanced(toolCalls);
-        
+
+        // Circuit breaker: if tripped, inject a recovery message to the model
+        if (this.circuitBreakerTripped) {
+          const failedResults = toolResults.filter(r => r.result && r.result.success === false);
+          if (failedResults.length > 0) {
+            const lastFailure = failedResults[failedResults.length - 1];
+            const suggestion = this.getRecoverySuggestion(lastFailure.result.error, lastFailure.toolName);
+            this.pushMessage({
+              role: 'user',
+              content: `[System] Multiple consecutive tool failures detected (${lastFailure.toolName}). The same error type has occurred ${this.circuitBreakerThreshold}+ times in a row. ${suggestion} Please try a fundamentally different approach rather than retrying the same operation.`,
+            });
+            // Reset circuit breaker after injecting the message
+            this.consecutiveFailures = {};
+            this.circuitBreakerTripped = false;
+          }
+        }
+
+        // Stall detection: if the model calls the same single tool with same args repeatedly
+        if (toolCalls.length === 1) {
+          const singleSig = JSON.stringify({ name: toolCalls[0].name, args: toolCalls[0].arguments });
+          if (singleSig === this.lastSingleToolSignature) {
+            this.repeatedSingleToolCount++;
+          } else {
+            this.lastSingleToolSignature = singleSig;
+            this.repeatedSingleToolCount = 1;
+          }
+
+          if (this.repeatedSingleToolCount >= this.singleToolStallThreshold) {
+            const stallTool = toolCalls[0].name;
+            const stallMessage = `[System] You have called the "${stallTool}" tool with the same arguments ${this.repeatedSingleToolCount} times in a row without making progress. This suggests the approach is not working. Please: (1) try a different tool or strategy, (2) re-examine your plan, or (3) provide your best answer with what you have gathered so far.`;
+            this.pushMessage({ role: 'user', content: stallMessage });
+            this.repeatedSingleToolCount = 0;
+            this.lastSingleToolSignature = null;
+          }
+        } else {
+          // Multiple tool calls in one round - reset single-tool stall tracking
+          this.lastSingleToolSignature = null;
+          this.repeatedSingleToolCount = 0;
+        }
+
         // Add assistant message with tool calls
         this.pushMessage({
           role: 'assistant',
@@ -726,7 +811,28 @@ When you have completed the task, provide a clear summary of what was done.`;
       const result = await this.executeSingleToolCall(toolCall);
       results.push(result);
     }
-    
+
+    // Track consecutive failures by error category for circuit breaker
+    for (const result of results) {
+      if (result.result && result.result.success === false) {
+        const errorCategory = this.categorizeError({ message: result.result.error || '' });
+        this.consecutiveFailures[errorCategory] = (this.consecutiveFailures[errorCategory] || 0) + 1;
+
+        if (this.consecutiveFailures[errorCategory] >= this.circuitBreakerThreshold) {
+          this.circuitBreakerTripped = true;
+          const suggestion = this.getRecoverySuggestion(result.result.error, result.toolName);
+          const circuitMessage = `Circuit breaker tripped: ${errorCategory} errors (${this.consecutiveFailures[errorCategory]} consecutive). ${suggestion}`;
+          if (!this.emitStatus('circuit_breaker', circuitMessage) && this.shouldEmitVerboseLogs()) {
+            console.log(chalk.red(`   ⚡ ${circuitMessage}`));
+          }
+        }
+      } else {
+        // Reset all consecutive failure counters on any success
+        this.consecutiveFailures = {};
+        this.circuitBreakerTripped = false;
+      }
+    }
+
     return results;
   }
   
@@ -804,7 +910,64 @@ When you have completed the task, provide a clear summary of what was done.`;
       result: { success: false, error: lastError.message },
     };
   }
-  
+
+  /**
+   * Categorize an error type for circuit breaker tracking
+   * @param {Error} error - The error to categorize
+   * @returns {string} Error category identifier
+   */
+  categorizeError(error) {
+    const message = (error?.message || '').toLowerCase();
+
+    if (message.includes('timeout') || message.includes('timed out')) {
+      return 'TIMEOUT';
+    }
+    if (message.includes('permission') || message.includes('access denied') || message.includes('eacces') || message.includes('eperm')) {
+      return 'PERMISSION';
+    }
+    if (message.includes('enoent') || message.includes('not found') || message.includes('no such file')) {
+      return 'NOT_FOUND';
+    }
+    if (message.includes('econnrefused') || message.includes('network') || message.includes('dns') || message.includes('fetch failed')) {
+      return 'NETWORK';
+    }
+    if (message.includes('json') || message.includes('parse') || message.includes('unexpected token')) {
+      return 'PARSE_ERROR';
+    }
+    if (message.includes('rate limit') || message.includes('429') || message.includes('too many requests')) {
+      return 'RATE_LIMIT';
+    }
+    if (message.includes('context length') || message.includes('token') || message.includes('too large')) {
+      return 'SIZE_LIMIT';
+    }
+
+    return 'UNKNOWN';
+  }
+
+  /**
+   * Get a recovery suggestion based on error type and tool name
+   * @param {Error|string} error - The error that occurred
+   * @param {string} toolName - The name of the tool that failed
+   * @returns {string} A helpful recovery suggestion
+   */
+  getRecoverySuggestion(error, toolName) {
+    const errorMessage = typeof error === 'string' ? error : (error?.message || '');
+    const category = this.categorizeError(typeof error === 'string' ? { message: error } : error);
+
+    const suggestions = {
+      TIMEOUT: `The ${toolName} tool timed out. Try: (1) breaking the operation into smaller pieces, (2) using a more specific query or path, or (3) checking if the target resource is available.`,
+      PERMISSION: `The ${toolName} tool encountered a permission error. Try: (1) checking file/directory permissions, (2) running with appropriate access rights, or (3) using a different path that you have access to.`,
+      NOT_FOUND: `The ${toolName} tool could not find the target. Try: (1) verifying the path exists using list_directory or read_file first, (2) checking for typos in the path, or (3) searching for the file using search_in_files.`,
+      NETWORK: `The ${toolName} tool encountered a network error. Try: (1) checking your internet connection, (2) verifying the URL is correct, (3) trying again after a brief wait, or (4) using an alternative data source.`,
+      PARSE_ERROR: `The ${toolName} tool returned unparseable data. Try: (1) checking if the input arguments are correctly formatted, (2) verifying the tool is being used with valid parameters, or (3) simplifying the request.`,
+      RATE_LIMIT: `The ${toolName} tool hit a rate limit. Try: (1) waiting before retrying, (2) reducing the frequency of calls, or (3) batching multiple operations into fewer calls.`,
+      SIZE_LIMIT: `The ${toolName} tool encountered a size limit. Try: (1) reducing the amount of data being processed, (2) using pagination or chunking, or (3) filtering results to be more specific.`,
+      UNKNOWN: `The ${toolName} tool failed with: "${errorMessage.substring(0, 100)}". Try: (1) reviewing the error details, (2) checking tool documentation, (3) using an alternative approach, or (4) breaking the task into smaller steps.`,
+    };
+
+    return suggestions[category] || suggestions.UNKNOWN;
+  }
+
   /**
    * Run a streaming version of the agent
    */
@@ -938,24 +1101,51 @@ When you have completed the task, provide a clear summary of what was done.`;
       console.log(chalk.yellow(`   ⚠️ ${triggerMessage}`));
     }
     
-    // Keep the current system prompt and the most recent exchange window.
+    // Smart compaction: preserve system message, first user message, and last 4 exchanges
     const systemMsg = this.messages.find(m => m.role === 'system');
-    // Keep last 10 messages (5 tool call rounds)
-    const recentMessages = this.messages.slice(-20);
-    const olderMessages = this.messages
-      .slice(0, Math.max(0, this.messages.length - recentMessages.length))
-      .filter(message => message.role !== 'system');
-    
+    const nonSystemMessages = this.messages.filter(m => m.role !== 'system');
+
+    // Find the first user message (original request)
+    const firstUserMsgIndex = nonSystemMessages.findIndex(m => m.role === 'user');
+    const firstUserMsg = firstUserMsgIndex >= 0 ? nonSystemMessages[firstUserMsgIndex] : null;
+
+    // Identify exchange boundaries: each "exchange" starts with a user message or assistant+tool_calls
+    // We want the last 4 exchanges from the end of the conversation
+    const exchangeStarts = [];
+    for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
+      const msg = nonSystemMessages[i];
+      if (msg.role === 'user' || (msg.role === 'assistant' && msg.tool_calls)) {
+        exchangeStarts.unshift(i);
+      }
+    }
+
+    // Take the last 4 exchange start indices
+    const last4StartIndices = exchangeStarts.slice(-4);
+    const keepFromIndex = last4StartIndices.length > 0 ? last4StartIndices[0] : nonSystemMessages.length;
+
+    // Messages to keep: from keepFromIndex to end
+    const recentMessages = nonSystemMessages.slice(keepFromIndex);
+
+    // Older messages (for summary): everything between first user msg and the kept window
+    const olderStart = firstUserMsgIndex >= 0 ? firstUserMsgIndex + 1 : 0;
+    const olderMessages = nonSystemMessages.slice(olderStart, keepFromIndex);
+
     // Rebuild messages
     const newMessages = [];
     if (systemMsg) newMessages.push(systemMsg);
+
+    // Always preserve the first user message (the original request)
+    if (firstUserMsg && !recentMessages.includes(firstUserMsg)) {
+      newMessages.push(firstUserMsg);
+    }
+
     if (olderMessages.length > 0) {
       newMessages.push({
         role: 'assistant',
         content: this.buildCompactionSummary(olderMessages),
       });
     }
-    newMessages.push(...recentMessages.filter(message => message.role !== 'system'));
+    newMessages.push(...recentMessages);
     
     this.setMessages(newMessages);
     this.contextStats.compactions++;
@@ -1019,6 +1209,10 @@ When you have completed the task, provide a clear summary of what was done.`;
     this.stopReason = null;
     this.lastToolCallSignature = null;
     this.repeatedToolRoundCount = 0;
+    this.consecutiveFailures = {};
+    this.circuitBreakerTripped = false;
+    this.lastSingleToolSignature = null;
+    this.repeatedSingleToolCount = 0;
     this.performanceMetrics = {
       totalIterations: 0,
       totalToolCalls: 0,

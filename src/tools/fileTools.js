@@ -7,6 +7,7 @@ import fs from 'fs-extra';
 import path from 'path';
 import { glob } from 'glob';
 import { resolveAgentPath } from '../paths.js';
+import { encodeImageToBase64, getImageMimeType, isVisionModel } from '../vision.js';
 
 const PATH_PREFIX_NOTE = 'Supports absolute paths plus the special prefixes project:, workdir:, and workspace:.';
 
@@ -520,6 +521,51 @@ export function createFileTools(options = {}) {
     },
   };
 
+  const readImageTool = {
+    name: 'read_image',
+    description: `Read an image file and return it as base64 for vision analysis. Supports PNG, JPG, JPEG, GIF, WebP, BMP, SVG. ${PATH_PREFIX_NOTE}`,
+    category: 'file',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: `Path to the image file. ${PATH_PREFIX_NOTE}`,
+        },
+      },
+      required: ['path'],
+    },
+    async execute({ path: filePath }) {
+      try {
+        const resolvedPath = resolvePathForAgent(filePath);
+        
+        if (!await fs.pathExists(resolvedPath)) {
+          return { success: false, error: `File not found: ${resolvedPath}` };
+        }
+        
+        const stat = await fs.stat(resolvedPath);
+        if (stat.isDirectory()) {
+          return { success: false, error: `Path is a directory: ${resolvedPath}` };
+        }
+        
+        const base64 = await encodeImageToBase64(resolvedPath);
+        const mimeType = getImageMimeType(resolvedPath);
+        
+        return {
+          success: true,
+          path: resolvedPath,
+          name: path.basename(resolvedPath),
+          mimeType,
+          size: stat.size,
+          base64,
+          message: `Image loaded: ${path.basename(resolvedPath)} (${mimeType}, ${stat.size} bytes)`,
+        };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+  };
+
   return [
     readFileTool,
     writeFileTool,
@@ -527,6 +573,7 @@ export function createFileTools(options = {}) {
     listDirectoryTool,
     searchInFilesTool,
     getFileInfoTool,
+    readImageTool,
   ];
 }
 
@@ -539,6 +586,7 @@ export const [
   listDirectoryTool,
   searchInFilesTool,
   getFileInfoTool,
+  readImageTool,
 ] = defaultFileTools;
 
 export const fileTools = defaultFileTools;

@@ -28,8 +28,10 @@ import os from 'os';
 import { AgentSession } from './agent/AgentSession.js';
 import { CONFIG } from './config.js';
 import { ModelBrowser } from './ModelBrowser.js';
+import { processInput, readDroppedFile, formatDroppedContent } from './inputHandler.js';
+import { isVisionModel, buildMultimodalMessage } from './vision.js';
 
-const VERSION = '4.0.0';
+const VERSION = '4.1.0';
 
 // ═══════════════════════════════════════════════════════════════════
 // 🏠 Local State Management
@@ -487,6 +489,60 @@ export class CLI {
       const trimmed = input.trim();
       if (!trimmed) continue;
 
+      // Process input for drag-and-drop detection
+      const processed = await processInput(trimmed, { validateExistence: true });
+
+      if (processed.type === 'paths' && processed.paths.length > 0) {
+        const dropResults = [];
+        const imageResults = [];
+        for (const dropPath of processed.paths) {
+          try {
+            const result = await readDroppedFile(dropPath);
+            if (result.type === 'image') { imageResults.push(result); } else { dropResults.push(result); }
+            console.log(chalk.dim(`  Detected: ${result.name || path.basename(dropPath)} (${result.type})`));
+          } catch (err) { console.log(chalk.yellow(`  Could not read: ${dropPath} - ${err.message}`)); }
+        }
+        let contextText = formatDroppedContent(dropResults);
+        if (imageResults.length > 0) {
+          const modelId = this.session?.agent?.model || '';
+          if (isVisionModel(modelId)) {
+            const images = imageResults.map(img => ({ base64: img.base64, mimeType: img.mimeType }));
+            const textPart = contextText + '\n\nAnalyze attached images: ' + imageResults.map(i => i.name).join(', ');
+            const multimodalMsg = buildMultimodalMessage(textPart, images);
+            console.log(chalk.green(`  ${imageResults.length} image(s) attached for vision`));
+            this.taskCount++; await this.runAgentTaskWithContext(multimodalMsg); continue;
+          } else {
+            contextText += '\n\nImages dropped: ' + imageResults.map(i => `${i.name} (${i.mimeType})`).join(', ');
+          }
+        }
+        if (contextText) { this.taskCount++; await this.runAgentTask('Analyze dropped content:\n\n' + contextText); }
+        continue;
+      }
+
+      if (processed.type === 'mixed' && processed.paths.length > 0) {
+        const dropResults = [];
+        const imageResults = [];
+        for (const dropPath of processed.paths) {
+          try {
+            const result = await readDroppedFile(dropPath);
+            if (result.type === 'image') { imageResults.push(result); } else { dropResults.push(result); }
+          } catch {}
+        }
+        let contextText = formatDroppedContent(dropResults);
+        if (imageResults.length > 0) {
+          const modelId = this.session?.agent?.model || '';
+          if (isVisionModel(modelId)) {
+            const images = imageResults.map(img => ({ base64: img.base64, mimeType: img.mimeType }));
+            const fullText = (contextText ? contextText + '\n\n' : '') + processed.text;
+            const multimodalMsg = buildMultimodalMessage(fullText, images);
+            console.log(chalk.green(`  ${imageResults.length} image(s) attached`));
+            this.taskCount++; await this.runAgentTaskWithContext(multimodalMsg); continue;
+          }
+        }
+        const fullTask = contextText ? `Context from dropped files:\n\n${contextText}\n\n---\n\nUser request: ${processed.text}` : processed.text;
+        this.taskCount++; await this.runAgentTask(fullTask); continue;
+      }
+
       // Check for command alias
       let command = trimmed;
       if (trimmed.startsWith('/')) {
@@ -716,6 +772,48 @@ export class CLI {
         task,
         suggestions: this.generateErrorSuggestions(error, task)
       });
+    } finally {
+      this.session.agent.onToolStart = previousCallbacks.onToolStart;
+      this.session.agent.onToolEnd = previousCallbacks.onToolEnd;
+      this.session.agent.onResponse = previousCallbacks.onResponse;
+      this.session.agent.onIterationStart = previousCallbacks.onIterationStart;
+      this.session.agent.onIterationEnd = previousCallbacks.onIterationEnd;
+      this.session.agent.onStatus = previousCallbacks.onStatus;
+      this.currentTask = null;
+      this.taskStartTime = null;
+    }
+  }
+
+  async runAgentTaskWithContext(multimodalMsg) {
+    const startTime = Date.now();
+    this.taskStartTime = startTime;
+    this.currentTask = multimodalMsg.content?.find(c => c.type === 'text')?.text || '[multimodal]';
+    let toolCallCount = 0;
+    let responsePrinted = false;
+    const previousCallbacks = {
+      onToolStart: this.session.agent.onToolStart,
+      onToolEnd: this.session.agent.onToolEnd,
+      onResponse: this.session.agent.onResponse,
+      onIterationStart: this.session.agent.onIterationStart,
+      onIterationEnd: this.session.agent.onIterationEnd,
+      onStatus: this.session.agent.onStatus,
+    };
+    this.session.agent.onIterationStart = () => { console.log(chalk.dim(`\n── ${this.session.agent.formatIterationLabel()} ──`)); };
+    this.session.agent.onToolStart = (toolName, args) => { toolCallCount++; this.printEnhancedToolCallStart(toolName, args, toolCallCount, startTime); };
+    this.session.agent.onToolEnd = (toolName, result) => { this.printEnhancedToolCallEnd(toolName, result, startTime, toolCallCount); };
+    this.session.agent.onResponse = (content) => { if (!responsePrinted) { this.printAIResponse(this.deduplicateResponse(content)); responsePrinted = true; } };
+    this.session.agent.onStatus = ({ type, message }) => { const f = type === 'compaction' ? chalk.cyan : type === 'retry' ? chalk.yellow : chalk.dim; console.log(f(`   ${message}`)); };
+    try {
+      this.session.agent.pushMessage(multimodalMsg);
+      const result = await this.session.agent.run();
+      const duration = Date.now() - startTime;
+      if (result.response && !responsePrinted) { this.printAIResponse(this.deduplicateResponse(result.response)); responsePrinted = true; }
+      this.printEnhancedTaskSummary(result, duration);
+      if (this.state?.stats) { this.state.stats.totalTasks++; this.state.stats.totalTokens += result.stats?.totalTokensUsed || 0; this.state.stats.totalCost += result.performance?.totalCost || 0; }
+      await this.saveState();
+      this.history.push({ type: 'agent', task: this.currentTask, iterations: result.iterations, toolsUsed: result.stats.toolExecutions, timestamp: new Date().toISOString(), duration });
+    } catch (error) {
+      this.showSmartError('task_execution', { message: error.message, task: this.currentTask, suggestions: this.generateErrorSuggestions(error, this.currentTask) });
     } finally {
       this.session.agent.onToolStart = previousCallbacks.onToolStart;
       this.session.agent.onToolEnd = previousCallbacks.onToolEnd;
