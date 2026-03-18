@@ -7,12 +7,14 @@ import fs from 'fs-extra';
 import path from 'path';
 import { Agent } from './Agent.js';
 import { SubagentManager } from './SubagentManager.js';
+import { TaskManager } from './TaskManager.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
 import { fileTools } from '../tools/fileTools.js';
 import { shellTools } from '../tools/shellTools.js';
 import { webTools } from '../tools/webTools.js';
 import { gitTools } from '../tools/gitTools.js';
 import { createSubagentTools } from '../tools/subagentTools.js';
+import { createTaskTools } from '../tools/taskTools.js';
 import chalk from 'chalk';
 
 export class AgentSession {
@@ -36,6 +38,16 @@ export class AgentSession {
       ...webTools,
       ...gitTools,
     ]);
+    
+    // Initialize task manager for long-running tasks
+    this.taskManager = new TaskManager({
+      workingDir: this.workingDir,
+      verbose: options.verbose !== false,
+    });
+    
+    // Register task management tools
+    const taskTools = createTaskTools(this.taskManager);
+    this.toolRegistry.registerAll(taskTools);
     
     // Initialize subagent manager
     this.subagentManager = new SubagentManager({
@@ -78,6 +90,31 @@ You have access to powerful tools for:
 - **Web Access**: web_search, read_webpage, fetch_url
 - **Git Operations**: git_status, git_log, git_diff, git_add, git_commit, git_push, git_pull, git_branch, git_info
 - **Subagent Delegation**: delegate_task, delegate_parallel, delegate_with_synthesis, delegate_pipeline, subagent_status
+- **Task Management**: initialize_task, create_feature_list, get_next_feature, complete_feature, fail_feature, get_task_status, get_progress_report, save_session_progress
+
+## 📋 Task Management (For Long-Running Tasks)
+For complex tasks that span multiple sessions, use the task management system:
+
+### When to Use Task Management
+- **Complex projects**: Any task that will take more than one session
+- **Multi-feature work**: Tasks with multiple independent features
+- **Incremental development**: Building something feature by feature
+- **Progress tracking**: When you need to track what's done vs. what's left
+
+### Task Management Workflow
+1. **Initialize**: Use initialize_task to set up progress tracking
+2. **Plan**: Use create_feature_list to break the task into features
+3. **Work**: Use get_next_feature to start the next feature
+4. **Complete**: Use complete_feature when a feature is verified working
+5. **Track**: Use get_task_status or get_progress_report to see progress
+6. **Save**: Use save_session_progress at the end of each session
+
+### Best Practices for Long Tasks
+- Work on ONE feature at a time
+- Verify each feature works before marking it complete
+- Use git commits to save working states
+- Update progress tracking regularly
+- Leave the codebase in a clean state at session end
 
 ## 🤝 Subagent Delegation (Your Superpower)
 You can delegate tasks to specialized subagents that work independently:

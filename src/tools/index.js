@@ -9,6 +9,7 @@ export { shellTools, execTool, execBackgroundTool, processStatusTool, systemInfo
 export { webTools, webSearchTool, readWebpageTool, fetchUrlTool } from './webTools.js';
 export { gitTools, gitStatusTool, gitLogTool, gitDiffTool, gitAddTool, gitCommitTool, gitPushTool, gitPullTool, gitBranchTool, gitInfoTool } from './gitTools.js';
 export { createSubagentTools } from './subagentTools.js';
+export { createTaskTools } from './taskTools.js';
 
 import { fileTools } from './fileTools.js';
 import { shellTools } from './shellTools.js';
@@ -16,6 +17,7 @@ import { webTools } from './webTools.js';
 import { gitTools } from './gitTools.js';
 import { ToolRegistry, ToolErrorType } from './ToolRegistry.js';
 import { createSubagentTools } from './subagentTools.js';
+import { createTaskTools } from './taskTools.js';
 
 /**
  * Create a fully-configured tool registry
@@ -72,4 +74,5 @@ export default {
   webTools,
   gitTools,
   createSubagentTools,
+  createTaskTools,
 };

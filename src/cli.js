@@ -1,8 +1,13 @@
 /**
- * 💻 OpenAgent CLI v3.1
+ * 💻 OpenAgent CLI v4.0
  * Beautiful interactive terminal with real-time streaming & tool visualization
  * 
- * New features v3.1:
+ * New features v4.0 (2026 Edition):
+ * - Native fetch (zero axios dependency)
+ * - AbortController for request/stream cancellation
+ * - Request deduplication for identical in-flight requests
+ * - Real cost tracking from API usage data
+ * - Enhanced subagent orchestration
  * - Smart error recovery suggestions
  * - Intelligent prompt suggestions
  * - Built-in workflow templates
@@ -24,7 +29,7 @@ import { AgentSession } from './agent/AgentSession.js';
 import { CONFIG } from './config.js';
 import { ModelBrowser } from './ModelBrowser.js';
 
-const VERSION = '3.2.0';
+const VERSION = '4.0.0';
 
 // ═══════════════════════════════════════════════════════════════════
 // 🏠 Local State Management

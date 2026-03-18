@@ -57,7 +57,7 @@ IMPORTANT: Be very specific in your task description. Include file paths, functi
         },
         required: ['task'],
       },
-      timeout: 180000, // 3 minutes for single subagent task
+      timeout: 300000, // 5 minutes for single subagent task
       async execute(args) {
         try {
           const result = await subagentManager.delegate(args.task, {
@@ -135,7 +135,7 @@ Example tasks array:
         },
         required: ['tasks'],
       },
-      timeout: 300000, // 5 minutes for parallel tasks
+      timeout: 600000, // 10 minutes for parallel tasks
       async execute(args) {
         try {
           const results = await subagentManager.delegateParallel(args.tasks, {
@@ -214,7 +214,7 @@ The synthesis step uses an additional subagent to merge all results intelligentl
         },
         required: ['tasks'],
       },
-      timeout: 360000, // 6 minutes for parallel + synthesis
+      timeout: 600000, // 10 minutes for parallel + synthesis
       async execute(args) {
         try {
           const result = await subagentManager.delegateWithSynthesis(
@@ -292,7 +292,7 @@ Example:
         },
         required: ['stages'],
       },
-      timeout: 600000, // 10 minutes for pipeline
+      timeout: 900000, // 15 minutes for pipeline
       async execute(args) {
         try {
           const result = await subagentManager.delegatePipeline(args.stages, {

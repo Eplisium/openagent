@@ -1,6 +1,6 @@
 
 
-import { OpenRouterClient } from '../OpenRouterClient.js';
+import { OpenRouterClient, AbortError } from '../OpenRouterClient.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
 import chalk from 'chalk';
 
@@ -34,6 +34,13 @@ export class ContextOverflowError extends AgentError {
       maxTokens,
     });
     this.name = 'ContextOverflowError';
+  }
+}
+
+export class AgentAbortError extends AgentError {
+  constructor(message = 'Agent execution aborted') {
+    super(message, 'AGENT_ABORTED');
+    this.name = 'AgentAbortError';
   }
 }
 
@@ -86,6 +93,10 @@ export class Agent {
     this.state = 'idle'; // idle, running, paused, error, completed
     this.lastError = null;
     this.checkpoints = [];
+    
+    // AbortController for cancelling execution
+    this.abortController = null;
+    this.aborted = false;
     
     // Initialize with system prompt
     if (this.systemPrompt) {
@@ -141,6 +152,26 @@ When you have completed the task, provide a clear summary of what was done.`;
   }
 
   /**
+   * Abort the current execution
+   */
+  abort() {
+    this.aborted = true;
+    if (this.abortController) {
+      this.abortController.abort();
+    }
+    this.state = 'aborted';
+  }
+  
+  /**
+   * Check if execution was aborted
+   */
+  checkAborted() {
+    if (this.aborted) {
+      throw new AgentAbortError('Agent execution was aborted');
+    }
+  }
+  
+  /**
    * Run the agentic loop with enhanced error handling and performance tracking
    */
   async run(userInput, options = {}) {
@@ -148,6 +179,8 @@ When you have completed the task, provide a clear summary of what was done.`;
     this.state = 'running';
     this.iterationCount = 0;
     this.lastError = null;
+    this.aborted = false;
+    this.abortController = new AbortController();
     
     // Add user message
     this.messages.push({ role: 'user', content: userInput });
@@ -156,6 +189,8 @@ When you have completed the task, provide a clear summary of what was done.`;
     
     try {
       while (this.iterationCount < this.maxIterations) {
+        this.checkAborted();
+        
         this.iterationCount++;
         this.performanceMetrics.totalIterations++;
         
@@ -270,7 +305,11 @@ When you have completed the task, provide a clear summary of what was done.`;
       };
       
     } catch (error) {
-      this.state = 'error';
+      if (error instanceof AgentAbortError || error instanceof AbortError) {
+        this.state = 'aborted';
+      } else {
+        this.state = 'error';
+      }
       this.lastError = error;
       this.performanceMetrics.totalErrors++;
       
@@ -279,6 +318,8 @@ When you have completed the task, provide a clear summary of what was done.`;
       }
       
       throw error;
+    } finally {
+      this.abortController = null;
     }
   }
 
@@ -328,7 +369,15 @@ When you have completed the task, provide a clear summary of what was done.`;
         return this.getLLMResponseWithRetry(retryCount + 1);
       }
       
-      console.error(chalk.red(`LLM Error: ${error.message}`));
+      if (error.code === 'TIMEOUT') {
+        console.error(chalk.red(`\n⏱️ Request timed out after ${Math.round(this.client.timeout / 1000)}s`));
+        console.error(chalk.dim('   This can happen with complex tasks. Try:'));
+        console.error(chalk.dim('   1. Increase TIMEOUT_MS in .env (e.g., TIMEOUT_MS=600000)'));
+        console.error(chalk.dim('   2. Break the task into smaller pieces'));
+        console.error(chalk.dim('   3. Use a faster model (e.g., claude-haiku-3)'));
+      } else {
+        console.error(chalk.red(`LLM Error: ${error.message}`));
+      }
       throw error;
     }
   }
@@ -667,7 +716,7 @@ When you have completed the task, provide a clear summary of what was done.`;
       performance: this.performanceMetrics,
       state: this.state,
       timestamp: new Date().toISOString(),
-      version: '3.0',
+      version: '4.0',
     };
   }
 

@@ -1,5 +1,5 @@
 /**
- * 🎛️ OpenRouter Configuration v3.1
+ * 🎛️ OpenRouter Configuration v4.0
  * Centralized configuration for all API interactions
  * 
  * Enhanced with:
@@ -8,6 +8,8 @@
  * - Performance presets
  * - Budget controls
  * - Retry configuration
+ * - Provider preferences for latency optimization
+ * - Fallback model routing
  */
 
 import dotenv from 'dotenv';
@@ -35,9 +37,12 @@ export const CONFIG = {
     'X-OpenRouter-Title': process.env.SITE_NAME || 'OpenAgent',
   },
   
+  // Fallback model for routing
+  FALLBACK_MODEL: process.env.FALLBACK_MODEL || 'anthropic/claude-sonnet-4',
+  
   // Request Settings
   MAX_RETRIES: parseInt(process.env.MAX_RETRIES) || 3,
-  TIMEOUT_MS: parseInt(process.env.TIMEOUT_MS) || 120000, // 2 minutes
+  TIMEOUT_MS: parseInt(process.env.TIMEOUT_MS) || 300000, // 5 minutes
   STREAMING_ENABLED: process.env.STREAMING_ENABLED !== 'false',
   
   // Cost Control
@@ -73,7 +78,7 @@ export const CONFIG = {
   COMPACT_THRESHOLD: parseFloat(process.env.COMPACT_THRESHOLD) || 0.7,
   
   // Tool Settings
-  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 120000,
+  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 300000,
   MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS) || 15000,
   
   // Performance

@@ -1,6 +1,6 @@
-# 🚀 OpenAgent
+# 🚀 OpenAgent v4.0
 
-> Production-grade AI agent with 400+ models. On par with Claude Code, Cursor, and Codex.
+> Production-grade AI agent with 400+ models. 2026 Edition with native fetch, AbortController, and request deduplication. On par with Claude Code, Cursor, and Codex.
 
 [![OpenRouter](https://img.shields.io/badge/OpenRouter-API-00D9FF?style=for-the-badge)](https://openrouter.ai)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js)](https://nodejs.org)
@@ -18,8 +18,12 @@ OpenAgent is a **full-featured agentic AI assistant** that runs in your terminal
 - 🌐 **Browse the web** and fetch documentation
 - 🔀 **Work with git** — status, diff, commit, push, pull
 - 🤖 **Use 400+ AI models** via OpenRouter
-- 🤝 **Multi-agent orchestration** for complex tasks
+- 🤝 **Multi-agent orchestration** with specialized subagents
 - 💾 **Session management** with checkpoints and history
+- ⚡ **Zero-dependency HTTP** using native fetch (undici)
+- 🛑 **Request cancellation** via AbortController
+- 🔁 **Request deduplication** for identical in-flight requests
+- 💰 **Real cost tracking** from API usage data
 
 ---
 
@@ -95,6 +99,70 @@ The main agent can **delegate tasks to specialized subagents** for parallel exec
 | 🧪 **Tester** | Running tests and validation |
 | ✅ **Reviewer** | Code quality review |
 | 🤖 **General** | Any task |
+
+### 🔄 Long-Running Task System (NEW!)
+
+OpenAgent now supports **long-running tasks** that span multiple sessions, inspired by Anthropic's research on effective agent harnesses:
+
+#### Key Features
+
+- **📋 Task Planning**: Break complex tasks into specific, testable features
+- **📊 Progress Tracking**: Track completion status across sessions
+- **🎯 Incremental Work**: Work on ONE feature at a time for consistency
+- **✅ Verification**: Require testing before marking features complete
+- **💾 Session Persistence**: Resume exactly where you left off
+- **🔧 Git Integration**: Use git for recovery and clean state management
+
+#### Task Management Tools
+
+| Tool | Description |
+|------|-------------|
+| `initialize_task` | Set up task environment and progress tracking |
+| `create_feature_list` | Break task into prioritized, testable features |
+| `get_next_feature` | Get the next feature to work on (auto-starts it) |
+| `complete_feature` | Mark feature as verified and complete |
+| `fail_feature` | Mark feature as failed with error details |
+| `get_task_status` | View overall progress and current state |
+| `get_progress_report` | Get formatted progress report |
+| `save_session_progress` | Save session work for next time |
+
+#### How It Works
+
+1. **First Session**: Agent initializes task and creates feature list
+2. **Each Session**: Agent checks progress, works on next feature
+3. **Feature Completion**: Agent verifies feature works, marks complete
+4. **Session End**: Agent saves progress and commits to git
+5. **Next Session**: Agent loads progress and continues seamlessly
+
+#### Example Workflow
+
+```javascript
+import { AgentSession } from './src/index.js';
+
+const session = new AgentSession({
+  workingDir: './my-project',
+  model: 'anthropic/claude-sonnet-4',
+});
+
+// First session - complex task
+await session.run('Build a REST API with auth, CRUD, and tests');
+
+// Later session - continues where left off
+await session.run('Continue working on the API project');
+
+// Check progress anytime
+const status = await session.taskManager.getStatus();
+console.log(`${status.progress.percentage}% complete`);
+```
+
+#### Best Practices for Long Tasks
+
+1. **Be Specific**: Break tasks into concrete, testable features
+2. **Work Incrementally**: One feature at a time, fully verified
+3. **Use Git**: Commit working states for easy recovery
+4. **Track Progress**: Update task status as you work
+5. **Verify Everything**: Test features before marking complete
+6. **Leave Clean State**: End sessions with codebase ready for next session
 
 ### 💾 Session Management
 
@@ -294,6 +362,25 @@ See all models at [openrouter.ai/models](https://openrouter.ai/models)
 
 ---
 
+## 🆕 What's New in v4.0 (2026 Edition)
+
+| Feature | Description |
+|---------|-------------|
+| **Native Fetch** | Replaced axios with Node.js native fetch (undici) — zero HTTP dependencies |
+| **AbortController** | Full support for cancelling requests and streams |
+| **Request Deduplication** | Identical in-flight requests are coalesced automatically |
+| **Content-Hashed Cache** | Cache keys use djb2 hash — no collisions, no truncation |
+| **Real Cost Tracking** | Uses actual API usage data when available |
+| **Subagent Abort** | Parent can abort all running subagents gracefully |
+| **Enhanced Streaming** | Proper SSE parsing with mid-stream error handling |
+| **Provider Preferences** | Configure latency-optimized provider routing |
+| **Long-Running Tasks** | Multi-session task management with progress tracking and feature lists |
+| **Task Planning** | Automatic task decomposition into prioritized, testable features |
+| **Progress Persistence** | Resume tasks exactly where you left off across sessions |
+| **Feature Verification** | Require testing before marking features complete |
+
+---
+
 ## 🏗️ Architecture
 
 OpenAgent follows the same architecture principles as Claude Code and Codex:
@@ -330,9 +417,12 @@ OpenAgent follows the same architecture principles as Claude Code and Codex:
 | `SITE_URL` | For OpenRouter rankings | `https://localhost` |
 | `SITE_NAME` | App name | `OpenAgent` |
 | `DEFAULT_MODEL` | Default AI model | `anthropic/claude-sonnet-4` |
+| `FALLBACK_MODEL` | Fallback for routing | `anthropic/claude-sonnet-4` |
 | `MAX_RETRIES` | Retry attempts | `3` |
-| `TIMEOUT_MS` | Request timeout | `60000` |
+| `TIMEOUT_MS` | Request timeout | `300000` |
 | `AGENT_MAX_ITERATIONS` | Max agent loops | `30` |
+| `MAX_CONTEXT_TOKENS` | Max context window | `800000` |
+| `CACHE_TTL_MS` | Cache duration | `300000` (5 min) |
 
 ---
 
@@ -357,10 +447,13 @@ MIT License - Feel free to use in your projects!
 - [OpenRouter](https://openrouter.ai)
 - [API Docs](https://openrouter.ai/docs)
 - [Models](https://openrouter.ai/models)
+- [Structured Outputs](https://openrouter.ai/docs/guides/features/structured-outputs)
+- [Streaming Guide](https://openrouter.ai/docs/api/reference/streaming)
+- [Latency Best Practices](https://openrouter.ai/docs/guides/best-practices/latency-and-performance)
 
 ---
 
 <p align="center">
   <strong>Built with 💙 for the AI community</strong><br>
-  <sub>2026 Edition - Agentic AI for Everyone</sub>
+  <sub>v4.0 - 2026 Edition - Agentic AI for Everyone</sub>
 </p>

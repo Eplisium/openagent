@@ -1,16 +1,16 @@
 /**
- * 🌐 Web Tools
+ * 🌐 Web Tools (2026 Edition)
  * Search the web, fetch pages, and browse content
  * 
- * Features:
- * - Multiple search backends (DuckDuckGo, Searx, fallbacks)
- * - Optional API support (Tavily, Serper, Brave)
+ * Modernized with:
+ * - Native fetch (undici) — zero axios dependency
+ * - AbortController for request timeouts
+ * - Multiple search backends with automatic fallback
  * - Smart HTML parsing with multiple extraction strategies
  * - Result caching
  * - Rate limiting protection
  */
 
-import axios from 'axios';
 import { CONFIG } from '../config.js';
 
 /**
@@ -32,29 +32,42 @@ function cleanCache() {
 }
 
 /**
+ * Fetch with timeout using AbortController
+ */
+async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Search using DuckDuckGo HTML (lite version)
  */
 async function searchDuckDuckGo(query, maxResults) {
-  // Try lite version first (more reliable for scraping)
   const searchUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
   
-  const response = await axios.get(searchUrl, {
+  const response = await fetchWithTimeout(searchUrl, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.5',
-      'Accept-Encoding': 'identity',
     },
-    timeout: 15000,
-    maxRedirects: 5,
-  });
+  }, 15000);
   
-  const html = response.data;
+  const html = await response.text();
   const results = [];
   let match;
   
   // DDG Lite uses different HTML structure
-  // Look for result links: <a href="..." class="result-link">
   const liteRegex = /<a[^>]*href="([^"]+)"[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
   while ((match = liteRegex.exec(html)) !== null && results.length < maxResults) {
     const url = match[1];
@@ -86,16 +99,15 @@ async function searchStartpage(query, maxResults) {
   try {
     const searchUrl = `https://www.startpage.com/sp/search?query=${encodeURIComponent(query)}&cat=web&language=english`;
     
-    const response = await axios.get(searchUrl, {
+    const response = await fetchWithTimeout(searchUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
       },
-      timeout: 15000,
-    });
+    }, 15000);
     
-    const html = response.data;
+    const html = await response.text();
     const results = [];
     let match;
     
@@ -103,18 +115,15 @@ async function searchStartpage(query, maxResults) {
     const titleRegex = /<a[^>]*class="[^"]*result-title[^"]*"[^>]*href="([^"]+)"[^>]*>[\s\S]*?<\/a>/gi;
     while ((match = titleRegex.exec(html)) !== null && results.length < maxResults) {
       const url = match[1];
-      // Extract title from the link content
       const titleContent = match[0].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-      // Find description near this result
       const afterMatch = html.substring(match.index, match.index + 1000);
       const descMatch = afterMatch.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
       const snippet = descMatch ? descMatch[1].replace(/<[^>]*>/g, '').trim() : '';
       
       if (url.startsWith('http') && !url.includes('startpage.com') && titleContent.length > 5) {
-        // Clean CSS/style artifacts from title
         let cleanTitle = titleContent
-          .replace(/\.[a-z0-9-]+\{[^}]*\}/gi, '') // Remove CSS rules
-          .replace(/@media[^{]*\{[^}]*\}/gi, '') // Remove media queries
+          .replace(/\.[a-z0-9-]+\{[^}]*\}/gi, '')
+          .replace(/@media[^{]*\{[^}]*\}/gi, '')
           .replace(/\s+/g, ' ')
           .trim();
         
@@ -133,7 +142,6 @@ async function searchStartpage(query, maxResults) {
       const headingRegex = /<h[23][^>]*>([\s\S]*?)<\/h[23]>/gi;
       while ((match = headingRegex.exec(html)) !== null && results.length < maxResults) {
         const title = match[1].replace(/<[^>]*>/g, '').trim();
-        // Find the nearest link before or after
         const before = html.substring(Math.max(0, match.index - 500), match.index);
         const after = html.substring(match.index, match.index + 500);
         
@@ -148,7 +156,7 @@ async function searchStartpage(query, maxResults) {
       }
     }
     
-    // Strategy 3: Generic external link extraction with context
+    // Strategy 3: Generic external link extraction
     if (results.length === 0) {
       const seen = new Set();
       const linkRegex = /href="(https?:\/\/[^"\s]+)"[^>]*>([^<]{5,100})<\/a>/gi;
@@ -177,21 +185,18 @@ async function searchMojeek(query, maxResults) {
   try {
     const searchUrl = `https://www.mojeek.com/search?q=${encodeURIComponent(query)}`;
     
-    const response = await axios.get(searchUrl, {
+    const response = await fetchWithTimeout(searchUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
       },
-      timeout: 15000,
-    });
+    }, 15000);
     
-    const html = response.data;
+    const html = await response.text();
     const results = [];
     let match;
     
-    // Mojeek uses different class names, try multiple patterns
-    // Strategy 1: Look for result titles (usually in h2 or specific classes)
     const titleRegex = /<a[^>]*href="(https?:\/\/[^"\s]+)"[^>]*class="[^"]*"[^>]*>([^<]+)<\/a>/gi;
     const seen = new Set();
     
@@ -201,7 +206,6 @@ async function searchMojeek(query, maxResults) {
       
       if (!url.includes('mojeek.com') && !seen.has(url) && title.length > 10 && !title.includes('{')) {
         seen.add(url);
-        // Try to find snippet near this link
         const after = html.substring(match.index, match.index + 800);
         const snippetMatch = after.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
         const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]*>/g, '').trim() : '';
@@ -243,21 +247,17 @@ async function searchSearx(query, maxResults) {
   
   for (const instance of searxInstances) {
     try {
-      const response = await axios.get(`${instance}/search`, {
-        params: {
-          q: query,
-          format: 'json',
-          categories: 'general',
-          language: 'en',
-        },
+      const url = `${instance}/search?q=${encodeURIComponent(query)}&format=json&categories=general&language=en`;
+      const response = await fetchWithTimeout(url, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; OpenAgent/2.0)',
+          'User-Agent': 'Mozilla/5.0 (compatible; OpenAgent/4.0)',
         },
-        timeout: 10000,
-      });
+      }, 10000);
       
-      if (response.data?.results) {
-        return response.data.results.slice(0, maxResults).map(r => ({
+      const data = await response.json();
+      
+      if (data?.results) {
+        return data.results.slice(0, maxResults).map(r => ({
           title: r.title,
           url: r.url,
           snippet: r.content || '',
@@ -279,22 +279,28 @@ async function searchTavily(query, maxResults) {
   if (!apiKey) return null;
   
   try {
-    const response = await axios.post('https://api.tavily.com/search', {
-      api_key: apiKey,
-      query,
-      max_results: maxResults,
-      include_answer: true,
-      search_depth: 'basic',
-    }, { timeout: 15000 });
+    const response = await fetchWithTimeout('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: apiKey,
+        query,
+        max_results: maxResults,
+        include_answer: true,
+        search_depth: 'basic',
+      }),
+    }, 15000);
     
-    if (response.data?.results) {
+    const data = await response.json();
+    
+    if (data?.results) {
       return {
-        results: response.data.results.map(r => ({
+        results: data.results.map(r => ({
           title: r.title,
           url: r.url,
           snippet: r.content,
         })),
-        answer: response.data.answer,
+        answer: data.answer,
       };
     }
   } catch {}
@@ -310,19 +316,19 @@ async function searchSerper(query, maxResults) {
   if (!apiKey) return null;
   
   try {
-    const response = await axios.post('https://google.serper.dev/search', {
-      q: query,
-      num: maxResults,
-    }, {
+    const response = await fetchWithTimeout('https://google.serper.dev/search', {
+      method: 'POST',
       headers: {
         'X-API-KEY': apiKey,
         'Content-Type': 'application/json',
       },
-      timeout: 10000,
-    });
+      body: JSON.stringify({ q: query, num: maxResults }),
+    }, 10000);
     
-    if (response.data?.organic) {
-      return response.data.organic.slice(0, maxResults).map(r => ({
+    const data = await response.json();
+    
+    if (data?.organic) {
+      return data.organic.slice(0, maxResults).map(r => ({
         title: r.title,
         url: r.link,
         snippet: r.snippet || '',
@@ -341,21 +347,19 @@ async function searchBrave(query, maxResults) {
   if (!apiKey) return null;
   
   try {
-    const response = await axios.get('https://api.search.brave.com/res/v1/web/search', {
-      params: {
-        q: query,
-        count: maxResults,
-      },
+    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${maxResults}`;
+    const response = await fetchWithTimeout(url, {
       headers: {
         'Accept': 'application/json',
         'Accept-Encoding': 'gzip',
         'X-Subscription-Token': apiKey,
       },
-      timeout: 10000,
-    });
+    }, 10000);
     
-    if (response.data?.web?.results) {
-      return response.data.web.results.slice(0, maxResults).map(r => ({
+    const data = await response.json();
+    
+    if (data?.web?.results) {
+      return data.web.results.slice(0, maxResults).map(r => ({
         title: r.title,
         url: r.url,
         snippet: r.description || '',
@@ -505,7 +509,7 @@ function extractReadableText(html, maxChars) {
     .replace(/<svg[\s\S]*?<\/svg>/gi, '')
     .replace(/<!--[\s\S]*?-->/g, '');
   
-  // Try to extract main content (article, main, or content divs)
+  // Try to extract main content
   const mainContentMatch = content.match(/<(?:article|main|div[^>]*class="[^"]*(?:content|post|article|entry)[^"]*")[^>]*>([\s\S]*?)<\/(?:article|main|div)>/i);
   if (mainContentMatch && mainContentMatch[1].length > 500) {
     content = mainContentMatch[1];
@@ -513,12 +517,9 @@ function extractReadableText(html, maxChars) {
   
   // Convert HTML to readable text
   content = content
-    // Preserve line breaks for block elements
     .replace(/<\/(?:p|div|br|h[1-6]|li|tr|blockquote)>/gi, '\n')
     .replace(/<br\s*\/?>/gi, '\n')
-    // Remove remaining tags
     .replace(/<[^>]*>/g, ' ')
-    // Decode common HTML entities
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
@@ -527,14 +528,12 @@ function extractReadableText(html, maxChars) {
     .replace(/&#39;/g, "'")
     .replace(/&mdash;/g, '—')
     .replace(/&ndash;/g, '–')
-    // Clean up whitespace
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   
   // Truncate if needed
   if (content.length > maxChars) {
-    // Try to cut at sentence boundary
     const truncated = content.substring(0, maxChars);
     const lastPeriod = truncated.lastIndexOf('.');
     const lastNewline = truncated.lastIndexOf('\n');
@@ -556,21 +555,17 @@ function extractReadableText(html, maxChars) {
 function extractMetadata(html) {
   const metadata = {};
   
-  // Title
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   if (titleMatch) metadata.title = titleMatch[1].replace(/<[^>]*>/g, '').trim();
   
-  // Meta description
   const descMatch = html.match(/<meta[^>]*name="description"[^>]*content="([^"]*)"[^>]*>/i) ||
                     html.match(/<meta[^>]*content="([^"]*)"[^>]*name="description"[^>]*>/i);
   if (descMatch) metadata.description = descMatch[1];
   
-  // Author
   const authorMatch = html.match(/<meta[^>]*name="author"[^>]*content="([^"]*)"[^>]*>/i) ||
                       html.match(/<meta[^>]*content="([^"]*)"[^>]*name="author"[^>]*>/i);
   if (authorMatch) metadata.author = authorMatch[1];
   
-  // Published date
   const dateMatch = html.match(/<meta[^>]*property="article:published_time"[^>]*content="([^"]*)"[^>]*>/i) ||
                     html.match(/<time[^>]*datetime="([^"]*)"[^>]*>/i);
   if (dateMatch) metadata.publishedDate = dateMatch[1];
@@ -611,19 +606,16 @@ export const readWebpageTool = {
         return { success: false, error: 'URL must start with http:// or https://', url };
       }
       
-      const response = await axios.get(url, {
+      const response = await fetchWithTimeout(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.5',
-          'Accept-Encoding': 'identity',
         },
-        timeout: 20000,
-        responseType: 'text',
-        maxRedirects: 5,
-      });
+        redirect: 'follow',
+      }, 20000);
       
-      const html = response.data;
+      const html = await response.text();
       const metadata = extractMetadata(html);
       let content;
       
@@ -660,14 +652,13 @@ export const readWebpageTool = {
         metadata,
         length: content.length,
         status: response.status,
-        contentType: response.headers['content-type'],
+        contentType: response.headers.get('content-type'),
       };
     } catch (error) {
       return { 
         success: false, 
         error: error.message, 
         url,
-        status: error.response?.status,
       };
     }
   },
@@ -705,36 +696,45 @@ export const fetchUrlTool = {
   },
   async execute({ url, method = 'GET', headers = {}, body }) {
     try {
-      const config = {
+      const fetchOptions = {
         method,
-        url,
         headers: {
-          'User-Agent': 'OpenRouter-Agent/2.0',
+          'User-Agent': 'OpenAgent/4.0',
           ...headers,
         },
-        timeout: 30000,
       };
       
       if (body && (method === 'POST' || method === 'PUT')) {
-        config.data = body;
+        fetchOptions.body = body;
         if (!headers['Content-Type']) {
-          config.headers['Content-Type'] = 'application/json';
+          fetchOptions.headers['Content-Type'] = 'application/json';
         }
       }
       
-      const response = await axios(config);
+      const response = await fetchWithTimeout(url, fetchOptions, 30000);
       
-      let data = response.data;
-      if (typeof data === 'object') {
-        data = JSON.stringify(data, null, 2);
+      let data = await response.text();
+      
+      // Try to parse as JSON for pretty printing
+      try {
+        const parsed = JSON.parse(data);
+        data = JSON.stringify(parsed, null, 2);
+      } catch {
+        // Keep as text
       }
+      
+      // Collect response headers
+      const responseHeaders = {};
+      response.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+      });
       
       return {
         success: true,
         url,
         status: response.status,
         statusText: response.statusText,
-        headers: response.headers,
+        headers: responseHeaders,
         data: typeof data === 'string' ? data.substring(0, 10000) : data,
         truncated: typeof data === 'string' && data.length > 10000,
       };
@@ -743,7 +743,6 @@ export const fetchUrlTool = {
         success: false,
         error: error.message,
         url,
-        status: error.response?.status,
       };
     }
   },

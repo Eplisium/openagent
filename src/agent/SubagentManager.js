@@ -1,5 +1,5 @@
 /**
- * 🤝 Subagent Manager v3.2
+ * 🤝 Subagent Manager v4.0
  * Production-grade subagent lifecycle, task delegation, and result aggregation
  * 
  * Major improvements:
@@ -11,6 +11,9 @@
  * - Resource pooling to avoid redundant tool registrations
  * - Isolated console output with indented subagent logs
  * - Task dependency chains for sequential workflows
+ * - AbortController support for cancelling subagent execution
+ * - Real-time progress callbacks
+ * - Graceful shutdown on parent abort
  */
 
 import { Agent } from './Agent.js';
@@ -369,6 +372,45 @@ export class SubagentManager {
       totalRetries: 0,
       bySpecialization: {},
     };
+    
+    // Abort support
+    this.aborted = false;
+    this.abortController = null;
+    this.activeSubagents = new Set();
+  }
+  
+  /**
+   * Abort all running subagents
+   */
+  abort() {
+    this.aborted = true;
+    if (this.abortController) {
+      this.abortController.abort();
+    }
+    // Abort all active subagents
+    for (const subagent of this.activeSubagents) {
+      if (subagent.abort) {
+        subagent.abort();
+      }
+    }
+  }
+  
+  /**
+   * Reset abort state
+   */
+  resetAbort() {
+    this.aborted = false;
+    this.abortController = null;
+    this.activeSubagents.clear();
+  }
+  
+  /**
+   * Check if aborted
+   */
+  checkAborted() {
+    if (this.aborted) {
+      throw new Error('SubagentManager was aborted');
+    }
   }
 
   // ─── Task ID Generation ────────────────────────────────────────
@@ -406,6 +448,9 @@ export class SubagentManager {
       streaming: false, // Subagents never stream
       workingDir: this.workingDir,
       maxToolResultChars: customOptions.maxToolResultChars || 20000,
+      // Use longer timeouts for subagents to handle complex tasks
+      maxRetries: 2,
+      retryDelay: 2000,
     });
     
     return agent;
@@ -457,6 +502,8 @@ export class SubagentManager {
   // ─── Task Execution with Retry ─────────────────────────────────
 
   async executeTask(subagentTask) {
+    this.checkAborted();
+    
     subagentTask.state = TaskState.RUNNING;
     subagentTask.startTime = Date.now();
     this.runningTasks.add(subagentTask.id);
@@ -485,6 +532,7 @@ export class SubagentManager {
         // Create fresh subagent for each attempt
         const subagent = this.createSubagent(subagentTask.specialization);
         subagentTask.subagent = subagent;
+        this.activeSubagents.add(subagent);
         
         // Wire up progress logging for verbose mode
         if (this.verbose) {
@@ -523,6 +571,7 @@ export class SubagentManager {
         // Cleanup on success
         this.runningTasks.delete(subagentTask.id);
         this.completedTasks.push(subagentTask);
+        this.activeSubagents.delete(subagent);
         
         return {
           success: true,
@@ -561,6 +610,9 @@ export class SubagentManager {
     // Cleanup
     this.runningTasks.delete(subagentTask.id);
     this.completedTasks.push(subagentTask);
+    if (subagentTask.subagent) {
+      this.activeSubagents.delete(subagentTask.subagent);
+    }
     
     return {
       success: false,
@@ -575,6 +627,8 @@ export class SubagentManager {
   // ─── Parallel Task Delegation ──────────────────────────────────
 
   async delegateParallel(tasks, options = {}) {
+    this.checkAborted();
+    
     const maxConcurrent = options.maxConcurrent || this.maxConcurrent;
     const results = [];
     
@@ -641,6 +695,8 @@ export class SubagentManager {
   // ─── Parallel with Synthesis ───────────────────────────────────
 
   async delegateWithSynthesis(tasks, synthesisPrompt, options = {}) {
+    this.checkAborted();
+    
     // Run all tasks in parallel
     const results = await this.delegateParallel(tasks, options);
     
@@ -721,6 +777,8 @@ Please synthesize these results into a single coherent, well-organized response.
   // ─── Sequential Pipeline ───────────────────────────────────────
 
   async delegatePipeline(stages, options = {}) {
+    this.checkAborted();
+    
     const results = [];
     let previousResult = null;
     
@@ -820,6 +878,13 @@ Please synthesize these results into a single coherent, well-organized response.
         this.tasks.delete(id);
       }
     }
+  }
+  
+  /**
+   * Get active subagent count
+   */
+  getActiveCount() {
+    return this.activeSubagents.size;
   }
 
   // ─── Static Helpers ────────────────────────────────────────────

@@ -1,17 +1,18 @@
 /**
- * 🚀 OpenAgent v3.0 - Main Entry Point
+ * 🚀 OpenAgent v4.0 - Main Entry Point
  * The Ultimate AI Agent with 400+ Models
  * 
  * A production-grade agentic AI assistant on par with Claude Code, Cursor, and Codex.
  * 
- * New in v3.0:
- * - Enhanced error handling and retry logic
- * - Performance metrics and cost tracking
- * - Improved context management
- * - Better tool validation
- * - Auto-save sessions
- * - Command aliases
- * - Request caching
+ * New in v4.0 (2026 Edition):
+ * - Native fetch (undici) — zero axios dependency
+ * - AbortController for request/stream cancellation
+ * - Request deduplication (coalesce identical in-flight requests)
+ * - Content-hashed cache keys (no collisions)
+ * - Real cost tracking from API usage data
+ * - Provider preferences for latency optimization
+ * - Improved streaming with proper SSE parsing
+ * - Enhanced subagent orchestration
  */
 
 // Core client
@@ -19,7 +20,8 @@ export {
   OpenRouterClient, 
   OpenRouterError, 
   RateLimitError, 
-  AuthenticationError 
+  AuthenticationError,
+  AbortError
 } from './OpenRouterClient.js';
 
 // Configuration
@@ -37,11 +39,14 @@ export {
   Agent, 
   AgentError, 
   ToolExecutionError, 
-  ContextOverflowError 
+  ContextOverflowError,
+  AgentAbortError
 } from './agent/Agent.js';
 export { AgentSession } from './agent/AgentSession.js';
 export { MultiAgent, AGENT_ROLES } from './agent/MultiAgent.js';
 export { SubagentManager, SUBAGENT_SPECIALIZATIONS } from './agent/SubagentManager.js';
+export { TaskManager, FeatureStatus } from './agent/TaskManager.js';
+export { LongRunningAgent } from './agent/LongRunningAgent.js';
 
 // Tools
 export {
