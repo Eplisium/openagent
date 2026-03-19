@@ -351,6 +351,126 @@ Example:
         };
       },
     },
+
+    {
+      name: 'send_subagent_message',
+      description: `Send a message to a subagent's message queue. Messages persist even after the subagent completes, enabling post-completion communication between the parent agent and subagents.
+
+Use cases:
+- Send follow-up instructions to a completed subagent's results
+- Share context between sequential subagent tasks
+- Notify a subagent of changes made by other subagents`,
+      category: 'subagent',
+      parameters: {
+        type: 'object',
+        properties: {
+          subagentId: {
+            type: 'string',
+            description: 'The task ID of the target subagent (returned from delegate_task or subagent_status).',
+          },
+          message: {
+            type: 'string',
+            description: 'The message content to send.',
+          },
+        },
+        required: ['subagentId', 'message'],
+      },
+      timeout: 5000,
+      async execute(args) {
+        try {
+          const result = subagentManager.sendMessage(args.subagentId, args.message);
+          return { success: true, ...result };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      },
+    },
+
+    {
+      name: 'get_subagent_messages',
+      description: `Retrieve and clear all pending messages for a subagent. Returns messages that were sent to this subagent's task ID via send_subagent_message.`,
+      category: 'subagent',
+      parameters: {
+        type: 'object',
+        properties: {
+          subagentId: {
+            type: 'string',
+            description: 'The task ID of the subagent to retrieve messages for.',
+          },
+        },
+        required: ['subagentId'],
+      },
+      timeout: 5000,
+      async execute(args) {
+        try {
+          const messages = subagentManager.receiveMessages(args.subagentId);
+          return { success: true, messages, count: messages.length };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      },
+    },
+
+    {
+      name: 'set_shared_context',
+      description: `Set a shared context value accessible by all subagents. Use this to share data (analysis results, file lists, configurations) between subagents without direct messaging.
+
+Examples:
+- set_shared_context({ key: "target_files", value: ["src/auth.js", "src/middleware.js"] })
+- set_shared_context({ key: "review_findings", value: { critical: 2, warnings: 5 } })`,
+      category: 'subagent',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: {
+            type: 'string',
+            description: 'The context key. Use descriptive names like "analysis_results" or "target_files".',
+          },
+          value: {
+            description: 'The value to store (string, number, object, or array). Must be JSON-serializable.',
+          },
+        },
+        required: ['key', 'value'],
+      },
+      timeout: 5000,
+      async execute(args) {
+        try {
+          subagentManager.setSharedContext(args.key, args.value);
+          return { success: true, key: args.key };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      },
+    },
+
+    {
+      name: 'get_shared_context',
+      description: `Get a shared context value by key, or retrieve all shared context if no key is specified.`,
+      category: 'subagent',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: {
+            type: 'string',
+            description: 'The context key to retrieve. Omit to get all shared context as an object.',
+          },
+        },
+      },
+      timeout: 5000,
+      async execute(args) {
+        try {
+          if (args.key) {
+            const value = subagentManager.getSharedContext(args.key);
+            return { success: true, key: args.key, value, found: value !== undefined };
+          } else {
+            const allContext = subagentManager.getAllSharedContext();
+            return { success: true, context: allContext, keys: Object.keys(allContext) };
+          }
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      },
+    },
   ];
 }
 

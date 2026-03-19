@@ -10,6 +10,7 @@ import chalk from 'chalk';
 import ora from 'ora';
 import boxen from 'boxen';
 import inquirer from 'inquirer';
+import { promptWithTerminalReset } from './cli/terminal.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CACHE_FILE = path.join(__dirname, '../.model-cache.json');
@@ -189,7 +190,7 @@ export class ModelBrowser {
    * Interactive model picker
    */
   async pickModel({ currentModel = null } = {}) {
-    const { sortMode } = await inquirer.prompt([{
+    const { sortMode } = await promptWithTerminalReset([{
       type: 'list',
       name: 'sortMode',
       message: 'Browse models by:',
@@ -299,7 +300,7 @@ export class ModelBrowser {
    * Pick by search
    */
   async pickBySearch(currentModel) {
-    const { query } = await inquirer.prompt([{
+    const { query } = await promptWithTerminalReset([{
       type: 'input',
       name: 'query',
       message: 'Search models:',
@@ -395,7 +396,7 @@ export class ModelBrowser {
   async pickByProvider(currentModel) {
     const providers = this.getProviders();
     
-    const { provider } = await inquirer.prompt([{
+    const { provider } = await promptWithTerminalReset([{
       type: 'list',
       name: 'provider',
       message: 'Select company:',
@@ -458,7 +459,7 @@ export class ModelBrowser {
     choices.push(new inquirer.Separator());
     choices.push({ name: '← Back', value: 'back' });
 
-    const { modelId } = await inquirer.prompt([{
+    const { modelId } = await promptWithTerminalReset([{
       type: 'list',
       name: 'modelId',
       message: `${title} (${models.length}):`,
@@ -473,7 +474,7 @@ export class ModelBrowser {
     if (selected) {
       this.printModelDetails(selected);
       
-      const { action } = await inquirer.prompt([{
+      const { action } = await promptWithTerminalReset([{
         type: 'list',
         name: 'action',
         message: 'Action:',

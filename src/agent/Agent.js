@@ -1,76 +1,13 @@
 
 
-import { OpenRouterClient, AbortError } from '../OpenRouterClient.js';
+import { OpenRouterClient } from '../OpenRouterClient.js';
+import { AgentError, ToolExecutionError, ContextOverflowError, AgentAbortError, AbortError } from '../errors.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
 import { CONFIG } from '../config.js';
+import { normalizeOptionalLimit, normalizePositiveInt } from '../utils.js';
 import chalk from 'chalk';
 
-function normalizeOptionalLimit(value, fallback = null) {
-  const candidate = value ?? fallback;
-
-  if (candidate === undefined || candidate === null || candidate === '') {
-    return null;
-  }
-
-  const normalized = String(candidate).trim().toLowerCase();
-  if (!normalized || ['0', 'none', 'null', 'unlimited', 'infinity', 'inf', 'auto'].includes(normalized)) {
-    return null;
-  }
-
-  const parsed = parseInt(normalized, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function normalizePositiveInt(value, fallback) {
-  const candidate = value ?? fallback;
-
-  if (candidate === undefined || candidate === null || candidate === '') {
-    return fallback;
-  }
-
-  const parsed = parseInt(candidate, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-/**
- * Custom error types for better error handling
- */
-export class AgentError extends Error {
-  constructor(message, code, details = {}) {
-    super(message);
-    this.name = 'AgentError';
-    this.code = code;
-    this.details = details;
-    this.timestamp = new Date().toISOString();
-  }
-}
-
-export class ToolExecutionError extends AgentError {
-  constructor(toolName, originalError) {
-    super(`Tool '${toolName}' failed: ${originalError.message}`, 'TOOL_EXECUTION_ERROR', {
-      toolName,
-      originalError: originalError.message,
-    });
-    this.name = 'ToolExecutionError';
-  }
-}
-
-export class ContextOverflowError extends AgentError {
-  constructor(currentTokens, maxTokens) {
-    super(`Context overflow: ${currentTokens} tokens exceeds limit of ${maxTokens}`, 'CONTEXT_OVERFLOW', {
-      currentTokens,
-      maxTokens,
-    });
-    this.name = 'ContextOverflowError';
-  }
-}
-
-export class AgentAbortError extends AgentError {
-  constructor(message = 'Agent execution aborted') {
-    super(message, 'AGENT_ABORTED');
-    this.name = 'AgentAbortError';
-  }
-}
+export { AgentError, ToolExecutionError, ContextOverflowError, AgentAbortError } from '../errors.js';
 
 export class Agent {
   constructor(options = {}) {
@@ -143,7 +80,7 @@ export class Agent {
 
     // Circuit breaker: track consecutive failures by error type
     this.consecutiveFailures = {}; // { errorCategory: count }
-    this.circuitBreakerThreshold = 3;
+    this.circuitBreakerThreshold = options.circuitBreakerThreshold || CONFIG.CIRCUIT_BREAKER_THRESHOLD;
     this.circuitBreakerTripped = false;
 
     // Stall detection: track last tool call for repeated identical calls
@@ -161,49 +98,35 @@ export class Agent {
    * Enhanced system prompt with better instructions
    */
   defaultSystemPrompt() {
-    return `You are an advanced AI assistant with access to powerful tools. You can:
-- Read, write, and edit files
-- Execute shell commands
-- Search the web and fetch URLs
-- Work with git repositories
-- Search through codebases
-
+    return `You are an advanced AI assistant with access to powerful tools for coding, file management, shell execution, web research, and git operations.
+ 
 ## How You Work
 1. **Understand** the user's request carefully
 2. **Plan** your approach if the task is complex
 3. **Act** using available tools to accomplish the task
 4. **Verify** your work by checking results
 5. **Iterate** until the task is complete
+ 
+## ✏️ CRITICAL: File Editing Rules
+The #1 cause of failures is using wrong text in edit_file. Follow these rules ALWAYS:
 
+1. **ALWAYS read_file before editing** — no exceptions
+2. **Copy find text VERBATIM** from the read_file output — exact whitespace, indentation, everything
+3. **If edit_file fails with "not found"**: Re-read the file, get exact text, retry. NEVER retry with the same text.
+4. **Use line-based editing** (startLine/endLine) when you know line numbers — it avoids the "not found" problem entirely
+5. **Use search_and_replace** for bulk renames/refactoring — regex-based, supports dryRun preview
+6. **Use write_file** for large rewrites (>30% of file) instead of many small edits
+7. **Batch edits with continueOnError: true** so one failure doesn't block others
+ 
 ## Guidelines
 - Be concise but thorough
-- Show your work and explain what you're doing
-- If something fails, try alternative approaches
-- Ask for clarification when the request is ambiguous
-- For code tasks, write clean, well-documented code
+- If a tool fails, try a DIFFERENT approach (don't retry the same thing)
+- Batch independent read operations for speed
 - Always verify file operations succeeded
-- Use the most appropriate tool for each task
-
-## Tool Usage
-- Use tools proactively to gather context before making changes
-- Read files before editing them
-- Check git status before committing
-- Test code after writing it
-
-## Error Handling
-- If a tool fails, analyze the error and try alternative approaches
-- For file operations, check if paths exist before writing
-- For shell commands, verify the command is correct before executing
-- If you encounter repeated failures, explain the issue and suggest solutions
-
-## Performance
-- Batch related operations when possible
-- Use search tools to find relevant code before making changes
-- Minimize unnecessary file reads by checking file info first
-
+- For code tasks, write clean, well-documented code
+ 
 When you have completed the task, provide a clear summary of what was done.`;
   }
-
   /**
    * Abort the current execution
    */
@@ -621,13 +544,19 @@ When you have completed the task, provide a clear summary of what was done.`;
         for (const result of toolResults) {
           let content = JSON.stringify(result.result);
           
-          // Truncate large tool results
+          // Truncate large tool results at line boundaries
           if (content.length > this.maxToolResultChars) {
             const original = content;
-            content = content.substring(0, this.maxToolResultChars) + 
-              '\n\n... [truncated - original was ' + original.length + ' chars]';
+            // Find a good truncation point at a line boundary
+            let cutPoint = this.maxToolResultChars;
+            const newlineBefore = content.lastIndexOf('\n', this.maxToolResultChars);
+            if (newlineBefore > this.maxToolResultChars * 0.8) {
+              cutPoint = newlineBefore;
+            }
+            content = content.substring(0, cutPoint) + 
+              '\n\n... [truncated - showing ' + cutPoint + ' of ' + original.length + ' chars. Use startLine/endLine parameters for partial reads.]';
             
-            const truncationMessage = `Tool result truncated (${original.length} -> ${content.length} chars)`;
+            const truncationMessage = `Tool result truncated (${original.length} -> ${cutPoint} chars)`;
             if (!this.emitStatus('truncate', truncationMessage) && this.shouldEmitVerboseLogs()) {
               console.log(chalk.yellow(`   ⚠️ ${truncationMessage}`));
             }
@@ -640,6 +569,26 @@ When you have completed the task, provide a clear summary of what was done.`;
           });
         }
         
+        // Smart edit recovery: if edit_file failed with "text not found", inject a helpful hint
+        const editFailures = toolResults.filter(r => 
+          r.toolName === 'edit_file' && 
+          r.result && 
+          r.result.success === false && 
+          r.result.error && 
+          (r.result.error.includes('Text not found') || r.result.error.includes('not found in file'))
+        );
+        if (editFailures.length > 0) {
+          const failure = editFailures[0];
+          const failedPath = failure.args?.path || 'unknown file';
+          const hint = `[System] edit_file failed: The 'find' text did not match the file content. ` +
+            `This usually means the text was generated from memory instead of copied verbatim from read_file output. ` +
+            `IMMEDIATE FIX: (1) Use read_file to get the current content of "${failedPath}", ` +
+            `(2) Copy the EXACT text from the read_file output as the 'find' parameter, ` +
+            `(3) Or use line-based editing with startLine/endLine. ` +
+            `Do NOT retry with the same text that just failed.`;
+          this.pushMessage({ role: 'user', content: hint });
+        }
+
         // Record in history
         const iterationRecord = {
           iteration: this.iterationCount,
@@ -770,10 +719,19 @@ When you have completed the task, provide a clear summary of what was done.`;
     const independentTools = [];
     const dependentTools = [];
     
-    // Simple heuristic: file reads can be parallel, writes should be sequential
+    // Expanded heuristic: all read-only tools can run in parallel
+    const readOnlyTools = new Set([
+      'read_file', 'list_directory', 'search_in_files', 'get_file_info',
+      'find_files', 'diff_files', 'preview_edit', 'read_image',
+      'git_status', 'git_log', 'git_diff', 'git_info',
+      'web_search', 'read_webpage', 'fetch_url',
+      'system_info', 'process_status',
+      'get_memory', 'list_skills',
+      'get_task_status', 'get_progress_report',
+      'subagent_status', 'get_subagent_messages', 'get_shared_context',
+    ]);
     for (const toolCall of toolCalls) {
-      const toolName = toolCall.name;
-      if (toolName.startsWith('read_') || toolName === 'list_directory' || toolName === 'search_in_files') {
+      if (readOnlyTools.has(toolCall.name)) {
         independentTools.push(toolCall);
       } else {
         dependentTools.push(toolCall);
@@ -818,7 +776,9 @@ When you have completed the task, provide a clear summary of what was done.`;
         const errorCategory = this.categorizeError({ message: result.result.error || '' });
         this.consecutiveFailures[errorCategory] = (this.consecutiveFailures[errorCategory] || 0) + 1;
 
-        if (this.consecutiveFailures[errorCategory] >= this.circuitBreakerThreshold) {
+        // EDIT_MISMATCH trips faster (2 instead of default threshold)
+        const threshold = errorCategory === 'EDIT_MISMATCH' ? 2 : this.circuitBreakerThreshold;
+        if (this.consecutiveFailures[errorCategory] >= threshold) {
           this.circuitBreakerTripped = true;
           const suggestion = this.getRecoverySuggestion(result.result.error, result.toolName);
           const circuitMessage = `Circuit breaker tripped: ${errorCategory} errors (${this.consecutiveFailures[errorCategory]} consecutive). ${suggestion}`;
@@ -931,6 +891,9 @@ When you have completed the task, provide a clear summary of what was done.`;
     if (message.includes('econnrefused') || message.includes('network') || message.includes('dns') || message.includes('fetch failed')) {
       return 'NETWORK';
     }
+    if (message.includes('text not found') || message.includes('not found in file')) {
+      return 'EDIT_MISMATCH';
+    }
     if (message.includes('json') || message.includes('parse') || message.includes('unexpected token')) {
       return 'PARSE_ERROR';
     }
@@ -962,6 +925,7 @@ When you have completed the task, provide a clear summary of what was done.`;
       PARSE_ERROR: `The ${toolName} tool returned unparseable data. Try: (1) checking if the input arguments are correctly formatted, (2) verifying the tool is being used with valid parameters, or (3) simplifying the request.`,
       RATE_LIMIT: `The ${toolName} tool hit a rate limit. Try: (1) waiting before retrying, (2) reducing the frequency of calls, or (3) batching multiple operations into fewer calls.`,
       SIZE_LIMIT: `The ${toolName} tool encountered a size limit. Try: (1) reducing the amount of data being processed, (2) using pagination or chunking, or (3) filtering results to be more specific.`,
+      EDIT_MISMATCH: `The edit_file tool could not find the exact text in the file. This is the most common error. IMMEDIATE RECOVERY: (1) Re-read the file with read_file to get the CURRENT content, (2) Copy the EXACT text verbatim from the read_file output as the 'find' parameter, (3) Or use line-based editing with startLine/endLine instead. NEVER retry with the same text that just failed.`,
       UNKNOWN: `The ${toolName} tool failed with: "${errorMessage.substring(0, 100)}". Try: (1) reviewing the error details, (2) checking tool documentation, (3) using an alternative approach, or (4) breaking the task into smaller steps.`,
     };
 

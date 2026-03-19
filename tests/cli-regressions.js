@@ -4,10 +4,14 @@ import os from 'os';
 import path from 'path';
 
 import { CLI } from '../src/cli.js';
+import { ModelBrowser } from '../src/ModelBrowser.js';
+import { MultilineInput } from '../src/cli/multilineInput.js';
+import { promptWithTerminalReset, resetTerminalInput } from '../src/cli/terminal.js';
 import { Agent } from '../src/agent/Agent.js';
 import { AgentSession } from '../src/agent/AgentSession.js';
 
 const tests = [];
+
 
 function test(name, fn) {
   tests.push({ name, fn });
@@ -128,6 +132,151 @@ test('AgentSession reuses active workspace for follow-up tasks', async () => {
     assert.equal(session.activeWorkspace.workspaceDir, activeWorkspace.workspaceDir);
   } finally {
     await fs.remove(workingDir);
+  }
+});
+
+test('MultilineInput treats CRLF as submit on Windows terminals', () => {
+  const input = new MultilineInput();
+  input._active = true;
+
+  let submitted = 0;
+  input._submit = () => {
+    submitted++;
+  };
+  input._insertText = () => {
+    throw new Error('CRLF should submit, not be inserted as pasted text');
+  };
+
+  input._onData('\r\n');
+
+  assert.equal(submitted, 1);
+});
+
+test('MultilineInput clears the full rendered block from cursor position', () => {
+  const input = new MultilineInput();
+  const writes = [];
+
+  input.stdout = {
+    write(chunk) {
+      writes.push(chunk);
+      return true;
+    },
+  };
+
+  input._rendered = 3;
+  input._cursorRenderLine = 1;
+
+  input._clearRenderedBlock();
+
+  assert.deepEqual(writes, [
+    '\x1b[1A',
+    '\r\x1b[2K',
+    '\x1b[1B',
+    '\r\x1b[2K',
+    '\x1b[1B',
+    '\r\x1b[2K',
+    '\x1b[2A',
+    '\r',
+  ]);
+  assert.equal(input._rendered, 0);
+  assert.equal(input._cursorRenderLine, 0);
+});
+
+test('resetTerminalInput drains pending stdin bytes and disables raw mode', async () => {
+  const states = [];
+  const buffered = ['\r', '\n', null];
+  const input = {
+    isTTY: true,
+    pause() {
+      states.push('pause');
+    },
+    setRawMode(value) {
+      states.push(`raw:${value}`);
+    },
+    resume() {
+      states.push('resume');
+    },
+    read() {
+      return buffered.shift();
+    },
+  };
+
+  await resetTerminalInput(input);
+
+  assert.deepEqual(states, ['pause', 'raw:false', 'resume']);
+  assert.equal(buffered.length, 0);
+});
+
+test('promptWithTerminalReset uses a fresh prompt module after terminal reset', async () => {
+  const events = [];
+  const input = {
+    isTTY: true,
+    pause() {
+      events.push('pause');
+    },
+    setRawMode(value) {
+      events.push(`raw:${value}`);
+    },
+    resume() {
+      events.push('resume');
+    },
+    read() {
+      events.push('read');
+      return null;
+    },
+  };
+
+  const promptModule = {
+    createPromptModule({ input: promptInput, output }) {
+      events.push(promptInput === input ? 'prompt:input-ok' : 'prompt:input-bad');
+      events.push(output === process.stdout ? 'prompt:output-ok' : 'prompt:output-bad');
+      return async (questions) => {
+        events.push(`questions:${questions.length}`);
+        return { ok: true };
+      };
+    },
+  };
+
+  const result = await promptWithTerminalReset([{ type: 'confirm', name: 'ok' }], {
+    input,
+    output: process.stdout,
+    promptModule,
+  });
+
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(events, [
+    'pause',
+    'raw:false',
+    'resume',
+    'read',
+    'prompt:input-ok',
+    'prompt:output-ok',
+    'questions:1',
+  ]);
+});
+
+test('ModelBrowser uses terminal-safe prompt wrapper for model selection', async () => {
+  const browser = new ModelBrowser();
+  browser.models = [{ id: 'demo/model', name: 'Demo', provider: 'Demo' }];
+
+  let promptCalls = 0;
+  browser.pickFromList = async (models) => {
+    assert.equal(models.length, 1);
+    return models[0].id;
+  };
+
+  const originalPrompt = globalThis.__OPENAGENT_TEST_PROMPT__;
+  globalThis.__OPENAGENT_TEST_PROMPT__ = async () => {
+    promptCalls++;
+    return { sortMode: 'all' };
+  };
+
+  try {
+    const selected = await browser.pickModel();
+    assert.equal(selected, 'demo/model');
+    assert.equal(promptCalls, 1);
+  } finally {
+    globalThis.__OPENAGENT_TEST_PROMPT__ = originalPrompt;
   }
 });
 

@@ -218,9 +218,6 @@ export class AgentSession {
     this.metadata.updated = new Date().toISOString();
     this.metadata.lastTask = task.substring(0, 100);
     
-    // Load hooks
-    await this.hookManager.load();
-    
     // Create checkpoint before running
     this.createCheckpoint('before_task');
     
@@ -228,16 +225,11 @@ export class AgentSession {
       const result = await this.agent.run(task);
       result.workspace = this.activeWorkspace;
       
-      // Run stop hooks
-      await this.hookManager.runStop({ reason: 'task_complete', task });
-      
       // Create checkpoint after successful run
       this.createCheckpoint('after_task');
       
       return result;
     } catch (error) {
-      // Run stop hooks on error
-      await this.hookManager.runStop({ reason: 'error', error: error.message });
       console.error(chalk.red(`\n❌ Error: ${error.message}`));
       throw error;
     }

@@ -60,11 +60,6 @@ export {
   createSubagentTools,
 } from './tools/index.js';
 
-// Memory & Skills
-export { MemoryManager } from './memory/MemoryManager.js';
-export { SkillManager, Skill } from './skills/SkillManager.js';
-export { HookManager, HookType } from './hooks/HookManager.js';
-
 // CLI
 export { CLI } from './cli.js';
 

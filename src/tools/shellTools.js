@@ -7,31 +7,15 @@ import { exec as execCb, spawn } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import os from 'os';
-import { buildOpenAgentEnv, resolveAgentPath } from '../paths.js';
+import { buildOpenAgentEnv, createPathContext, resolveAgentPath } from '../paths.js';
+import { CONFIG } from '../config.js';
+import { ProcessManager } from './ProcessManager.js';
+
+const defaultProcessManager = new ProcessManager();
 
 const execAsync = promisify(execCb);
 const PATH_PREFIX_NOTE = 'Supports project:, workdir:, and workspace: prefixes.';
 
-function createPathContext(options = {}) {
-  const getBaseDir = typeof options.getBaseDir === 'function'
-    ? options.getBaseDir
-    : () => options.baseDir || options.workingDir || process.cwd();
-  const getWorkspaceDir = typeof options.getWorkspaceDir === 'function'
-    ? options.getWorkspaceDir
-    : () => options.workspaceDir || null;
-
-  return {
-    getBaseDir: () => path.resolve(getBaseDir()),
-    getWorkspaceDir: () => {
-      const workspaceDir = getWorkspaceDir();
-      return workspaceDir ? path.resolve(workspaceDir) : null;
-    },
-    resolvePath: (inputPath = '.') => resolveAgentPath(inputPath, {
-      baseDir: getBaseDir(),
-      workspaceDir: getWorkspaceDir(),
-    }),
-  };
-}
 
 /**
  * Detect if a command needs PowerShell
@@ -55,6 +39,7 @@ export function detectPowerShell(command) {
 }
 
 export function createShellTools(options = {}) {
+  const processManager = options.processManager || defaultProcessManager;
   const pathContext = createPathContext(options);
   const resolvePathForAgent = pathContext.resolvePath;
   const buildToolEnv = (extraEnv = {}) => ({
@@ -92,7 +77,7 @@ export function createShellTools(options = {}) {
       },
       required: ['command'],
     },
-    async execute({ command, cwd = '.', timeout = 30000, env = {} }) {
+    async execute({ command, cwd = '.', timeout = CONFIG.EXEC_DEFAULT_TIMEOUT_MS, env = {} }) {
       try {
         const resolvedCwd = resolvePathForAgent(cwd);
 
@@ -103,7 +88,7 @@ export function createShellTools(options = {}) {
           cwd: resolvedCwd,
           timeout,
           env: buildToolEnv(env),
-          maxBuffer: 10 * 1024 * 1024,
+          maxBuffer: CONFIG.EXEC_MAX_BUFFER_BYTES,
           encoding: 'utf-8',
           shell,
         });
@@ -168,29 +153,30 @@ export function createShellTools(options = {}) {
         const pid = proc.pid;
         const procLabel = label || `bg_${pid}`;
 
-        if (!global.__bgProcesses) global.__bgProcesses = {};
-        global.__bgProcesses[procLabel] = {
+        processManager.add(procLabel, {
           pid,
           proc,
           command,
           cwd: resolvedCwd,
           startTime: Date.now(),
           label: procLabel,
-        };
+        });
 
         let output = '';
         proc.stdout.on('data', data => {
           output += data.toString();
-          if (output.length > 50000) output = output.slice(-25000);
-          if (global.__bgProcesses[procLabel]) {
-            global.__bgProcesses[procLabel].output = output;
+          if (output.length > CONFIG.BG_PROCESS_OUTPUT_LIMIT) output = output.slice(-CONFIG.BG_PROCESS_OUTPUT_TRIM);
+          const p = processManager.get(procLabel);
+          if (p) {
+            p.output = output;
           }
         });
         proc.stderr.on('data', data => {
           output += data.toString();
-          if (output.length > 50000) output = output.slice(-25000);
-          if (global.__bgProcesses[procLabel]) {
-            global.__bgProcesses[procLabel].output = output;
+          if (output.length > CONFIG.BG_PROCESS_OUTPUT_LIMIT) output = output.slice(-CONFIG.BG_PROCESS_OUTPUT_TRIM);
+          const p = processManager.get(procLabel);
+          if (p) {
+            p.output = output;
           }
         });
 
@@ -231,11 +217,9 @@ export function createShellTools(options = {}) {
       required: ['action'],
     },
     async execute({ action, label }) {
-      const processes = global.__bgProcesses || {};
-
       switch (action) {
         case 'list': {
-          const list = Object.values(processes).map(p => ({
+          const list = processManager.list().map(p => ({
             label: p.label,
             pid: p.pid,
             command: p.command,
@@ -246,7 +230,7 @@ export function createShellTools(options = {}) {
         }
 
         case 'status': {
-          const p = processes[label];
+          const p = processManager.get(label);
           if (!p) return { success: false, error: `Process "${label}" not found` };
           return {
             success: true,
@@ -258,7 +242,7 @@ export function createShellTools(options = {}) {
         }
 
         case 'output': {
-          const p = processes[label];
+          const p = processManager.get(label);
           if (!p) return { success: false, error: `Process "${label}" not found` };
           return {
             success: true,
@@ -268,11 +252,11 @@ export function createShellTools(options = {}) {
         }
 
         case 'kill': {
-          const p = processes[label];
+          const p = processManager.get(label);
           if (!p) return { success: false, error: `Process "${label}" not found` };
           try {
             p.proc.kill();
-            delete processes[label];
+            processManager.remove(label);
             return { success: true, message: `Process "${label}" killed` };
           } catch (error) {
             return { success: false, error: error.message };
@@ -371,4 +355,4 @@ export const [
 
 export const shellTools = defaultShellTools;
 
-export default shellTools;
+export { ProcessManager, defaultProcessManager };

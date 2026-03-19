@@ -12,17 +12,9 @@
  */
 
 import chalk from 'chalk';
+import { ToolErrorType } from '../errors.js';
 
-/**
- * Tool execution error types
- */
-export const ToolErrorType = {
-  NOT_FOUND: 'TOOL_NOT_FOUND',
-  VALIDATION_ERROR: 'VALIDATION_ERROR',
-  PERMISSION_DENIED: 'PERMISSION_DENIED',
-  EXECUTION_ERROR: 'EXECUTION_ERROR',
-  TIMEOUT: 'TOOL_TIMEOUT',
-};
+export { ToolErrorType } from '../errors.js';
 
 export class ToolRegistry {
   constructor(options = {}) {

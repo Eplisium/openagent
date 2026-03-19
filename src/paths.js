@@ -106,6 +106,27 @@ export function resolveAgentPath(inputPath = '.', options = {}) {
   return path.resolve(baseDir, rawPath);
 }
 
+export function createPathContext(options = {}) {
+  const getBaseDir = typeof options.getBaseDir === 'function'
+    ? options.getBaseDir
+    : () => options.baseDir || options.workingDir || process.cwd();
+  const getWorkspaceDir = typeof options.getWorkspaceDir === 'function'
+    ? options.getWorkspaceDir
+    : () => options.workspaceDir || null;
+
+  return {
+    getBaseDir: () => path.resolve(getBaseDir()),
+    getWorkspaceDir: () => {
+      const workspaceDir = getWorkspaceDir();
+      return workspaceDir ? path.resolve(workspaceDir) : null;
+    },
+    resolvePath: (inputPath = '.') => resolveAgentPath(inputPath, {
+      baseDir: getBaseDir(),
+      workspaceDir: getWorkspaceDir(),
+    }),
+  };
+}
+
 export function buildOpenAgentEnv(options = {}) {
   const workingDir = path.resolve(options.baseDir || process.cwd());
   const workspaceDir = options.workspaceDir ? path.resolve(options.workspaceDir) : '';

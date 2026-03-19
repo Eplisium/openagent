@@ -1,0 +1,141 @@
+/**
+ * Unit tests for path resolution
+ */
+
+import { describe, it, expect } from 'vitest';
+import {
+  resolveAgentPath,
+  createPathContext,
+  sanitizeTaskSlug,
+  formatWorkspaceTimestamp,
+  createWorkspaceName,
+  OPENAGENT_WORKSPACE_PREFIX,
+  OPENAGENT_PROJECT_PREFIX,
+  OPENAGENT_WORKDIR_PREFIX,
+} from '../../src/paths.js';
+import path from 'path';
+
+describe('resolveAgentPath', () => {
+  const baseDir = '/home/user/project';
+
+  it('should resolve relative paths from baseDir', () => {
+    const result = resolveAgentPath('src/index.js', { baseDir });
+    expect(result).toBe(path.resolve(baseDir, 'src/index.js'));
+  });
+
+  it('should resolve absolute paths as-is', () => {
+    const result = resolveAgentPath('/absolute/path', { baseDir });
+    expect(result).toBe(path.resolve('/absolute/path'));
+  });
+
+  it('should resolve workspace: prefix', () => {
+    const result = resolveAgentPath('workspace:notes/todo.md', {
+      baseDir,
+      workspaceDir: '/home/user/.openagent/workspaces/task-1',
+    });
+    expect(result).toBe(path.resolve('/home/user/.openagent/workspaces/task-1', 'notes/todo.md'));
+  });
+
+  it('should resolve project: prefix', () => {
+    const result = resolveAgentPath('project:src/index.js', { baseDir });
+    expect(result).toBe(path.resolve(baseDir, 'src/index.js'));
+  });
+
+  it('should resolve workdir: prefix', () => {
+    const result = resolveAgentPath('workdir:src/index.js', { baseDir });
+    expect(result).toBe(path.resolve(baseDir, 'src/index.js'));
+  });
+
+  it('should throw for workspace: when no workspaceDir set', () => {
+    expect(() => {
+      resolveAgentPath('workspace:notes.md', { baseDir });
+    }).toThrow('No task workspace');
+  });
+
+  it('should handle . as current directory', () => {
+    const result = resolveAgentPath('.', { baseDir });
+    expect(result).toBe(path.resolve(baseDir));
+  });
+
+  it('should handle empty string', () => {
+    const result = resolveAgentPath('', { baseDir });
+    expect(result).toBe(path.resolve(baseDir));
+  });
+
+  it('should handle null/undefined', () => {
+    expect(resolveAgentPath(null, { baseDir })).toBe(path.resolve(baseDir));
+    expect(resolveAgentPath(undefined, { baseDir })).toBe(path.resolve(baseDir));
+  });
+
+  it('should be case-insensitive for prefixes', () => {
+    const result = resolveAgentPath('WORKSPACE:notes.md', {
+      baseDir,
+      workspaceDir: '/workspace',
+    });
+    expect(result).toContain('notes.md');
+  });
+});
+
+describe('createPathContext', () => {
+  it('should create a context with resolvePath function', () => {
+    const ctx = createPathContext({
+      baseDir: '/project',
+      workspaceDir: '/workspace',
+    });
+
+    expect(typeof ctx.resolvePath).toBe('function');
+    expect(typeof ctx.getBaseDir).toBe('function');
+    expect(typeof ctx.getWorkspaceDir).toBe('function');
+
+    expect(ctx.getBaseDir()).toBe(path.resolve('/project'));
+    expect(ctx.getWorkspaceDir()).toBe(path.resolve('/workspace'));
+  });
+
+  it('should support function-based getters', () => {
+    let workspace = '/ws1';
+    const ctx = createPathContext({
+      getBaseDir: () => '/project',
+      getWorkspaceDir: () => workspace,
+    });
+
+    expect(ctx.resolvePath('workspace:file.md')).toContain('ws1');
+    workspace = '/ws2';
+    expect(ctx.resolvePath('workspace:file.md')).toContain('ws2');
+  });
+});
+
+describe('sanitizeTaskSlug', () => {
+  it('should lowercase and hyphenate', () => {
+    expect(sanitizeTaskSlug('Build a REST API')).toBe('build-a-rest-api');
+  });
+
+  it('should remove special characters', () => {
+    expect(sanitizeTaskSlug('Fix: bug #123!')).toBe('fix-bug-123');
+  });
+
+  it('should truncate to 60 chars', () => {
+    const long = 'a'.repeat(100);
+    expect(sanitizeTaskSlug(long).length).toBeLessThanOrEqual(60);
+  });
+
+  it('should return fallback for empty input', () => {
+    expect(sanitizeTaskSlug('')).toBe('task');
+    expect(sanitizeTaskSlug(null)).toBe('task');
+  });
+});
+
+describe('formatWorkspaceTimestamp', () => {
+  it('should format date as workspace-safe string', () => {
+    const date = new Date('2026-03-19T15:30:45.123Z');
+    const result = formatWorkspaceTimestamp(date);
+    expect(result).toBe('20260319-153045');
+  });
+});
+
+describe('createWorkspaceName', () => {
+  it('should combine timestamp and task slug', () => {
+    const date = new Date('2026-03-19T15:30:45.123Z');
+    const result = createWorkspaceName('Build REST API', date);
+    expect(result).toBe('20260319-153045-build-rest-api');
+  });
+});

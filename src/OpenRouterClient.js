@@ -16,41 +16,9 @@
  */
 
 import { CONFIG, PLUGINS } from './config.js';
+import { OpenRouterError, RateLimitError, AuthenticationError, AbortError } from './errors.js';
 
-/**
- * Custom Error Classes
- */
-export class OpenRouterError extends Error {
-  constructor(message, code, details = {}) {
-    super(message);
-    this.name = 'OpenRouterError';
-    this.code = code;
-    this.details = details;
-    this.timestamp = new Date().toISOString();
-  }
-}
-
-export class RateLimitError extends OpenRouterError {
-  constructor(message, retryAfter) {
-    super(message, 'RATE_LIMIT_ERROR', { retryAfter });
-    this.name = 'RateLimitError';
-    this.retryAfter = retryAfter;
-  }
-}
-
-export class AuthenticationError extends OpenRouterError {
-  constructor(message) {
-    super(message, 'AUTH_ERROR');
-    this.name = 'AuthenticationError';
-  }
-}
-
-export class AbortError extends OpenRouterError {
-  constructor(message = 'Request aborted') {
-    super(message, 'ABORTED');
-    this.name = 'AbortError';
-  }
-}
+export { OpenRouterError, RateLimitError, AuthenticationError, AbortError } from './errors.js';
 
 /**
  * Simple content hash for cache keys (djb2 algorithm)

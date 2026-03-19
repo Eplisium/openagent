@@ -3,35 +3,35 @@
  * Export all tools and the registry
  */
 
+// Re-exports from submodules
 export { ToolRegistry, ToolErrorType } from './ToolRegistry.js';
-export { createFileTools, fileTools, readFileTool, writeFileTool, editFileTool, listDirectoryTool, searchInFilesTool, getFileInfoTool } from './fileTools.js';
+export { createFileTools, fileTools, readFileTool, writeFileTool, editFileTool, searchAndReplaceTool, listDirectoryTool, searchInFilesTool, getFileInfoTool } from './fileTools.js';
 export { createShellTools, shellTools, execTool, execBackgroundTool, processStatusTool, systemInfoTool } from './shellTools.js';
-export { webTools, webSearchTool, readWebpageTool, fetchUrlTool } from './webTools.js';
+export { createWebTools, webTools, webSearchTool, readWebpageTool, fetchUrlTool } from './webTools.js';
 export { createGitTools, gitTools, gitStatusTool, gitLogTool, gitDiffTool, gitAddTool, gitCommitTool, gitPushTool, gitPullTool, gitBranchTool, gitInfoTool } from './gitTools.js';
 export { createSubagentTools } from './subagentTools.js';
 export { createTaskTools } from './taskTools.js';
 
-import { createFileTools, fileTools } from './fileTools.js';
-import { createShellTools, shellTools } from './shellTools.js';
-import { webTools } from './webTools.js';
-import { createGitTools, gitTools } from './gitTools.js';
-import { ToolRegistry, ToolErrorType } from './ToolRegistry.js';
-import { createSubagentTools } from './subagentTools.js';
-import { createTaskTools } from './taskTools.js';
+// Local imports for factory functions
+import { ToolRegistry as _ToolRegistry } from './ToolRegistry.js';
+import { createFileTools as _createFileTools } from './fileTools.js';
+import { createShellTools as _createShellTools } from './shellTools.js';
+import { createGitTools as _createGitTools } from './gitTools.js';
+import { webTools as _webTools } from './webTools.js';
 
 /**
  * Create a fully-configured tool registry
  */
 export function createDefaultRegistry(options = {}) {
-  const registry = new ToolRegistry(options);
-  const fileTools = createFileTools(options);
-  const shellTools = createShellTools(options);
-  const gitTools = createGitTools(options);
+  const registry = new _ToolRegistry(options);
+  const tools = _createFileTools(options);
+  const shellTools = _createShellTools(options);
+  const gitTools = _createGitTools(options);
   
   registry.registerAll([
-    ...fileTools,
+    ...tools,
     ...shellTools,
-    ...webTools,
+    ..._webTools,
     ...gitTools,
   ]);
   
@@ -46,7 +46,7 @@ export function createDefaultRegistry(options = {}) {
  * Create a minimal registry for testing
  */
 export function createMinimalRegistry(options = {}) {
-  const registry = new ToolRegistry({
+  const registry = new _ToolRegistry({
     ...options,
     permissions: {
       allowShell: false,
@@ -56,31 +56,15 @@ export function createMinimalRegistry(options = {}) {
     },
   });
 
-  const fileTools = createFileTools(options);
+  const tools = _createFileTools(options);
   
   // Only register read-only tools
   registry.registerAll([
-    fileTools.find(t => t.name === 'read_file'),
-    fileTools.find(t => t.name === 'list_directory'),
-    fileTools.find(t => t.name === 'search_in_files'),
-    fileTools.find(t => t.name === 'get_file_info'),
+    tools.find(t => t.name === 'read_file'),
+    tools.find(t => t.name === 'list_directory'),
+    tools.find(t => t.name === 'search_in_files'),
+    tools.find(t => t.name === 'get_file_info'),
   ].filter(Boolean));
   
   return registry;
 }
-
-export default {
-  ToolRegistry,
-  ToolErrorType,
-  createDefaultRegistry,
-  createMinimalRegistry,
-  createFileTools,
-  fileTools,
-  createShellTools,
-  shellTools,
-  createGitTools,
-  gitTools,
-  webTools,
-  createSubagentTools,
-  createTaskTools,
-};

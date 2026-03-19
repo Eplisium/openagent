@@ -29,6 +29,8 @@ export const colors = {
  */
 export const gradients = {
   title: gradient(['#00D9FF', '#FF006E', '#38B000']),
+  ai: gradient(['#00D9FF', '#3A86FF']),
+  tool: gradient(['#FFBE0B', '#FF006E']),
   success: gradient(['#38B000', '#00D9FF']),
   warning: gradient(['#FFBE0B', '#FF006E']),
   info: gradient(['#3A86FF', '#00D9FF']),
@@ -41,11 +43,26 @@ export const gradients = {
 /**
  * 📦 Box Styles
  */
-const boxStyles = {
+export const boxStyles = {
   default: {
     padding: 1,
     borderStyle: 'round',
     borderColor: 'cyan',
+  },
+  response: {
+    padding: 1,
+    borderStyle: 'round',
+    borderColor: 'magenta',
+  },
+  tool: {
+    padding: 1,
+    borderStyle: 'round',
+    borderColor: 'yellow',
+  },
+  result: {
+    padding: 1,
+    borderStyle: 'single',
+    borderColor: 'green',
   },
   success: {
     padding: 1,
@@ -66,6 +83,11 @@ const boxStyles = {
     padding: 1,
     borderStyle: 'single',
     borderColor: 'blue',
+  },
+  stats: {
+    padding: 1,
+    borderStyle: 'round',
+    borderColor: 'cyan',
   },
 };
 
@@ -318,6 +340,42 @@ export function truncate(text, maxLength = 100) {
   return text.slice(0, maxLength - 3) + '...';
 }
 
+/**
+ * 🔢 Normalize Optional Limit
+ * Parses a value as a positive integer, returning null for disabled/unlimited states.
+ * Accepts '0', 'none', 'null', 'unlimited', 'infinity', 'inf', 'auto' as null.
+ */
+export function normalizeOptionalLimit(value, fallback = null) {
+  const candidate = value ?? fallback;
+
+  if (candidate === undefined || candidate === null || candidate === '') {
+    return null;
+  }
+
+  const normalized = String(candidate).trim().toLowerCase();
+  if (!normalized || ['0', 'none', 'null', 'unlimited', 'infinity', 'inf', 'auto'].includes(normalized)) {
+    return null;
+  }
+
+  const parsed = parseInt(normalized, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * 🔢 Normalize Positive Integer
+ * Parses a value as a positive integer with a required fallback.
+ */
+export function normalizePositiveInt(value, fallback) {
+  const candidate = value ?? fallback;
+
+  if (candidate === undefined || candidate === null || candidate === '') {
+    return fallback;
+  }
+
+  const parsed = parseInt(candidate, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export default {
   colors,
   gradients,
@@ -345,4 +403,6 @@ export default {
   randomElement,
   timestamp,
   truncate,
+  normalizeOptionalLimit,
+  normalizePositiveInt,
 };

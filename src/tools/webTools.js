@@ -50,55 +50,43 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
 }
 
 /**
- * Search using DuckDuckGo HTML (lite version)
+ * Strip HTML tags and normalize whitespace
  */
-async function searchDuckDuckGo(query, maxResults) {
-  const searchUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
-  
-  const response = await fetchWithTimeout(searchUrl, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.5',
-    },
-  }, 15000);
-  
-  const html = await response.text();
-  const results = [];
-  let match;
-  
-  // DDG Lite uses different HTML structure
-  const liteRegex = /<a[^>]*href="([^"]+)"[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
-  while ((match = liteRegex.exec(html)) !== null && results.length < maxResults) {
-    const url = match[1];
-    const title = match[2].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
-    if (title && url && !url.includes('duckduckgo.com') && url.startsWith('http')) {
-      results.push({ title, url, snippet: '' });
-    }
-  }
-  
-  // Alternative: look for table rows with links
-  if (results.length === 0) {
-    const tableRegex = /<a[^>]*href="(https?:\/\/[^"\s]+)"[^>]*>([^<]+)<\/a>/gi;
-    while ((match = tableRegex.exec(html)) !== null && results.length < maxResults) {
-      const url = match[1];
-      const title = match[2].trim();
-      if (!url.includes('duckduckgo.com') && !url.includes('about:') && title.length > 5) {
-        results.push({ title, url, snippet: '' });
-      }
-    }
-  }
-  
-  return results;
+function stripHtmlTags(html) {
+  return html.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
 }
 
 /**
- * Search using Startpage (Google results without tracking)
+ * Base class for HTML-scraping search backends.
+ * Encapsulates URL building, fetch with timeout, common headers,
+ * and multi-strategy HTML parsing.
  */
-async function searchStartpage(query, maxResults) {
-  try {
-    const searchUrl = `https://www.startpage.com/sp/search?query=${encodeURIComponent(query)}&cat=web&language=english`;
-    
+class HtmlSearchBackend {
+  /**
+   * @param {object} config
+   * @param {string} config.name - Backend identifier (e.g. 'duckduckgo')
+   * @param {function(string): string} config.buildUrl - Maps query to search URL
+   * @param {string[]} config.excludeDomains - Domains to filter out of results
+   * @param {function[]} config.strategies - Ordered parse strategies; each receives
+   *   (html: string, maxResults: number, results: object[], seen: Set<string>)
+   *   and pushes {title, url, snippet} objects into results
+   */
+  constructor({ name, buildUrl, excludeDomains = [], strategies = [] }) {
+    this.name = name;
+    this.buildUrl = buildUrl;
+    this.excludeDomains = excludeDomains;
+    this.strategies = strategies;
+  }
+
+  /**
+   * Run the search: fetch HTML, then try each parse strategy in order.
+   * @param {string} query
+   * @param {number} maxResults
+   * @returns {Promise<object[]>}
+   */
+  async search(query, maxResults) {
+    const searchUrl = this.buildUrl(query);
+
     const response = await fetchWithTimeout(searchUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -106,129 +94,190 @@ async function searchStartpage(query, maxResults) {
         'Accept-Language': 'en-US,en;q=0.5',
       },
     }, 15000);
-    
+
     const html = await response.text();
     const results = [];
-    let match;
-    
-    // Strategy 1: Find result-title links with h2/h3 titles
-    const titleRegex = /<a[^>]*class="[^"]*result-title[^"]*"[^>]*href="([^"]+)"[^>]*>[\s\S]*?<\/a>/gi;
-    while ((match = titleRegex.exec(html)) !== null && results.length < maxResults) {
-      const url = match[1];
-      const titleContent = match[0].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-      const afterMatch = html.substring(match.index, match.index + 1000);
-      const descMatch = afterMatch.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-      const snippet = descMatch ? descMatch[1].replace(/<[^>]*>/g, '').trim() : '';
-      
-      if (url.startsWith('http') && !url.includes('startpage.com') && titleContent.length > 5) {
-        let cleanTitle = titleContent
-          .replace(/\.[a-z0-9-]+\{[^}]*\}/gi, '')
-          .replace(/@media[^{]*\{[^}]*\}/gi, '')
-          .replace(/\s+/g, ' ')
-          .trim();
-        
-        if (cleanTitle.length > 5) {
-          results.push({
-            title: cleanTitle.substring(0, 200),
-            url,
-            snippet: snippet.substring(0, 300),
-          });
-        }
-      }
+    const seen = new Set();
+
+    for (const strategy of this.strategies) {
+      if (results.length >= maxResults) break;
+      strategy(html, maxResults, results, seen, this.excludeDomains);
     }
-    
-    // Strategy 2: Extract from h2/h3 tags with nearby links
-    if (results.length === 0) {
-      const headingRegex = /<h[23][^>]*>([\s\S]*?)<\/h[23]>/gi;
-      while ((match = headingRegex.exec(html)) !== null && results.length < maxResults) {
-        const title = match[1].replace(/<[^>]*>/g, '').trim();
-        const before = html.substring(Math.max(0, match.index - 500), match.index);
-        const after = html.substring(match.index, match.index + 500);
-        
-        const linkBefore = before.match(/href="(https?:\/\/[^"\s]+)"[^>]*>\s*$/);
-        const linkAfter = after.match(/^<\/h[23]>[\s\S]*?href="(https?:\/\/[^"\s]+)"/);
-        
-        const url = linkBefore?.[1] || linkAfter?.[1] || '';
-        
-        if (url && !url.includes('startpage.com') && title.length > 10) {
-          results.push({ title, url, snippet: '' });
-        }
-      }
-    }
-    
-    // Strategy 3: Generic external link extraction
-    if (results.length === 0) {
-      const seen = new Set();
-      const linkRegex = /href="(https?:\/\/[^"\s]+)"[^>]*>([^<]{5,100})<\/a>/gi;
-      while ((match = linkRegex.exec(html)) !== null && results.length < maxResults) {
-        const url = match[1];
-        const title = match[2].trim();
-        
-        if (!url.includes('startpage.com') && !seen.has(url) && title.length > 10) {
-          seen.add(url);
-          results.push({ title, url, snippet: '' });
-        }
-      }
-    }
-    
+
     return results;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Parse strategies (shared building blocks)
+// ---------------------------------------------------------------------------
+
+/**
+ * DuckDuckGo Lite: links with class containing "result"
+ */
+function ddgLiteStrategy(html, maxResults, results, seen, excludeDomains) {
+  const regex = /<a[^>]*href="([^"]+)"[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = regex.exec(html)) !== null && results.length < maxResults) {
+    const url = match[1];
+    const title = stripHtmlTags(match[2]);
+    if (title && url.startsWith('http') && !excludeDomains.some(d => url.includes(d))) {
+      results.push({ title, url, snippet: '' });
+    }
+  }
+}
+
+/**
+ * DuckDuckGo fallback: generic <a> tags with text content
+ */
+function ddgTableStrategy(html, maxResults, results, seen, excludeDomains) {
+  const regex = /<a[^>]*href="(https?:\/\/[^"\s]+)"[^>]*>([^<]+)<\/a>/gi;
+  let match;
+  while ((match = regex.exec(html)) !== null && results.length < maxResults) {
+    const url = match[1];
+    const title = match[2].trim();
+    if (!excludeDomains.some(d => url.includes(d)) && !url.includes('about:') && title.length > 5) {
+      results.push({ title, url, snippet: '' });
+    }
+  }
+}
+
+/**
+ * Startpage Strategy 1: result-title links with snippet extraction
+ */
+function startpageTitleStrategy(html, maxResults, results, seen, excludeDomains) {
+  const regex = /<a[^>]*class="[^"]*result-title[^"]*"[^>]*href="([^"]+)"[^>]*>[\s\S]*?<\/a>/gi;
+  let match;
+  while ((match = regex.exec(html)) !== null && results.length < maxResults) {
+    const url = match[1];
+    const titleContent = stripHtmlTags(match[0]);
+    const afterMatch = html.substring(match.index, match.index + 1000);
+    const descMatch = afterMatch.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    const snippet = descMatch ? stripHtmlTags(descMatch[1]) : '';
+
+    if (url.startsWith('http') && !excludeDomains.some(d => url.includes(d)) && titleContent.length > 5) {
+      const cleanTitle = titleContent
+        .replace(/\.[a-z0-9-]+\{[^}]*\}/gi, '')
+        .replace(/@media[^{]*\{[^}]*\}/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (cleanTitle.length > 5) {
+        results.push({
+          title: cleanTitle.substring(0, 200),
+          url,
+          snippet: snippet.substring(0, 300),
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Startpage Strategy 2: h2/h3 headings with nearby links
+ */
+function startpageHeadingStrategy(html, maxResults, results, seen, excludeDomains) {
+  const regex = /<h[23][^>]*>([\s\S]*?)<\/h[23]>/gi;
+  let match;
+  while ((match = regex.exec(html)) !== null && results.length < maxResults) {
+    const title = stripHtmlTags(match[1]);
+    const before = html.substring(Math.max(0, match.index - 500), match.index);
+    const after = html.substring(match.index, match.index + 500);
+
+    const linkBefore = before.match(/href="(https?:\/\/[^"\s]+)"[^>]*>\s*$/);
+    const linkAfter = after.match(/^<\/h[23]>[\s\S]*?href="(https?:\/\/[^"\s]+)"/);
+    const url = linkBefore?.[1] || linkAfter?.[1] || '';
+
+    if (url && !excludeDomains.some(d => url.includes(d)) && title.length > 10) {
+      results.push({ title, url, snippet: '' });
+    }
+  }
+}
+
+/**
+ * Startpage / Mojeek fallback: generic external link extraction
+ */
+function genericLinkStrategy(minTitleLen = 10) {
+  return function (html, maxResults, results, seen, excludeDomains) {
+    const regex = /href="(https?:\/\/[^"\s]+)"[^>]*>([^<]{5,100})<\/a>/gi;
+    let match;
+    while ((match = regex.exec(html)) !== null && results.length < maxResults) {
+      const url = match[1];
+      const title = match[2].trim();
+
+      if (!excludeDomains.some(d => url.includes(d)) && !seen.has(url) && title.length > minTitleLen && !title.includes('{')) {
+        seen.add(url);
+        results.push({ title, url, snippet: '' });
+      }
+    }
+  };
+}
+
+/**
+ * Mojeek Strategy 1: links with a class attribute, plus snippet extraction
+ */
+function mojeekTitleStrategy(html, maxResults, results, seen, excludeDomains) {
+  const regex = /<a[^>]*href="(https?:\/\/[^"\s]+)"[^>]*class="[^"]*"[^>]*>([^<]+)<\/a>/gi;
+  let match;
+  while ((match = regex.exec(html)) !== null && results.length < maxResults) {
+    const url = match[1];
+    const title = match[2].trim();
+
+    if (!excludeDomains.some(d => url.includes(d)) && !seen.has(url) && title.length > 10 && !title.includes('{')) {
+      seen.add(url);
+      const after = html.substring(match.index, match.index + 800);
+      const snippetMatch = after.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+      const snippet = snippetMatch ? stripHtmlTags(snippetMatch[1]) : '';
+      results.push({ title, url, snippet: snippet.substring(0, 300) });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Backend instances
+// ---------------------------------------------------------------------------
+
+const ddgBackend = new HtmlSearchBackend({
+  name: 'duckduckgo',
+  buildUrl: (q) => `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(q)}`,
+  excludeDomains: ['duckduckgo.com'],
+  strategies: [ddgLiteStrategy, ddgTableStrategy],
+});
+
+const startpageBackend = new HtmlSearchBackend({
+  name: 'startpage',
+  buildUrl: (q) => `https://www.startpage.com/sp/search?query=${encodeURIComponent(q)}&cat=web&language=english`,
+  excludeDomains: ['startpage.com'],
+  strategies: [startpageTitleStrategy, startpageHeadingStrategy, genericLinkStrategy(10)],
+});
+
+const mojeekBackend = new HtmlSearchBackend({
+  name: 'mojeek',
+  buildUrl: (q) => `https://www.mojeek.com/search?q=${encodeURIComponent(q)}`,
+  excludeDomains: ['mojeek.com'],
+  strategies: [mojeekTitleStrategy, genericLinkStrategy(10)],
+});
+
+// ---------------------------------------------------------------------------
+// Thin wrappers — keep the same function signatures used by execute()
+// ---------------------------------------------------------------------------
+
+async function searchDuckDuckGo(query, maxResults) {
+  return ddgBackend.search(query, maxResults);
+}
+
+async function searchStartpage(query, maxResults) {
+  try {
+    return await startpageBackend.search(query, maxResults);
   } catch (e) {
     console.error('Startpage error:', e.message);
     return [];
   }
 }
 
-/**
- * Search using Mojeek (independent search engine)
- */
 async function searchMojeek(query, maxResults) {
   try {
-    const searchUrl = `https://www.mojeek.com/search?q=${encodeURIComponent(query)}`;
-    
-    const response = await fetchWithTimeout(searchUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-      },
-    }, 15000);
-    
-    const html = await response.text();
-    const results = [];
-    let match;
-    
-    const titleRegex = /<a[^>]*href="(https?:\/\/[^"\s]+)"[^>]*class="[^"]*"[^>]*>([^<]+)<\/a>/gi;
-    const seen = new Set();
-    
-    while ((match = titleRegex.exec(html)) !== null && results.length < maxResults) {
-      const url = match[1];
-      const title = match[2].trim();
-      
-      if (!url.includes('mojeek.com') && !seen.has(url) && title.length > 10 && !title.includes('{')) {
-        seen.add(url);
-        const after = html.substring(match.index, match.index + 800);
-        const snippetMatch = after.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-        const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]*>/g, '').trim() : '';
-        
-        results.push({ title, url, snippet: snippet.substring(0, 300) });
-      }
-    }
-    
-    // Strategy 2: Generic link extraction
-    if (results.length === 0) {
-      const linkRegex = /href="(https?:\/\/[^"\s]+)"[^>]*>([^<]{10,100})<\/a>/gi;
-      while ((match = linkRegex.exec(html)) !== null && results.length < maxResults) {
-        const url = match[1];
-        const title = match[2].trim();
-        
-        if (!url.includes('mojeek.com') && !seen.has(url) && !title.includes('{')) {
-          seen.add(url);
-          results.push({ title, url, snippet: '' });
-        }
-      }
-    }
-    
-    return results;
+    return await mojeekBackend.search(query, maxResults);
   } catch (e) {
     console.error('Mojeek error:', e.message);
     return [];
@@ -748,10 +797,16 @@ export const fetchUrlTool = {
   },
 };
 
-export const webTools = [
-  webSearchTool,
-  readWebpageTool,
-  fetchUrlTool,
-];
+/**
+ * Create web tools (factory for consistency with other tool modules)
+ * Web tools don't need path context, so options are accepted but unused
+ */
+export function createWebTools(options = {}) {
+  return [
+    webSearchTool,
+    readWebpageTool,
+    fetchUrlTool,
+  ];
+}
 
-export default webTools;
+export const webTools = createWebTools();

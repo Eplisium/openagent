@@ -14,6 +14,7 @@ import fs from 'fs-extra';
 import path from 'path';
 import chalk from 'chalk';
 import { getDefaultTaskStateDir } from '../paths.js';
+import { CONFIG } from '../config.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // 📊 Feature Status

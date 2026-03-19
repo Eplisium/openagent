@@ -135,7 +135,7 @@ export function createFileTools(options = {}) {
 
   const editFileTool = {
     name: 'edit_file',
-    description: `Edit a file by finding and replacing text. Supports: exact match, line-based editing (startLine/endLine), batch edits, regex, dry-run, and undo. ${PATH_PREFIX_NOTE}`,
+    description: `Edit a file by finding and replacing text. Supports batch edits, regex, dry-run, and undo. ${PATH_PREFIX_NOTE}`,
     category: 'file',
     parameters: {
       type: 'object',
@@ -155,14 +155,6 @@ export function createFileTools(options = {}) {
         replaceAll: {
           type: 'boolean',
           description: 'Replace all occurrences (default: false)',
-        },
-        startLine: {
-          type: 'integer',
-          description: 'Start line number (1-indexed) for line-based replacement. Use with endLine and replace.',
-        },
-        endLine: {
-          type: 'integer',
-          description: 'End line number (1-indexed, inclusive) for line-based replacement. Use with startLine and replace.',
         },
         edits: {
           type: 'array',
@@ -195,7 +187,7 @@ export function createFileTools(options = {}) {
       },
       required: ['path'],
     },
-    async execute({ path: filePath, find, replace, replaceAll = false, startLine, endLine, edits, useRegex = false, dryRun = false, undo = false, continueOnError = false }) {
+    async execute({ path: filePath, find, replace, replaceAll = false, edits, useRegex = false, dryRun = false, undo = false, continueOnError = false }) {
       try {
         const resolvedPath = resolvePathForAgent(filePath);
         const bakPath = resolvedPath + '.bak';
@@ -239,28 +231,7 @@ export function createFileTools(options = {}) {
             }
           } else {
             if (!content.includes(editFind)) {
-              // Provide helpful context: show the first 200 chars of what was searched
-              const searchedPreview = editFind.length > 200 ? editFind.substring(0, 200) + '...' : editFind;
-              // Try to find the closest matching line for debugging
-              const searchLines = editFind.split('\n');
-              const firstLine = searchLines[0].trim();
-              const contentLines = content.split('\n');
-              const similarLines = contentLines
-                .map((line, i) => ({ line: i + 1, text: line.trim(), similarity: firstLine.length > 0 && line.includes(firstLine.substring(0, Math.min(20, firstLine.length))) ? 1 : 0 }))
-                .filter(l => l.similarity > 0)
-                .slice(0, 3);
-              
-              let hint = `Text not found in file.\n\nSearched for (${editFind.length} chars):\n"${searchedPreview}"`;
-              if (similarLines.length > 0) {
-                hint += `\n\nSimilar lines found in file:`;
-                for (const sl of similarLines) {
-                  hint += `\n  Line ${sl.line}: "${sl.text.substring(0, 100)}"`;
-                }
-                hint += `\n\nTIP: Use read_file with startLine/endLine to get the exact text, then retry with the verbatim content.`;
-              } else {
-                hint += `\n\nTIP: Re-read the file with read_file to get the current content, then use the EXACT text from the file.`;
-              }
-              return { content, changed: false, error: hint, suggestion: 'Re-read the file with read_file and use the EXACT text as find, or use startLine/endLine for line-based editing.' };
+              return { content, changed: false, error: `Text not found in file: "${editFind.substring(0, 50)}..."` };
             }
             const newContent = replaceAll ? content.split(editFind).join(editReplace) : content.replace(editFind, editReplace);
             return { content: newContent, changed: newContent !== content };
@@ -283,53 +254,6 @@ export function createFileTools(options = {}) {
             }
           }
           return changes;
-        }
-
-        // --- Line-based replacement mode (startLine + endLine) ---
-        if (startLine !== undefined && endLine !== undefined) {
-          if (replace === undefined) {
-            return { success: false, error: 'Line-based editing requires the "replace" parameter' };
-          }
-          const lines = content.split('\n');
-          const startIdx = Math.max(0, startLine - 1);
-          const endIdx = Math.min(lines.length, endLine);
-          if (startIdx >= lines.length) {
-            return { success: false, error: `startLine ${startLine} exceeds file length (${lines.length} lines)` };
-          }
-          if (endIdx <= startIdx) {
-            return { success: false, error: `endLine (${endLine}) must be greater than startLine (${startLine})` };
-          }
-          const newLines = replace.split('\n');
-          const resultLines = [...lines.slice(0, startIdx), ...newLines, ...lines.slice(endIdx)];
-          content = resultLines.join('\n');
-
-          if (dryRun) {
-            const changes = collectChanges(originalContent, content);
-            return {
-              success: true,
-              dryRun: true,
-              changes,
-              totalChanges: changes.length,
-              linesReplaced: `${startLine}-${endLine} (${endIdx - startIdx} lines -> ${newLines.length} lines)`,
-              path: resolvedPath,
-            };
-          }
-
-          if (content === originalContent) {
-            return { success: true, message: 'No changes made', path: resolvedPath };
-          }
-
-          await fs.writeFile(bakPath, originalContent, 'utf-8');
-          await fs.writeFile(resolvedPath, content, 'utf-8');
-
-          return {
-            success: true,
-            path: resolvedPath,
-            originalSize: originalContent.length,
-            newSize: content.length,
-            changed: true,
-            linesReplaced: `${startLine}-${endLine} (${endIdx - startIdx} lines -> ${newLines.length} lines)`,
-          };
         }
 
         // --- Batch edits mode ---
@@ -400,7 +324,7 @@ export function createFileTools(options = {}) {
           const result = applyEdit(content, find, replace);
 
           if (result.error) {
-            return { success: false, error: result.error, suggestion: result.suggestion };
+            return { success: false, error: result.error };
           }
 
           content = result.content;
@@ -433,7 +357,7 @@ export function createFileTools(options = {}) {
           };
         }
 
-        return { success: false, error: 'Must provide find+replace, startLine+endLine+replace, or edits array' };
+        return { success: false, error: 'Must provide either find+replace or edits array' };
       } catch (error) {
         return { success: false, error: error.message };
       }
@@ -1132,122 +1056,10 @@ export function createFileTools(options = {}) {
     },
   };
 
-  const searchAndReplaceTool = {
-    name: 'search_and_replace',
-    description: `Powerful regex search-and-replace across an entire file. Supports multiple patterns, case-insensitive matching, and preview mode. Ideal for bulk renames, refactoring, and pattern-based replacements. ${PATH_PREFIX_NOTE}`,
-    category: 'file',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: `Path to the file. ${PATH_PREFIX_NOTE}`,
-        },
-        pattern: {
-          type: 'string',
-          description: 'Regex pattern to search for (e.g., "\\boldName\\b" for word-boundary match)',
-        },
-        replacement: {
-          type: 'string',
-          description: 'Replacement string. Supports regex capture groups: $1, $2, etc.',
-        },
-        flags: {
-          type: 'string',
-          description: 'Regex flags: g=global, i=case-insensitive, m=multiline, s=dotAll (default: "gi")',
-        },
-        dryRun: {
-          type: 'boolean',
-          description: 'Preview changes without writing (default: false)',
-        },
-        contextLines: {
-          type: 'integer',
-          description: 'Number of context lines around each change in preview (default: 2)',
-        },
-      },
-      required: ['path', 'pattern', 'replacement'],
-    },
-    async execute({ path: filePath, pattern, replacement, flags = 'gi', dryRun = false, contextLines = 2 }) {
-      try {
-        const resolvedPath = resolvePathForAgent(filePath);
-        if (!await fs.pathExists(resolvedPath)) {
-          return { success: false, error: `File not found: ${resolvedPath}` };
-        }
-        const stat = await fs.stat(resolvedPath);
-        if (stat.isDirectory()) {
-          return { success: false, error: `Path is a directory: ${resolvedPath}` };
-        }
-        const content = await fs.readFile(resolvedPath, 'utf-8');
-        let regex;
-        try {
-          regex = new RegExp(pattern, flags);
-        } catch (err) {
-          return { success: false, error: `Invalid regex pattern: ${err.message}` };
-        }
-        const newContent = content.replace(regex, replacement);
-        const matchCount = (content.match(regex) || []).length;
-        if (!flags.includes('g')) {
-          // If not global, only first match counts
-        }
-        if (matchCount === 0) {
-          return {
-            success: true,
-            changed: false,
-            message: `Pattern matched 0 occurrences in ${resolvedPath}`,
-            path: resolvedPath,
-          };
-        }
-        if (dryRun) {
-          // Build preview of changes
-          const origLines = content.split('\n');
-          const newLines = newContent.split('\n');
-          const changes = [];
-          const maxLen = Math.max(origLines.length, newLines.length);
-          for (let i = 0; i < maxLen; i++) {
-            if (origLines[i] !== newLines[i]) {
-              const start = Math.max(0, i - contextLines);
-              const end = Math.min(maxLen, i + contextLines + 1);
-              changes.push({
-                line: i + 1,
-                before: origLines[i] ?? '',
-                after: newLines[i] ?? '',
-                context: origLines.slice(start, end).map((l, idx) => `${start + idx + 1}│ ${l}`).join('\n'),
-              });
-            }
-          }
-          return {
-            success: true,
-            dryRun: true,
-            changed: true,
-            matchCount,
-            changes: changes.slice(0, 20),
-            totalChanges: changes.length,
-            path: resolvedPath,
-            message: `Would replace ${matchCount} occurrence(s) in ${changes.length} line(s)`,
-          };
-        }
-        const bakPath = resolvedPath + '.bak';
-        await fs.writeFile(bakPath, content, 'utf-8');
-        await fs.writeFile(resolvedPath, newContent, 'utf-8');
-        return {
-          success: true,
-          changed: true,
-          path: resolvedPath,
-          matchCount,
-          originalSize: content.length,
-          newSize: newContent.length,
-          message: `Replaced ${matchCount} occurrence(s) in ${resolvedPath}`,
-        };
-      } catch (error) {
-        return { success: false, error: error.message };
-      }
-    },
-  };
-
   return [
     readFileTool,
     writeFileTool,
     editFileTool,
-    searchAndReplaceTool,
     listDirectoryTool,
     searchInFilesTool,
     getFileInfoTool,
@@ -1266,7 +1078,6 @@ export const [
   readFileTool,
   writeFileTool,
   editFileTool,
-  searchAndReplaceTool,
   listDirectoryTool,
   searchInFilesTool,
   getFileInfoTool,
@@ -1275,7 +1086,6 @@ export const [
   moveFileTool,
   findFilesTool,
   diffFilesTool,
-  previewEditTool,
 ] = defaultFileTools;
 
 export const fileTools = defaultFileTools;

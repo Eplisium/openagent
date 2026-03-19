@@ -1,0 +1,14 @@
+import fs from 'fs';
+const c = fs.readFileSync('src/cli.js', 'utf-8');
+console.log('shebang:', c.startsWith('#!'));
+console.log('handleUndo:', c.includes('handleUndo'));
+console.log('handleDiff:', c.includes('handleDiff'));
+console.log('handleExport:', c.includes('handleExport'));
+console.log('multilineMode:', c.includes('multilineMode'));
+console.log('undo case:', c.includes("case 'undo'"));
+console.log('diff case:', c.includes("case 'diff'"));
+console.log('export case:', c.includes("case 'export'"));
+console.log('history load:', c.includes('this.history = this.state.history'));
+console.log('history save:', c.includes('history: this.history'));
+console.log('aliases ml:', c.includes("'ml'"));
+console.log('help undo:', c.includes('- Undo last file change'));

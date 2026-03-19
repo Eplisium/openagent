@@ -368,5 +368,3 @@ export const [
 ] = defaultGitTools;
 
 export const gitTools = defaultGitTools;
-
-export default gitTools;

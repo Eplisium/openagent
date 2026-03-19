@@ -22,6 +22,7 @@ import chalk from 'chalk';
 import ora from 'ora';
 import boxen from 'boxen';
 import gradient from 'gradient-string';
+import inquirer from 'inquirer';
 import fs from 'fs-extra';
 import path from 'path';
 import os from 'os';
@@ -33,8 +34,6 @@ import { processInput, readDroppedFile, formatDroppedContent } from './inputHand
 import { isVisionModel, buildMultimodalMessage } from './vision.js';
 import { gradients, boxStyles } from './utils.js';
 import { COMMAND_ALIASES, resolveCommand, parseCommand } from './cli/commands.js';
-import { multilinePrompt, MultilineInput } from './cli/multilineInput.js';
-import { createReadlineInterfaceWithTerminalReset, promptWithTerminalReset } from './cli/terminal.js';
 import { runOnboarding } from './cli/onboarding.js';
 import { showStats, showCost, showAgents } from './cli/stats.js';
 
@@ -401,8 +400,7 @@ export class CLI {
 
       `${chalk.cyan('/help')}            ${chalk.gray('- Show all commands')}\n` +
       `${chalk.cyan('/exit')}            ${chalk.gray('- Exit')}\n\n` +
-      `${chalk.dim('Shortcuts:')} ${chalk.gray('q=exit, c=chat, a=agent, n=new, m=model, s=stats, h=help, tmp=templates, doc=doctor, u=undo, d=diff, co=cost, ex=export')}\n` +
-      `${chalk.dim('Input:')} ${chalk.gray('↵ send · ⇧↵ newline · Ctrl+V paste · Ctrl+C copy · Ctrl+Z undo · Ctrl+A select all')}\n` +
+      `${chalk.dim('Shortcuts:')} ${chalk.gray('q=exit, c=chat, a=agent, n=new, m=model, s=stats, h=help, tmp=templates, doc=doctor, u=undo, d=diff, co=cost, ex=export, p=paste')}\n` +
       `${chalk.dim('Tip: Just type a message to run as an agentic task')}`,
       { ...box.default, title: '🤖 OpenAgent', titleAlignment: 'center' }
     ));
@@ -419,7 +417,7 @@ export class CLI {
 
     const lines = [];
     const readline = await import('readline');
-    const rl = await createReadlineInterfaceWithTerminalReset(readline, {
+    const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
       terminal: true,
@@ -460,7 +458,7 @@ export class CLI {
     console.log(chalk.dim('─'.repeat(60)));
 
     // Ask for confirmation
-    const { action } = await promptWithTerminalReset([{
+    const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
       message: 'What would you like to do?',
@@ -532,20 +530,18 @@ export class CLI {
 
   async mainLoop() {
     while (true) {
-      const statusLine = this.buildPromptStatusLine();
-      const promptStr = chalk.cyan('❯ ');
+      console.log('');
+      console.log(this.buildPromptStatusLine());
+      const prompt = chalk.cyan('❯');
       
-      const input = await multilinePrompt({
-        prompt: promptStr,
-        statusLine: statusLine,
-        placeholder: 'Type your message... (Shift+Enter for new line, Enter to send, Ctrl+K to exit)',
-      });
+      const { input } = await inquirer.prompt([{
+        type: 'input',
+        name: 'input',
+        message: prompt,
+        prefix: '',
+      }]);
       this.promptCount++;
 
-      // CANCEL sentinel means Ctrl+K was pressed on empty buffer — exit the app
-      if (input === MultilineInput.CANCEL) {
-        break;
-      }
       const trimmed = input.trim();
       if (!trimmed) continue;
 
@@ -1239,7 +1235,7 @@ ${g.title('╚══════════════════════
       }
       
       if (recentModel && modelInfo) {
-        const { useRecent } = await promptWithTerminalReset([{
+        const { useRecent } = await inquirer.prompt([{
           type: 'confirm',
           name: 'useRecent',
           message: `Use recent model: ${chalk.cyan(recentModel)}${modelInfo ? chalk.gray(` (${modelInfo.provider})`) : ''}?`,
@@ -1441,7 +1437,7 @@ ${g.title('╚══════════════════════
       value: s.sessionId,
     }));
 
-    const { sessionId } = await promptWithTerminalReset([{
+    const { sessionId } = await inquirer.prompt([{
       type: 'list',
       name: 'sessionId',
       message: 'Load session:',
@@ -1548,7 +1544,7 @@ ${g.title('╚══════════════════════
     
     choices.push({ name: chalk.gray('Cancel'), value: null });
     
-    const { template } = await promptWithTerminalReset([{
+    const { template } = await inquirer.prompt([{
       type: 'list',
       name: 'template',
       message: 'Select a workflow template:',
@@ -1590,16 +1586,17 @@ ${g.title('╚══════════════════════
       `${chalk.cyan('/undo')}         - Restore a .bak file\n` +
       `${chalk.cyan('/diff')}         - Show diffs for .bak files\n` +
       `${chalk.cyan('/export')}       - Export conversation as markdown\n` +
-      `${chalk.cyan('/new')}          - Start a fresh session\n` +
+      `${chalk.cyan('      `${chalk.cyan('/new')}          - Start a fresh session\n` +
       `${chalk.cyan('/clear')}        - Clear conversation\n` +
       `${chalk.cyan('/save')}         - Save session\n` +
       `${chalk.cyan('/load')}         - Load session\n` +
       `${chalk.cyan('/history')}      - Show command history\n` +
+      `${chalk.cyan('/paste')}        - Paste large text\n` +
       `${chalk.cyan('/reset')}        - Alias for /new\n` +
       `${chalk.cyan('/help')}         - Show this help\n` +
       `${chalk.cyan('/exit')}         - Exit\n\n` +
       `${chalk.bold('Aliases')}\n\n` +
-      `${chalk.cyan('q')}=exit ${chalk.cyan('c')}=chat ${chalk.cyan('a')}=agent ${chalk.cyan('n')}=new ${chalk.cyan('m')}=model ${chalk.cyan('s')}=stats ${chalk.cyan('h')}=help ${chalk.cyan('u')}=undo ${chalk.cyan('d')}=diff ${chalk.cyan('co')}=cost ${chalk.cyan('ex')}=export\n\n` +
+      `${chalk.cyan('q')}=exit ${chalk.cyan('c')}=chat ${chalk.cyan('a')}=agent ${chalk.cyan('n')}=new ${chalk.cyan('m')}=model ${chalk.cyan('s')}=stats ${chalk.cyan('h')}=help ${chalk.cyan('u')}=undo ${chalk.cyan('d')}=diff ${chalk.cyan('co')}=cost ${chalk.cyan('ex')}=export ${chalk.cyan('ml')}=multiline\n\n` +
       `${chalk.bold('Shortcuts')}\n\n` +
       `${chalk.cyan('! <cmd>')}       - Run shell command\n` +
       `${chalk.cyan('plain text')}    - Run as agentic task`,
@@ -1646,7 +1643,7 @@ ${g.title('╚══════════════════════
     }));
     choices.push({ name: chalk.gray('Cancel'), value: null });
     
-    const { selected } = await promptWithTerminalReset([{
+    const { selected } = await inquirer.prompt([{
       type: 'list',
       name: 'selected',
       message: 'Select a backup to restore:',
@@ -1812,7 +1809,7 @@ ${g.title('╚══════════════════════
    * Reset session
    */
   async resetSession() {
-    const { confirm } = await promptWithTerminalReset([{
+    const { confirm } = await inquirer.prompt([{
       type: 'confirm',
       name: 'confirm',
       message: 'Reset session? This will start a brand-new session and clear the current conversation/task state.',

@@ -15,35 +15,13 @@
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { normalizeOptionalLimit, normalizePositiveInt } from './utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Load environment variables
 dotenv.config({ path: join(__dirname, '../.env') });
-
-function parsePositiveInt(value, fallback) {
-  if (value === undefined || value === null || value === '') {
-    return fallback;
-  }
-
-  const parsed = parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function parseOptionalLimit(value, fallback = null) {
-  if (value === undefined || value === null || value === '') {
-    return fallback;
-  }
-
-  const normalized = String(value).trim().toLowerCase();
-  if (!normalized || ['0', 'none', 'null', 'unlimited', 'infinity', 'inf', 'auto'].includes(normalized)) {
-    return null;
-  }
-
-  const parsed = parseInt(normalized, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 /**
  * ⚙️ Default Configuration
@@ -99,14 +77,14 @@ export const CONFIG = {
   // Context Management
   MAX_CONTEXT_TOKENS: parseInt(process.env.MAX_CONTEXT_TOKENS) || 800000,
   COMPACT_THRESHOLD: parseFloat(process.env.COMPACT_THRESHOLD) || 0.7,
-  AGENT_MAX_ITERATIONS: parseOptionalLimit(process.env.AGENT_MAX_ITERATIONS, null),
-  AGENT_MAX_RUNTIME_MS: parseOptionalLimit(process.env.AGENT_MAX_RUNTIME_MS, null),
-  AGENT_MAX_TOOL_CALLS: parseOptionalLimit(process.env.AGENT_MAX_TOOL_CALLS, null),
-  AGENT_MAX_STALL_ITERATIONS: parsePositiveInt(process.env.AGENT_MAX_STALL_ITERATIONS, 8),
+  AGENT_MAX_ITERATIONS: normalizeOptionalLimit(process.env.AGENT_MAX_ITERATIONS, null),
+  AGENT_MAX_RUNTIME_MS: normalizeOptionalLimit(process.env.AGENT_MAX_RUNTIME_MS, null),
+  AGENT_MAX_TOOL_CALLS: normalizeOptionalLimit(process.env.AGENT_MAX_TOOL_CALLS, null),
+  AGENT_MAX_STALL_ITERATIONS: normalizePositiveInt(process.env.AGENT_MAX_STALL_ITERATIONS, 8),
   
   // Tool Settings
   TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 300000,
-  MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS) || 15000,
+  MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS) || 30000,
 
   // Workspace Settings
   OPENAGENT_HOME: process.env.OPENAGENT_HOME || null,
@@ -117,6 +95,75 @@ export const CONFIG = {
   
   // Logging
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+
+  // Circuit Breaker
+  CIRCUIT_BREAKER_THRESHOLD: normalizePositiveInt(process.env.CIRCUIT_BREAKER_THRESHOLD, 3),
+
+  // ═══════════════════════════════════════════════════════════════
+  // 📁 File Tool Limits
+  // ═══════════════════════════════════════════════════════════════
+  FILE_READ_MAX_LINES: 500,
+  FILE_READ_MAX_CHARS: 50000,
+  SEARCH_RESULTS_MAX_CHARS: 30000,
+  SEARCH_MAX_MATCHES_PER_FILE: 3,
+  DIFF_MAX_DIFFERENCES: 100,
+
+  // ═══════════════════════════════════════════════════════════════
+  // 🖥️ Shell Tool Limits
+  // ═══════════════════════════════════════════════════════════════
+  EXEC_MAX_BUFFER_BYTES: 10 * 1024 * 1024, // 10MB
+  EXEC_DEFAULT_TIMEOUT_MS: 30000,
+  BG_PROCESS_OUTPUT_LIMIT: 50000,
+  BG_PROCESS_OUTPUT_TRIM: 25000,
+
+  // ═══════════════════════════════════════════════════════════════
+  // 🤖 Agent Behavior
+  // ═══════════════════════════════════════════════════════════════
+  AGENT_DEFAULT_MAX_RETRIES: 3,
+  AGENT_DEFAULT_RETRY_DELAY_MS: 1000,
+  AGENT_DEFAULT_RETRY_BACKOFF: 2,
+  SINGLE_TOOL_STALL_THRESHOLD: 3,
+  IMAGE_TOKEN_COST: 85,
+  MESSAGE_OVERHEAD_TOKENS: 4,
+  TRUNCATE_TEXT_DEFAULT_MAX: 160,
+  COMPACTION_PRIOR_USER_MESSAGES: 3,
+  COMPACTION_RECENT_HISTORY: 6,
+  HISTORY_DISPLAY_LIMIT: 10,
+  CONTEXT_WARNING_PERCENT: 60,
+  CONTEXT_WARNING_UPPER_PERCENT: 70,
+  RETRY_MAX_TOKENS_INITIAL: 8192,
+  RETRY_MAX_TOKENS_SECOND: 4096,
+  RETRY_MAX_TOKENS_FINAL: 2048,
+  AGENT_TOOL_TEMPERATURE: 0.3,
+
+  // ═══════════════════════════════════════════════════════════════
+  // 🌐 Web Tool Settings
+  // ═══════════════════════════════════════════════════════════════
+  WEB_SEARCH_CACHE_TTL_MS: 5 * 60 * 1000, // 5 minutes
+  WEB_SEARCH_CACHE_MAX_SIZE: 100,
+  WEB_FETCH_TIMEOUT_MS: 15000,
+  WEB_READ_TIMEOUT_MS: 20000,
+  WEB_FETCH_URL_TIMEOUT_MS: 30000,
+  WEB_READ_DEFAULT_MAX_CHARS: 15000,
+  WEB_FETCH_DATA_MAX_CHARS: 10000,
+  SEARX_TIMEOUT_MS: 10000,
+  SERPER_TIMEOUT_MS: 10000,
+  BRAVE_TIMEOUT_MS: 10000,
+
+  // ═══════════════════════════════════════════════════════════════
+  // 📋 Task Manager
+  // ═══════════════════════════════════════════════════════════════
+  TASK_MAX_SESSIONS: 50,
+  TASK_DESCRIPTION_MAX_LENGTH: 500,
+
+  // ═══════════════════════════════════════════════════════════════
+  // 🔌 OpenRouter Client
+  // ═══════════════════════════════════════════════════════════════
+  CLIENT_CACHE_MAX_SIZE: 200,
+  CLIENT_REQUEST_HISTORY_MAX: 200,
+  CLIENT_REQUEST_HISTORY_TRIM: 100,
+  CLIENT_RATE_LIMIT_DEFAULT_WAIT_MS: 1000,
+  CLIENT_RATE_LIMIT_MAX_WAIT_MS: 10000,
 };
 
 /**

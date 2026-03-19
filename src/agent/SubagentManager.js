@@ -24,313 +24,17 @@ import { createShellTools } from '../tools/shellTools.js';
 import { webTools } from '../tools/webTools.js';
 import { createGitTools } from '../tools/gitTools.js';
 import chalk from 'chalk';
+import { SUBAGENT_SPECIALIZATIONS } from './subagents/specializations.js';
+import { UI, stripAnsi } from './subagents/subagentUI.js';
+import { SubagentTask, TaskState } from './subagents/SubagentTask.js';
 
-// ═══════════════════════════════════════════════════════════════════
-// 📊 Task States
-// ═══════════════════════════════════════════════════════════════════
 
-const TaskState = {
-  QUEUED: 'queued',
-  PENDING: 'pending',
-  RUNNING: 'running',
-  COMPLETED: 'completed',
-  FAILED: 'failed',
-  CANCELLED: 'cancelled',
-  RETRYING: 'retrying',
-};
-
-// ═══════════════════════════════════════════════════════════════════
-// 🎨 UI Helpers - Clean visual output for subagent system
-// ═══════════════════════════════════════════════════════════════════
-
-const UI = {
-  SUBAGENT_PREFIX: chalk.dim('  │ '),
-  SUBAGENT_START: chalk.dim('  ┌─'),
-  SUBAGENT_END: chalk.dim('  └─'),
-  SUBAGENT_DIVIDER: chalk.dim('  ├' + '─'.repeat(50)),
-  
-  header(specName, taskPreview) {
-    const lines = [];
-    lines.push('');
-    lines.push(chalk.dim('  ┌' + '─'.repeat(58) + '┐'));
-    lines.push(chalk.dim('  │ ') + chalk.cyan.bold(`⚡ Subagent: ${specName}`) + chalk.dim(' '.repeat(Math.max(0, 43 - specName.length)) + '│'));
-    if (taskPreview) {
-      const preview = taskPreview.length > 52 ? taskPreview.substring(0, 49) + '...' : taskPreview;
-      lines.push(chalk.dim('  │ ') + chalk.gray(preview) + chalk.dim(' '.repeat(Math.max(0, 55 - preview.length)) + '│'));
-    }
-    lines.push(chalk.dim('  ├' + '─'.repeat(58) + '┤'));
-    return lines.join('\n');
-  },
-  
-  footer(success, duration, iterations) {
-    const status = success 
-      ? chalk.green.bold('✓ Complete') 
-      : chalk.red.bold('✗ Failed');
-    const time = chalk.gray(`${(duration / 1000).toFixed(1)}s`);
-    const iters = iterations ? chalk.gray(`${iterations} iterations`) : '';
-    const line = `${status} ${time}${iters ? ' • ' + iters : ''}`;
-    const lines = [];
-    lines.push(chalk.dim('  ├' + '─'.repeat(58) + '┤'));
-    lines.push(chalk.dim('  │ ') + line + chalk.dim(' '.repeat(Math.max(0, 55 - stripAnsi(line).length)) + '│'));
-    lines.push(chalk.dim('  └' + '─'.repeat(58) + '┘'));
-    lines.push('');
-    return lines.join('\n');
-  },
-  
-  progress(message) {
-    return chalk.dim('  │ ') + chalk.gray(`  ${message}`);
-  },
-  
-  parallelHeader(taskCount, maxConcurrent) {
-    const lines = [];
-    lines.push('');
-    lines.push(chalk.dim('  ╔' + '═'.repeat(58) + '╗'));
-    lines.push(chalk.dim('  ║ ') + chalk.cyan.bold(`🚀 Parallel Execution: ${taskCount} tasks`) + chalk.gray(` (max ${maxConcurrent} concurrent)`) + chalk.dim(' '.repeat(Math.max(0, 30 - String(taskCount).length - String(maxConcurrent).length)) + '║'));
-    lines.push(chalk.dim('  ╠' + '═'.repeat(58) + '╣'));
-    return lines.join('\n');
-  },
-  
-  parallelFooter(results) {
-    const success = results.filter(r => r.success).length;
-    const failed = results.filter(r => !r.success).length;
-    const totalDuration = Math.max(...results.map(r => r.duration || 0));
-    
-    const lines = [];
-    lines.push(chalk.dim('  ╠' + '═'.repeat(58) + '╣'));
-    const summary = `${chalk.green(`✓ ${success} passed`)}${failed > 0 ? chalk.red(` • ✗ ${failed} failed`) : ''} ${chalk.gray(`• ${(totalDuration / 1000).toFixed(1)}s total`)}`;
-    lines.push(chalk.dim('  ║ ') + summary + chalk.dim(' '.repeat(Math.max(0, 55 - stripAnsi(summary).length)) + '║'));
-    lines.push(chalk.dim('  ╚' + '═'.repeat(58) + '╝'));
-    lines.push('');
-    return lines.join('\n');
-  },
-
-  taskRow(index, specName, status, preview) {
-    const icons = {
-      [TaskState.QUEUED]: chalk.gray('○'),
-      [TaskState.PENDING]: chalk.yellow('◔'),
-      [TaskState.RUNNING]: chalk.cyan('◑'),
-      [TaskState.COMPLETED]: chalk.green('●'),
-      [TaskState.FAILED]: chalk.red('●'),
-      [TaskState.RETRYING]: chalk.yellow('↻'),
-    };
-    const icon = icons[status] || chalk.gray('?');
-    const shortPreview = preview.length > 40 ? preview.substring(0, 37) + '...' : preview;
-    return chalk.dim('  ║ ') + `  ${icon} ${chalk.white(`#${index + 1}`)} ${chalk.cyan(specName.padEnd(12))} ${chalk.gray(shortPreview)}`;
-  },
-};
-
-/** Strip ANSI codes for length calculation */
-function stripAnsi(str) {
-  return str.replace(/\u001b\[[0-9;]*m/g, '');
-}
 
 // ═══════════════════════════════════════════════════════════════════
 // 🧠 Enhanced Subagent Specializations
-// ═══════════════════════════════════════════════════════════════════
-
-const SUBAGENT_SPECIALIZATIONS = {
-  coder: {
-    name: '💻 Coder',
-    description: 'Expert code writer, editor, and debugger',
-    systemPrompt: `You are an expert coding subagent. Your ONLY job is to write, edit, and fix code with precision.
-
-## Your Approach
-1. **Read first** - Always read existing files before editing them
-2. **Understand context** - Check the project structure and coding style
-3. **Write clean code** - Follow existing patterns, add error handling, document your work
-4. **Verify** - After writing/editing, verify the changes look correct
-5. **Report clearly** - Summarize exactly what you changed and why
-
-## Tool Usage Guidelines
-- Use read_file before edit_file or write_file
-- Use list_directory and search_in_files to understand project structure
-- Use exec to run tests or verify code compiles
-- For large edits, use edit_file with find/replace for precision
-- For new files, use write_file with complete content
-
-## Code Quality Standards
-- Include error handling for all edge cases
-- Add JSDoc/docstring comments for functions
-- Follow the existing code style exactly
-- Keep functions small and focused
-- Use meaningful variable names
-- Add type hints where applicable
-
-## CRITICAL RULES
-- NEVER leave placeholder comments like "// TODO" or "// implement this"
-- ALWAYS write complete, working code
-- If you're unsure about something, read more files for context first
-- Return a clear summary of all files changed`,
-    maxIterations: 20,
-  },
-
-  architect: {
-    name: '🏗️ Architect',
-    description: 'Designs systems, plans refactors, creates project structures',
-    systemPrompt: `You are a system architecture subagent. Your ONLY job is to analyze, design, and plan.
-
-## Your Approach
-1. **Analyze** - Read the existing codebase thoroughly
-2. **Identify patterns** - Understand the architecture and design decisions
-3. **Plan** - Create detailed, actionable plans with specific file changes
-4. **Consider trade-offs** - Note pros/cons of different approaches
-
-## What You Produce
-- Detailed architecture plans with file-by-file changes
-- Dependency diagrams described in text
-- Migration strategies for refactors
-- API design specifications
-- Project structure recommendations
-
-## CRITICAL: Be specific. Don't give vague advice. List exact files, exact changes.`,
-    maxIterations: 15,
-  },
-
-  researcher: {
-    name: '🔍 Researcher',
-    description: 'Searches web, reads docs, gathers information',
-    systemPrompt: `You are a specialized research subagent. Your ONLY job is to find and synthesize information.
-
-## Your Approach
-1. **Search broadly** - Use web_search with multiple relevant queries
-2. **Read deeply** - Use read_webpage to get full content from promising results
-3. **Cross-reference** - Verify information across multiple sources
-4. **Synthesize** - Combine findings into clear, actionable insights
-
-## Output Format
-- Start with a TL;DR summary
-- Organize findings by topic
-- Include source URLs
-- Highlight actionable recommendations
-- Note any conflicting information
-
-## CRITICAL: Cite your sources. Always include URLs where you found information.`,
-    maxIterations: 12,
-  },
-
-  file_manager: {
-    name: '📁 File Manager',
-    description: 'Handles file operations, organization, and structure',
-    systemPrompt: `You are a specialized file management subagent. Your ONLY job is file operations.
-
-## Your Capabilities
-- Read, write, edit, and organize files
-- Create directory structures
-- Search for files and content
-- Rename and restructure projects
-- Generate configuration files
-
-## Guidelines
-- Always verify operations succeeded
-- Report what you did with exact file paths
-- Use list_directory to confirm structure after changes
-- Be careful with destructive operations`,
-    maxIterations: 12,
-  },
-
-  tester: {
-    name: '🧪 Tester',
-    description: 'Creates tests, runs validation, checks code quality',
-    systemPrompt: `You are a specialized testing subagent. Your ONLY job is to test and validate code.
-
-## Your Approach
-1. **Read the code** - Understand what needs testing
-2. **Identify test cases** - Cover happy paths, edge cases, error cases
-3. **Write tests** - Create comprehensive test files
-4. **Run tests** - Execute tests and analyze results
-5. **Report** - Clear pass/fail summary with details on failures
-
-## Test Quality
-- Test both success and failure paths
-- Include edge cases (empty inputs, large inputs, null values)
-- Mock external dependencies when needed
-- Use descriptive test names that explain what's being tested
-
-## CRITICAL: Always run the tests after writing them. Report actual results, not assumptions.`,
-    maxIterations: 18,
-  },
-
-  reviewer: {
-    name: '✅ Reviewer',
-    description: 'Reviews code for quality, security, and best practices',
-    systemPrompt: `You are a specialized code review subagent. Your ONLY job is to review code quality.
-
-## Review Checklist
-1. **Correctness** - Logic errors, off-by-one, race conditions
-2. **Security** - Injection, XSS, auth issues, secret exposure
-3. **Performance** - N+1 queries, unnecessary loops, memory leaks
-4. **Style** - Consistency, naming, documentation
-5. **Architecture** - Separation of concerns, coupling, cohesion
-
-## Output Format
-For each issue found:
-- 🔴 Critical / 🟡 Warning / 🔵 Suggestion
-- File and line reference
-- What's wrong
-- How to fix it
-
-## CRITICAL: Be specific. Reference exact files and line numbers. Suggest exact fixes.`,
-    maxIterations: 12,
-  },
-
-  general: {
-    name: '🤖 General',
-    description: 'Handles any task flexibly',
-    systemPrompt: `You are a helpful subagent. Complete the assigned task efficiently.
-
-## Guidelines
-- Understand the task clearly before starting
-- Use the most appropriate tools
-- Verify your work
-- Report results concisely with clear outcomes
-- If the task is ambiguous, make reasonable assumptions and note them`,
-    maxIterations: 20,
-  },
-};
 
 // ═══════════════════════════════════════════════════════════════════
 // 📋 Subagent Task
-// ═══════════════════════════════════════════════════════════════════
-
-class SubagentTask {
-  constructor(id, task, specialization = 'general', options = {}) {
-    this.id = id;
-    this.task = task;
-    this.specialization = specialization;
-    this.state = TaskState.QUEUED;
-    this.priority = options.priority || 5;
-    this.result = null;
-    this.error = null;
-    this.startTime = null;
-    this.endTime = null;
-    this.subagent = null;
-    this.retryCount = 0;
-    this.maxRetries = options.maxRetries || 1;
-    this.onProgress = options.onProgress || null;
-    this.onComplete = options.onComplete || null;
-    this.onError = options.onError || null;
-    this.parentContext = options.parentContext || null;
-  }
-
-  get duration() {
-    if (!this.startTime) return 0;
-    return (this.endTime || Date.now()) - this.startTime;
-  }
-
-  toJSON() {
-    return {
-      id: this.id,
-      task: this.task.substring(0, 100) + (this.task.length > 100 ? '...' : ''),
-      specialization: this.specialization,
-      state: this.state,
-      priority: this.priority,
-      duration: this.duration,
-      retryCount: this.retryCount,
-      hasResult: !!this.result,
-      error: this.error,
-    };
-  }
-}
 
 // ═══════════════════════════════════════════════════════════════════
 // 🎯 Subagent Manager
@@ -371,6 +75,7 @@ export class SubagentManager {
         baseDir: this.workingDir,
         getWorkspaceDir: () => this.getWorkspaceDir(),
       }),
+      ...this._createMessageBusTools(),
     ]);
     
     // Callbacks
@@ -394,6 +99,10 @@ export class SubagentManager {
     this.abortController = null;
     this.activeSubagents = new Set();
     this.subagentTimers = new Map(); // subagent -> timeout timer ID
+    
+    // Message bus for inter-subagent communication
+    this.messageBus = new Map(); // subagentId -> message queue (array of messages)
+    this.sharedContext = new Map(); // key -> value shared across subagents
     
     // Periodic cleanup of stale subagents (every 60 seconds)
     this._cleanupInterval = setInterval(() => {
@@ -1077,6 +786,191 @@ Please synthesize these results into a single coherent, well-organized response.
     this.aborted = true;
   }
 
+  // ─── Message Bus Tool Factory ───────────────────────────────────
+
+  /**
+   * Create tools that allow subagents to use the message bus and shared context.
+   * These tools are registered in the shared tool registry so all subagents can access them.
+   * @returns {Array} Array of tool definitions
+   */
+  _createMessageBusTools() {
+    const manager = this;
+    return [
+      {
+        name: 'send_subagent_message',
+        description: 'Send a message to another subagent by its task ID. Messages persist and can be retrieved even after the target subagent completes.',
+        category: 'subagent',
+        parameters: {
+          type: 'object',
+          properties: {
+            subagentId: {
+              type: 'string',
+              description: 'The task ID of the target subagent (e.g., "sub_1234567890_1")',
+            },
+            message: {
+              type: 'string',
+              description: 'The message content to send',
+            },
+          },
+          required: ['subagentId', 'message'],
+        },
+        timeout: 5000,
+        async execute(args) {
+          try {
+            const result = manager.sendMessage(args.subagentId, args.message);
+            return { success: true, ...result };
+          } catch (error) {
+            return { success: false, error: error.message };
+          }
+        },
+      },
+      {
+        name: 'get_subagent_messages',
+        description: 'Retrieve and clear all pending messages for a subagent. Returns messages sent to this subagent\'s task ID.',
+        category: 'subagent',
+        parameters: {
+          type: 'object',
+          properties: {
+            subagentId: {
+              type: 'string',
+              description: 'The task ID of the subagent to retrieve messages for',
+            },
+          },
+          required: ['subagentId'],
+        },
+        timeout: 5000,
+        async execute(args) {
+          try {
+            const messages = manager.receiveMessages(args.subagentId);
+            return { success: true, messages, count: messages.length };
+          } catch (error) {
+            return { success: false, error: error.message };
+          }
+        },
+      },
+      {
+        name: 'set_shared_context',
+        description: 'Set a shared context value accessible by all subagents. Use this to share data between subagents without direct messaging.',
+        category: 'subagent',
+        parameters: {
+          type: 'object',
+          properties: {
+            key: {
+              type: 'string',
+              description: 'The context key (use descriptive names like "analysis_results" or "target_files")',
+            },
+            value: {
+              description: 'The value to store (string, number, object, or array)',
+            },
+          },
+          required: ['key', 'value'],
+        },
+        timeout: 5000,
+        async execute(args) {
+          try {
+            manager.setSharedContext(args.key, args.value);
+            return { success: true, key: args.key };
+          } catch (error) {
+            return { success: false, error: error.message };
+          }
+        },
+      },
+      {
+        name: 'get_shared_context',
+        description: 'Get a shared context value by key, or all shared context if no key is provided.',
+        category: 'subagent',
+        parameters: {
+          type: 'object',
+          properties: {
+            key: {
+              type: 'string',
+              description: 'The context key to retrieve. Omit to get all shared context.',
+            },
+          },
+        },
+        timeout: 5000,
+        async execute(args) {
+          try {
+            if (args.key) {
+              const value = manager.getSharedContext(args.key);
+              return { success: true, key: args.key, value, found: value !== undefined };
+            } else {
+              const allContext = manager.getAllSharedContext();
+              return { success: true, context: allContext, keys: Object.keys(allContext) };
+            }
+          } catch (error) {
+            return { success: false, error: error.message };
+          }
+        },
+      },
+    ];
+  }
+
+  // ─── Message Bus ────────────────────────────────────────────────
+
+  /**
+   * Send a message to a subagent's message queue.
+   * Messages persist even after the subagent completes, allowing post-completion communication.
+   * @param {string} subagentId - The task ID of the target subagent
+   * @param {string|object} message - The message to send (string or serializable object)
+   * @returns {{success: boolean, queueSize: number}}
+   */
+  sendMessage(subagentId, message) {
+    if (!this.messageBus.has(subagentId)) {
+      this.messageBus.set(subagentId, []);
+    }
+    const queue = this.messageBus.get(subagentId);
+    const entry = {
+      id: `msg_${Date.now()}_${queue.length}`,
+      timestamp: new Date().toISOString(),
+      content: typeof message === 'string' ? message : JSON.stringify(message),
+    };
+    queue.push(entry);
+    return { success: true, queueSize: queue.length, messageId: entry.id };
+  }
+
+  /**
+   * Retrieve and clear all pending messages for a subagent.
+   * @param {string} subagentId - The task ID of the subagent
+   * @returns {Array<{id: string, timestamp: string, content: string}>} Messages (cleared from queue after retrieval)
+   */
+  receiveMessages(subagentId) {
+    const queue = this.messageBus.get(subagentId) || [];
+    // Return a copy and clear the queue
+    this.messageBus.set(subagentId, []);
+    return [...queue];
+  }
+
+  /**
+   * Set a shared context value accessible by all subagents.
+   * @param {string} key - Context key
+   * @param {*} value - Context value (must be serializable)
+   */
+  setSharedContext(key, value) {
+    this.sharedContext.set(key, value);
+  }
+
+  /**
+   * Get a shared context value.
+   * @param {string} key - Context key
+   * @returns {*} The value, or undefined if not set
+   */
+  getSharedContext(key) {
+    return this.sharedContext.get(key);
+  }
+
+  /**
+   * Get all shared context as a plain object.
+   * @returns {Object} All shared context key-value pairs
+   */
+  getAllSharedContext() {
+    const result = {};
+    for (const [key, value] of this.sharedContext) {
+      result[key] = value;
+    }
+    return result;
+  }
+
   // ─── Utilities ─────────────────────────────────────────────────
 
   sleep(ms) {
@@ -1084,5 +978,4 @@ Please synthesize these results into a single coherent, well-organized response.
   }
 }
 
-export { SUBAGENT_SPECIALIZATIONS, TaskState };
 export default SubagentManager;
