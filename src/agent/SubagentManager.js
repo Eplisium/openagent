@@ -1,8 +1,16 @@
 /**
- * 🤝 Subagent Manager v4.0
+ * 🤝 Subagent Manager v4.1
  * Production-grade subagent lifecycle, task delegation, and result aggregation
  * 
- * Major improvements:
+ * v4.1 improvements:
+ * - Auto-inject project file tree into subagent system prompts
+ * - Platform-aware shell command guidance (no Unix commands on Windows)
+ * - Full file editing rules in all specialization prompts
+ * - Path prefix guidance (project:, workspace:, openagent:)
+ * - Higher maxIterations for coding tasks (35 vs 20)
+ * - Longer default timeout (8min vs 5min)
+ * 
+ * Earlier improvements:
  * - Clean visual separation between parent and subagent output
  * - Enhanced coding-focused system prompts with tool guidance
  * - Progress tracking with spinners and live status
@@ -18,15 +26,99 @@
 
 import { Agent } from './Agent.js';
 import path from 'path';
+import fs from 'fs-extra';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
 import { createFileTools } from '../tools/fileTools.js';
 import { createShellTools } from '../tools/shellTools.js';
 import { webTools } from '../tools/webTools.js';
 import { createGitTools } from '../tools/gitTools.js';
+import { createMcpTools } from '../tools/mcpTools.js';
+import { createA2ATools } from '../tools/a2aTools.js';
+import { createAGUITools } from '../tools/aguiTools.js';
 import chalk from 'chalk';
 import { SUBAGENT_SPECIALIZATIONS } from './subagents/specializations.js';
 import { UI, stripAnsi } from './subagents/subagentUI.js';
 import { SubagentTask, TaskState } from './subagents/SubagentTask.js';
+
+// ─── Project Context Scanner ───────────────────────────────────
+
+/**
+ * Scan a directory tree and return a compact text representation.
+ * Skips node_modules, .git, dist, build, .openagent, and other noise.
+ * @param {string} dir - Root directory to scan
+ * @param {number} maxDepth - Maximum depth (default 3)
+ * @param {number} maxEntries - Maximum total entries (default 80)
+ * @returns {string} Text file tree
+ */
+function scanProjectTree(dir, maxDepth = 3, maxEntries = 80) {
+  const SKIP_DIRS = new Set([
+    'node_modules', '.git', 'dist', 'build', '.next', '.openagent',
+    '.openagent-tasks', '.sessions', '.tool-cache', '.windop-backups',
+    '__pycache__', '.venv', 'venv', '.env', 'coverage', '.nyc_output',
+  ]);
+
+  const SKIP_EXTENSIONS = new Set(['.log', '.bak', '.tmp', '.swp', '.lock']);
+  const lines = [];
+  let entryCount = 0;
+
+  function walk(currentDir, prefix, depth) {
+    if (depth > maxDepth || entryCount >= maxEntries) return;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    // Sort: directories first, then files
+    entries.sort((a, b) => {
+      if (a.isDirectory() && !b.isDirectory()) return -1;
+      if (!a.isDirectory() && b.isDirectory()) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    // Filter out skipped dirs and files
+    const filtered = entries.filter(e => {
+      if (SKIP_DIRS.has(e.name)) return false;
+      if (e.name.startsWith('.') && e.name !== '.' && !e.name.endsWith('.env') && e.name !== '.gitignore') return false;
+      if (e.isFile()) {
+        const ext = path.extname(e.name).toLowerCase();
+        if (SKIP_EXTENSIONS.has(ext)) return false;
+      }
+      return true;
+    });
+
+    const total = filtered.length;
+    filtered.forEach((entry, index) => {
+      if (entryCount >= maxEntries) return;
+      const isLast = index === total - 1;
+      const connector = isLast ? '└── ' : '├── ';
+      const name = entry.isDirectory() ? entry.name + '/' : entry.name;
+      lines.push(prefix + connector + name);
+      entryCount++;
+
+      if (entry.isDirectory()) {
+        const nextPrefix = prefix + (isLast ? '    ' : '│   ');
+        walk(path.join(currentDir, entry.name), nextPrefix, depth + 1);
+      }
+    });
+  }
+
+  try {
+    const rootName = path.basename(dir) || dir;
+    lines.push(rootName + '/');
+    walk(dir, '', 0);
+  } catch {
+    return '';
+  }
+
+  if (entryCount >= maxEntries) {
+    lines.push('  ... (truncated)');
+  }
+
+  return lines.join('\n');
+}
 
 
 
@@ -75,6 +167,11 @@ export class SubagentManager {
         baseDir: this.workingDir,
         getWorkspaceDir: () => this.getWorkspaceDir(),
       }),
+      ...createMcpTools({
+        baseDir: this.workingDir,
+      }),
+      ...createA2ATools(),
+      ...createAGUITools(),
       ...this._createMessageBusTools(),
     ]);
     
@@ -115,6 +212,7 @@ export class SubagentManager {
         }
       }
     }, 60000);
+    this._cleanupInterval.unref?.();
   }
 
   setWorkspaceDir(workspaceDir) {
@@ -173,17 +271,33 @@ export class SubagentManager {
       throw new Error('Model must be specified for subagent. Pass model in customOptions or set parentAgent.');
     }
     
-    // Build enhanced system prompt with working directory context
+    // Build enhanced system prompt with working directory + project context
+    let projectContext = '';
+    try {
+      const tree = scanProjectTree(this.workingDir, 3, 80);
+      if (tree) {
+        projectContext = `
+## Project Structure
+\`\`\`
+${tree}
+\`\`\`
+`;
+      }
+    } catch {
+      // If scanning fails, continue without tree context
+    }
+
     const enhancedPrompt = `${customOptions.systemPrompt || spec.systemPrompt}
 
 ## Environment
 - Working directory: ${this.workingDir}
 - Task workspace: ${workspaceDir || 'not set'}
 - Relative paths resolve from the working directory
-- Use workspace: for notes, artifacts, temporary scripts, and scratch files
+- Use \`project:\` for project files (e.g., \`project:src/index.js\`)
+- Use \`workspace:\` for notes, artifacts, temporary scripts, and scratch files
 - Platform: ${process.platform}
 - You are a SUBAGENT - complete your specific task and return results. Do not ask questions.
-- Be thorough but focused. Do exactly what was asked, nothing more.`;
+- Be thorough but focused. Do exactly what was asked, nothing more.${projectContext}`;
     
     const agent = new Agent({
       tools: this.sharedTools,
@@ -199,8 +313,8 @@ export class SubagentManager {
       retryDelay: 2000,
     });
     
-    // Enforce max runtime timeout (default: 5 minutes)
-    const maxRuntime = customOptions.maxRuntime || 300000;
+    // Enforce max runtime timeout (default: 8 minutes)
+    const maxRuntime = customOptions.maxRuntime || 480000;
     const timeoutTimer = setTimeout(() => {
       if (this.verbose) {
         console.log(UI.progress(chalk.red(`⏰ Subagent exceeded max runtime (${maxRuntime}ms) - aborting`)));
@@ -291,6 +405,7 @@ export class SubagentManager {
     let lastError = null;
     
     for (let attempt = 0; attempt <= subagentTask.maxRetries; attempt++) {
+      let subagent = null;
       try {
         if (attempt > 0) {
           subagentTask.state = TaskState.RETRYING;
@@ -306,7 +421,7 @@ export class SubagentManager {
         }
         
         // Create fresh subagent for each attempt
-        const subagent = this.createSubagent(subagentTask.specialization);
+        subagent = this.createSubagent(subagentTask.specialization);
         subagentTask.subagent = subagent;
         this.activeSubagents.add(subagent);
         
@@ -333,6 +448,17 @@ export class SubagentManager {
         } finally {
           // Always clean up the subagent's resources, even on failure
           this.cleanupSubagent(subagent);
+          this.activeSubagents.delete(subagent);
+          if (subagentTask.subagent === subagent) {
+            subagentTask.subagent = null;
+          }
+        }
+
+        if (!result || result.completed === false) {
+          const stopReason = result?.stopReason || 'incomplete';
+          const incompleteError = new Error(`Subagent stopped before completion (${stopReason})`);
+          incompleteError.partialResult = result;
+          throw incompleteError;
         }
         
         // Success
@@ -353,7 +479,6 @@ export class SubagentManager {
         // Cleanup on success
         this.runningTasks.delete(subagentTask.id);
         this.completedTasks.push(subagentTask);
-        this.activeSubagents.delete(subagent);
         
         return {
           success: true,
@@ -364,14 +489,22 @@ export class SubagentManager {
           duration: subagentTask.duration,
           retries: subagentTask.retryCount,
           stats: result.stats,
+          stopReason: result.stopReason,
         };
         
       } catch (error) {
         lastError = error;
+        if (error.partialResult) {
+          subagentTask.result = error.partialResult;
+        }
         
         // Clean up subagent resources on error
         if (subagent) {
           this.cleanupSubagent(subagent);
+          this.activeSubagents.delete(subagent);
+          if (subagentTask.subagent === subagent) {
+            subagentTask.subagent = null;
+          }
         }
         
         if (this.verbose && attempt < subagentTask.maxRetries) {
@@ -408,6 +541,8 @@ export class SubagentManager {
       error: lastError.message,
       duration: subagentTask.duration,
       retries: subagentTask.retryCount,
+      response: lastError.partialResult?.response,
+      stopReason: lastError.partialResult?.stopReason,
     };
   }
 

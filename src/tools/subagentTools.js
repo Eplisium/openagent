@@ -34,14 +34,14 @@ Specializations:
 - "reviewer" → Code review, security audit, quality checks.
 - "general" → Flexible, handles any task type.
 
-IMPORTANT: Be very specific in your task description. Include file paths, function names, and exact requirements.`,
+CRITICAL: Be VERY specific in your task description. ALWAYS include exact file paths (e.g., 'Shopify Template/index.html', not just 'index.html'). The subagent starts blind — it does NOT have your context. Include: file paths, function names, what to change, and exact requirements.`,
       category: 'subagent',
       parameters: {
         type: 'object',
         properties: {
           task: {
             type: 'string',
-            description: 'Detailed task description. Be specific - include file paths, function names, exact requirements. The subagent has access to the same tools as you (file ops, shell, web, git).',
+            description: 'Detailed task description. ALWAYS include exact file paths with project: prefix or relative paths. Example: "Read project:src/index.html and add a footer section before the closing </body> tag." The subagent starts without context — give it everything it needs.',
           },
           specialization: {
             type: 'string',
@@ -74,6 +74,7 @@ IMPORTANT: Be very specific in your task description. Include file paths, functi
             iterations: result.iterations,
             retries: result.retries,
             error: result.error,
+            stopReason: result.stopReason,
           };
         } catch (error) {
           return {
@@ -97,10 +98,12 @@ Best for:
 Each task runs in its own isolated subagent with its own context.
 Tasks should be INDEPENDENT - they cannot see each other's work.
 
+CRITICAL: Include exact file paths in every task description. Subagents start blind.
+
 Example tasks array:
 [
-  { "task": "Read and analyze src/auth.js for security issues", "specialization": "reviewer" },
-  { "task": "Write unit tests for src/utils.js", "specialization": "tester" },
+  { "task": "Read project:src/auth.js and analyze for security issues", "specialization": "reviewer" },
+  { "task": "Read project:src/utils.js and write unit tests in project:tests/utils.test.js", "specialization": "tester" },
   { "task": "Search for best practices for JWT authentication", "specialization": "researcher" }
 ]`,
       category: 'subagent',
@@ -115,7 +118,7 @@ Example tasks array:
               properties: {
                 task: {
                   type: 'string',
-                  description: 'Detailed task description with all necessary context.',
+                  description: 'Detailed task description. ALWAYS include exact file paths (project: prefix or relative). Subagents start without your context.',
                 },
                 specialization: {
                   type: 'string',
@@ -146,7 +149,8 @@ Example tasks array:
           const failed = results.filter(r => !r.success);
           
           return {
-            success: true,
+            success: failed.length === 0,
+            partial: successful.length > 0 && failed.length > 0,
             results: results.map(r => ({
               taskId: r.taskId,
               success: r.success,
@@ -155,13 +159,17 @@ Example tasks array:
               duration: r.duration,
               iterations: r.iterations,
               error: r.error,
+              stopReason: r.stopReason,
             })),
             summary: {
               total: results.length,
               successful: successful.length,
               failed: failed.length,
-              totalDuration: Math.max(...results.map(r => r.duration || 0)),
+              totalDuration: results.length > 0 ? Math.max(...results.map(r => r.duration || 0)) : 0,
             },
+            ...(failed.length > 0
+              ? { error: `${failed.length} delegated task${failed.length === 1 ? '' : 's'} failed or stopped early.` }
+              : {}),
           };
         } catch (error) {
           return {
