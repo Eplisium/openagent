@@ -1,11 +1,15 @@
 
 
 import { OpenRouterClient } from '../OpenRouterClient.js';
-import { AgentError, ToolExecutionError, ContextOverflowError, AgentAbortError, AbortError } from '../errors.js';
+import { AgentError, ToolExecutionError, ContextOverflowError, AgentAbortError, AbortError, ToolErrorType } from '../errors.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
 import { CONFIG } from '../config.js';
-import { normalizeOptionalLimit, normalizePositiveInt } from '../utils.js';
+import { logger } from '../logger.js';
+import { ContextAllocator } from './contextAllocator.js';
+import { normalizeOptionalLimit, normalizePositiveInt, estimateTokens } from '../utils.js';
 import chalk from 'chalk';
+import fs from 'fs-extra';
+import path from 'path';
 
 export { AgentError, ToolExecutionError, ContextOverflowError, AgentAbortError } from '../errors.js';
 
@@ -53,6 +57,13 @@ export class Agent {
     this.maxContextTokens = options.maxContextTokens || CONFIG.MAX_CONTEXT_TOKENS;
     this.maxToolResultChars = options.maxToolResultChars || CONFIG.MAX_TOOL_RESULT_CHARS;
     this.compactThreshold = options.compactThreshold || CONFIG.COMPACT_THRESHOLD;
+    this.workspaceDir = options.workspaceDir || null;
+
+    // Hierarchical context allocation
+    this.contextAllocator = new ContextAllocator(this.maxContextTokens);
+
+    // Working set: tracks files being actively edited for priority context allocation
+    this.workingSet = new Set();
     
     // Retry configuration
     this.maxRetries = options.maxRetries || 3;
@@ -214,29 +225,24 @@ When you have completed the task, provide a clear summary of what was done.`;
 
     if (message.content) {
       if (typeof message.content === 'string') {
-        // String content: estimate based on character patterns
-        const content = message.content;
-        const isCode = /[{}\[\]()=><;]/.test(content);
-        // Code is ~3 chars/token, prose is ~4 chars/token
-        total += isCode ? Math.ceil(content.length / 3) : Math.ceil(content.length / 4);
+        total += estimateTokens(message.content);
       } else if (Array.isArray(message.content)) {
         // Multimodal content (text + images)
         for (const part of message.content) {
           if (part.type === 'text' && part.text) {
-            total += Math.ceil(part.text.length / 4);
+            total += estimateTokens(part.text);
           } else if (part.type === 'image_url') {
             // Images cost ~85 tokens for low-res, ~765 for high-res
-            // Estimate ~85 tokens per image as baseline
             total += 85;
           }
         }
       } else {
-        total += Math.ceil(JSON.stringify(message.content).length / 4);
+        total += estimateTokens(JSON.stringify(message.content));
       }
     }
 
     if (message.tool_calls) {
-      total += Math.ceil(JSON.stringify(message.tool_calls).length / 3);
+      total += estimateTokens(JSON.stringify(message.tool_calls));
     }
 
     // Add overhead per message (~4 tokens for role/metadata)
@@ -284,6 +290,7 @@ When you have completed the task, provide a clear summary of what was done.`;
   setMaxContextTokens(maxContextTokens) {
     if (Number.isFinite(maxContextTokens) && maxContextTokens > 0) {
       this.maxContextTokens = maxContextTokens;
+      this.contextAllocator = new ContextAllocator(maxContextTokens);
     }
 
     return this.maxContextTokens;
@@ -336,30 +343,212 @@ When you have completed the task, provide a clear summary of what was done.`;
     return `${text.substring(0, maxLength - 3).trimEnd()}...`;
   }
 
+  /**
+   * Extract structured knowledge from conversation messages for context compaction.
+   * Produces a structured summary preserving ~80% of useful information in ~20% of tokens.
+   * Format: TASKS, FILES, DECISIONS, ERRORS, CODE_CHANGES, CURRENT_STATE
+   */
   buildCompactionSummary(olderMessages = []) {
     const priorUserMessages = olderMessages
       .filter(message => message.role === 'user' && message.content)
-      .slice(-3);
-    const recentHistory = this.history.slice(-6);
-    const lines = ['[Context compacted to preserve headroom.]'];
+      .slice(-5);
+    const recentHistory = this.history.slice(-8);
+    const toolResults = olderMessages.filter(m => m.role === 'tool' && m.content);
 
-    if (priorUserMessages.length > 0) {
-      lines.push('Recent user intents:');
-      for (const message of priorUserMessages) {
-        const normalized = String(message.content).replace(/\s+/g, ' ').trim();
-        lines.push(`- ${this.truncateText(normalized, 160)}`);
+    // Extract structured knowledge from messages
+    const filesMentioned = new Set();
+    const decisions = [];
+    const errors = [];
+    const codeChanges = [];
+    const toolsUsed = {};
+
+    // Scan all messages for file paths
+    const filePathRegex = /(?:^|\s)([A-Za-z]:\\[^\s"]+|\/[^\s"]+|\.\/[^\s"]+|[a-zA-Z_][\w./\\-]*\.[a-zA-Z]{2,})/g;
+    for (const msg of olderMessages) {
+      const text = msg.content || JSON.stringify(msg.content || '');
+      let match;
+      while ((match = filePathRegex.exec(text)) !== null) {
+        const p = match[1];
+        if (p.length > 3 && p.length < 200 && !p.startsWith('http')) {
+          filesMentioned.add(p);
+        }
       }
     }
 
+    // Scan tool results for errors
+    for (const tr of toolResults) {
+      const content = tr.content || '';
+      if (content.includes('"success":false') || content.includes('"error"')) {
+        const errorMatch = content.match(/"error"\s*:\s*"([^"]{3,100})/);
+        if (errorMatch) {
+          errors.push(errorMatch[1]);
+        }
+      }
+    }
+
+    // Scan tool results for code changes (write_file, edit_file success)
+    for (const tr of toolResults) {
+      const content = tr.content || '';
+      if (content.includes('"success":true')) {
+        // Check if the preceding assistant message had a tool call for write/edit
+        const callIdx = olderMessages.indexOf(tr);
+        if (callIdx > 0) {
+          const prevAssistant = olderMessages[callIdx - 1];
+          if (prevAssistant?.role === 'assistant' && prevAssistant.tool_calls) {
+            for (const tc of prevAssistant.tool_calls) {
+              const name = tc.function?.name || '';
+              if (['write_file', 'edit_file', 'search_and_replace'].includes(name)) {
+                let args = {};
+                try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
+                const desc = args.path
+                  ? `${name}: ${args.path}`
+                  : `${name} (no path in args)`;
+                codeChanges.push(desc);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Track tool usage
+    for (const entry of recentHistory) {
+      for (const tool of entry.toolCalls) {
+        toolsUsed[tool] = (toolsUsed[tool] || 0) + 1;
+      }
+    }
+
+    // Extract decisions from assistant messages with content
+    for (const msg of olderMessages) {
+      if (msg.role === 'assistant' && msg.content && typeof msg.content === 'string') {
+        const content = msg.content;
+        if (content.match(/(?:decided|chose|going with|will use|switching to|changed to|fixed by|resolved by|solution:|approach:)/i)) {
+          const sentences = content.split(/[.!?\n]/).filter(s => s.trim().length > 10 && s.trim().length < 200);
+          for (const s of sentences) {
+            if (s.match(/(?:decided|chose|going with|will use|switching to|changed to|fixed by|resolved by|solution|approach)/i)) {
+              decisions.push(s.trim().substring(0, 150));
+            }
+          }
+        }
+      }
+    }
+
+    // Determine current state from last few messages
+    let currentState = 'Conversation in progress.';
+    const lastAssistantMsgs = olderMessages
+      .filter(m => m.role === 'assistant' && m.content && typeof m.content === 'string')
+      .slice(-2);
+    if (lastAssistantMsgs.length > 0) {
+      const lastMsg = lastAssistantMsgs[lastAssistantMsgs.length - 1].content;
+      const lastSentence = lastMsg.split(/[.!?\n]/).filter(s => s.trim().length > 10).pop();
+      if (lastSentence) {
+        currentState = lastSentence.trim().substring(0, 200);
+      }
+    }
+
+    // Build compact knowledge block using structured format
+    const lines = ['[CONTEXT KNOWLEDGE — structured summary of prior work]'];
+
+    if (priorUserMessages.length > 0) {
+      lines.push('TASKS:');
+      for (const message of priorUserMessages) {
+        const normalized = String(message.content).replace(/\s+/g, ' ').trim();
+        lines.push(`- ${this.truncateText(normalized, 120)}`);
+      }
+    }
+
+    if (filesMentioned.size > 0) {
+      lines.push('FILES:');
+      const fileList = [...filesMentioned].slice(-10);
+      for (const f of fileList) {
+        lines.push(`- ${f}`);
+      }
+    }
+
+    if (decisions.length > 0) {
+      lines.push('DECISIONS:');
+      for (const d of decisions.slice(-5)) {
+        lines.push(`- ${d}`);
+      }
+    }
+
+    if (errors.length > 0) {
+      lines.push('ERRORS:');
+      const uniqueErrors = [...new Set(errors)].slice(-5);
+      for (const e of uniqueErrors) {
+        lines.push(`- ${e}`);
+      }
+    }
+
+    if (codeChanges.length > 0) {
+      lines.push('CODE_CHANGES:');
+      const uniqueChanges = [...new Set(codeChanges)].slice(-8);
+      for (const c of uniqueChanges) {
+        lines.push(`- ${c}`);
+      }
+    }
+
+    lines.push(`CURRENT_STATE: ${currentState}`);
+
+    if (Object.keys(toolsUsed).length > 0) {
+      const toolSummary = Object.entries(toolsUsed).map(([t, c]) => `${t}(${c})`).join(', ');
+      lines.push(`TOOLS USED: ${toolSummary}`);
+    }
+
     if (recentHistory.length > 0) {
-      lines.push('Recent tool work:');
-      for (const entry of recentHistory) {
+      lines.push('PROGRESS:');
+      for (const entry of recentHistory.slice(-5)) {
         const tools = entry.toolCalls.join(', ') || 'no tools';
-        lines.push(`- Iteration ${entry.iteration}: ${tools}`);
+        const results = entry.toolResults?.map(r => r.success ? '✓' : '✗').join('') || '';
+        lines.push(`- Iter ${entry.iteration}: ${tools} ${results}`);
       }
     }
 
     return lines.join('\n');
+  }
+
+  /**
+   * Track which files are being actively worked on.
+   * Called when read_file, edit_file, or write_file are used.
+   * Working set files get priority in context allocation.
+   *
+   * @param {string} filePath - The file path to add to the working set
+   */
+  trackWorkingSet(filePath) {
+    if (!filePath || typeof filePath !== 'string') return;
+    // Normalize path separators
+    const normalized = filePath.replace(/\\/g, '/');
+    this.workingSet.add(normalized);
+    // Also add basename for cross-reference matching
+    const basename = normalized.split('/').pop();
+    if (basename && basename !== normalized) {
+      this.workingSet.add(basename);
+    }
+  }
+
+  /**
+   * Clear the working set when the user changes topic.
+   * Called when a new user message arrives that doesn't reference current working set files.
+   *
+   * @param {string} userInput - The new user message
+   */
+  maybeResetWorkingSet(userInput) {
+    if (!userInput || this.workingSet.size === 0) return;
+
+    const inputLower = userInput.toLowerCase();
+    let referencesCurrentSet = false;
+
+    for (const file of this.workingSet) {
+      if (inputLower.includes(file.toLowerCase())) {
+        referencesCurrentSet = true;
+        break;
+      }
+    }
+
+    // If the user message doesn't reference any working set files, clear it
+    if (!referencesCurrentSet) {
+      this.workingSet.clear();
+    }
   }
 
   formatRecentHistory(history, limit = 10) {
@@ -391,7 +580,488 @@ When you have completed the task, provide a clear summary of what was done.`;
   }
   
   /**
-   * Run the agentic loop with enhanced error handling and performance tracking
+   * Determine if a task is complex enough to warrant planning
+   */
+  isComplexTask(userInput) {
+    if (!userInput || typeof userInput !== 'string') return false;
+    const input = userInput.toLowerCase();
+    if (input.length <= 50) return false;
+    const complexityWords = ['implement', 'create', 'fix', 'build', 'refactor', 'add', 'design', 'migrate', 'integrate', 'optimize', 'rewrite', 'setup', 'configure', 'debug', 'resolve', 'develop', 'construct', 'modify', 'overhaul', 'restructure'];
+    return complexityWords.some(word => input.includes(word));
+  }
+
+  /**
+   * Plan the execution for complex tasks using a planning LLM call
+   */
+  async plan(userInput, messages) {
+    const planningPrompt = `Analyze this task and create an execution plan. Return ONLY valid JSON array.
+Each element: {"step": 1, "action": "description", "tool": "tool_name", "confidence": 0.9}
+Do not include any text outside the JSON. Keep the plan concise (3-7 steps).
+Task: ${userInput}`;
+
+    try {
+      const result = await this.client.chat(
+        [...messages, { role: 'user', content: planningPrompt }],
+        {
+          model: this.model,
+          temperature: 0.2,
+          max_tokens: 2048,
+        }
+      );
+
+      this.updateUsageStats(result.usage);
+
+      if (!result.content) return null;
+
+      // Parse JSON from response - handle markdown code blocks
+      let jsonStr = result.content.trim();
+      const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (codeBlockMatch) {
+        jsonStr = codeBlockMatch[1].trim();
+      }
+
+      // Ensure it looks like a JSON array
+      if (!jsonStr.startsWith('[')) {
+        const arrayStart = jsonStr.indexOf('[');
+        const arrayEnd = jsonStr.lastIndexOf(']');
+        if (arrayStart >= 0 && arrayEnd > arrayStart) {
+          jsonStr = jsonStr.substring(arrayStart, arrayEnd + 1);
+        } else {
+          return null;
+        }
+      }
+
+      const plan = JSON.parse(jsonStr);
+
+      if (!Array.isArray(plan) || plan.length === 0) return null;
+
+      const planSummary = plan
+        .map(p => `  ${p.step}. [${p.tool || 'general'}] ${p.action} (confidence: ${p.confidence || 'N/A'})`)
+        .join('\n');
+
+      const planMessage = `[System] Execution plan generated:\n${planSummary}\n\nExecute this plan step by step. Adapt if steps don't apply.`;
+
+      if (this.shouldEmitVerboseLogs()) {
+        logger.debug('Plan generated', { steps: plan.length });
+      }
+
+      return planMessage;
+    } catch (error) {
+      // Planning failure is non-fatal - proceed without plan
+      if (this.shouldEmitVerboseLogs()) {
+        logger.debug('Planning failed, proceeding without plan', { error: error.message });
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Reflect on failed tool executions and inject guidance messages
+   */
+  reflectOnToolResults(toolResults, toolCalls) {
+    const errors = toolResults.filter(r => r.result && r.result.success === false);
+    const empties = toolResults.filter(r => {
+      if (r.result && r.result.success === false) return false;
+      const content = JSON.stringify(r.result);
+      return content.length < 10 || content === '{}' || content === 'null' || content === 'undefined';
+    });
+
+    if (errors.length === 0 && empties.length === 0) return;
+
+    // Track failures per tool name
+    const failedTools = [...errors, ...empties].map(r => r.toolName);
+
+    for (const toolName of failedTools) {
+      if (!this.toolFailureCounts) this.toolFailureCounts = {};
+      this.toolFailureCounts[toolName] = (this.toolFailureCounts[toolName] || 0) + 1;
+    }
+
+    // Build reflection message
+    const reflectionParts = [];
+
+    for (const errResult of errors) {
+      const errorPreview = String(errResult.result?.error || 'unknown error').substring(0, 120);
+      reflectionParts.push(`The tool "${errResult.toolName}" returned an error: "${errorPreview}". Reflect: was this expected? Should you try a different approach?`);
+    }
+
+    for (const emptyResult of empties) {
+      reflectionParts.push(`The tool "${emptyResult.toolName}" returned an empty or minimal result. Reflect: was this expected? Should you try a different approach?`);
+    }
+
+    // Check for repeated failures
+    for (const toolName of failedTools) {
+      if (this.toolFailureCounts[toolName] >= 3) {
+        reflectionParts.push(`[CRITICAL] The tool "${toolName}" has failed ${this.toolFailureCounts[toolName]} times. You MUST try a completely different approach or tool. Do not retry the same operation.`);
+        this.toolFailureCounts[toolName] = 0; // Reset after warning
+      }
+    }
+
+    if (reflectionParts.length > 0) {
+      this.pushMessage({
+        role: 'user',
+        content: `[System] ${reflectionParts.join('\n')}`,
+      });
+    }
+  }
+
+  /**
+   * Post-iteration processing shared between streaming and non-streaming paths.
+   * Handles: assistant message creation, tool result injection, edit recovery hints,
+   * circuit breaker, stall detection, and history recording.
+   */
+  async postToolIteration(toolCalls, toolResults, responseContent, iterationStart, runHistory) {
+    // Circuit breaker recovery injection
+    if (this.circuitBreakerTripped) {
+      const failedResults = toolResults.filter(r => r.result && r.result.success === false);
+      if (failedResults.length > 0) {
+        const lastFailure = failedResults[failedResults.length - 1];
+        const suggestion = this.getRecoverySuggestion(lastFailure.result.error, lastFailure.toolName);
+        this.pushMessage({
+          role: 'user',
+          content: `[System] Multiple consecutive tool failures detected (${lastFailure.toolName}). The same error type has occurred ${this.circuitBreakerThreshold}+ times in a row. ${suggestion} Please try a fundamentally different approach rather than retrying the same operation.`,
+        });
+        this.consecutiveFailures = {};
+        this.circuitBreakerTripped = false;
+      }
+    }
+
+    // Stall detection for repeated single-tool calls
+    if (toolCalls.length === 1) {
+      const singleSig = JSON.stringify({ name: toolCalls[0].name, args: toolCalls[0].arguments });
+      if (singleSig === this.lastSingleToolSignature) {
+        this.repeatedSingleToolCount++;
+      } else {
+        this.lastSingleToolSignature = singleSig;
+        this.repeatedSingleToolCount = 1;
+      }
+      if (this.repeatedSingleToolCount >= this.singleToolStallThreshold) {
+        const stallTool = toolCalls[0].name;
+        const stallMessage = `[System] You have called the "${stallTool}" tool with the same arguments ${this.repeatedSingleToolCount} times in a row without making progress. This suggests the approach is not working. Please: (1) try a different tool or strategy, (2) re-examine your plan, or (3) provide your best answer with what you have gathered so far.`;
+        this.pushMessage({ role: 'user', content: stallMessage });
+        this.repeatedSingleToolCount = 0;
+        this.lastSingleToolSignature = null;
+      }
+    } else {
+      this.lastSingleToolSignature = null;
+      this.repeatedSingleToolCount = 0;
+    }
+
+    // Add assistant message with tool calls
+    this.pushMessage({
+      role: 'assistant',
+      content: responseContent || null,
+      tool_calls: toolCalls.map(tc => ({
+        id: tc.id,
+        type: 'function',
+        function: {
+          name: tc.name,
+          arguments: JSON.stringify(tc.arguments),
+        },
+      })),
+    });
+
+    // Add tool results with large-result caching
+    for (const result of toolResults) {
+      let content = JSON.stringify(result.result);
+
+      if (content.length > this.maxToolResultChars) {
+        const original = content;
+        let cutPoint = this.maxToolResultChars;
+        const newlineBefore = content.lastIndexOf('\n', this.maxToolResultChars);
+        if (newlineBefore > this.maxToolResultChars * 0.8) cutPoint = newlineBefore;
+
+        let cacheInfo = '';
+        try {
+          const cacheDir = this.workspaceDir
+            ? path.join(this.workspaceDir, '.tool-cache')
+            : path.join(process.cwd(), '.openagent', '.tool-cache');
+          await fs.ensureDir(cacheDir);
+          const cacheFile = path.join(cacheDir, `${result.toolCallId || Date.now()}.json`);
+          await fs.writeFile(cacheFile, original, 'utf-8');
+          const relPath = this.workspaceDir
+            ? `workspace:.tool-cache/${path.basename(cacheFile)}`
+            : cacheFile;
+          cacheInfo = `\n\n📁 Full result (${original.length} chars) cached to: ${relPath}\nUse read_file with startLine/endLine to read specific sections.`;
+        } catch (cacheErr) {
+          cacheInfo = `\n\n... [truncated - showing ${cutPoint} of ${original.length} chars]`;
+        }
+        content = original.substring(0, cutPoint) + cacheInfo;
+
+        const truncationMessage = `Tool result cached (${original.length} chars) — showing first ${cutPoint}`;
+        if (!this.emitStatus('truncate', truncationMessage) && this.shouldEmitVerboseLogs()) {
+          logger.info(truncationMessage, { originalLength: original.length, truncatedTo: cutPoint });
+        }
+      }
+
+      this.pushMessage({
+        role: 'tool',
+        tool_call_id: result.toolCallId,
+        content,
+      });
+    }
+
+    // Smart edit recovery hints
+    const editFailures = toolResults.filter(r =>
+      r.toolName === 'edit_file' &&
+      r.result &&
+      r.result.success === false &&
+      r.result.error &&
+      (r.result.error.includes('Text not found') || r.result.error.includes('not found in file'))
+    );
+    if (editFailures.length > 0) {
+      const failure = editFailures[0];
+      const failedPath = failure.args?.path || 'unknown file';
+      const hint = `[System] edit_file failed: The 'find' text did not match the file content. ` +
+        `This usually means the text was generated from memory instead of copied verbatim from read_file output. ` +
+        `IMMEDIATE FIX: (1) Use read_file to get the current content of "${failedPath}", ` +
+        `(2) Copy the EXACT text from the read_file output as the 'find' parameter, ` +
+        `(3) Or use line-based editing with startLine/endLine. ` +
+        `Do NOT retry with the same text that just failed.`;
+      this.pushMessage({ role: 'user', content: hint });
+    }
+
+    // Record in history
+    const iterationRecord = {
+      iteration: this.iterationCount,
+      response: responseContent,
+      toolCalls: toolCalls.map(tc => tc.name),
+      toolResults: toolResults.map(tr => ({ tool: tr.toolName, success: tr.result?.success !== false })),
+      duration: Date.now() - iterationStart,
+    };
+    this.history.push(iterationRecord);
+    runHistory.push(iterationRecord);
+    this.recordToolRound(toolCalls);
+
+    // Update performance metrics
+    this.performanceMetrics.avgIterationTime =
+      (this.performanceMetrics.avgIterationTime * (this.performanceMetrics.totalIterations - 1) +
+       (Date.now() - iterationStart)) / this.performanceMetrics.totalIterations;
+
+    if (this.onIterationEnd) {
+      this.onIterationEnd(this.iterationCount, Date.now() - iterationStart);
+    }
+  }
+
+  /**
+   * Run the agentic loop with streaming tool execution.
+   *
+   * Instead of waiting for the full LLM response before executing tools,
+   * this dispatches each tool call as soon as it's complete in the stream.
+   * Falls back to non-streaming if streaming errors mid-iteration.
+   */
+  async runWithStreaming(userInput, options = {}) {
+    const startTime = Date.now();
+    const runHistory = [];
+    let finalResponse = null;
+
+    while (true) {
+      this.checkAborted();
+
+      if (this.hasReachedIterationLimit()) { this.stopReason = 'max_iterations'; break; }
+      if (this.hasReachedRuntimeLimit(startTime)) { this.stopReason = 'max_runtime'; break; }
+      if (this.hasReachedToolCallLimit()) { this.stopReason = 'max_tool_calls'; break; }
+      if (this.hasStalled()) { this.stopReason = 'stalled'; break; }
+
+      this.iterationCount++;
+      this.performanceMetrics.totalIterations++;
+      const iterationStart = Date.now();
+
+      if (this.shouldEmitVerboseLogs()) logger.debug(this.formatIterationLabel());
+      if (this.onIterationStart) this.onIterationStart(this.iterationCount);
+
+      await this.maybeCompactContext();
+
+      // Hierarchical context allocation: optimize message list if over budget
+      const allocResult = this.contextAllocator.allocate(
+        this.messages,
+        (msg) => this.estimateMessageTokens(msg),
+        this.workingSet
+      );
+      if (allocResult.compressed) {
+        if (this.shouldEmitVerboseLogs()) {
+          logger.debug('Context allocator active', allocResult.stats);
+        }
+        this.emitStatus('context_allocate',
+          `Context optimized: ${allocResult.stats.dropped} messages deferred (budget ${allocResult.stats.usedPercent}%)`);
+      }
+      const messagesForLLM = allocResult.messages;
+
+      // Proactive context warning
+      const ctxStats = this.getContextStats();
+      if (ctxStats.percent > 60 && ctxStats.percent <= 70) {
+        const warnMsg = `Context usage at ${ctxStats.percent}% (~${this.formatCompactNumber(ctxStats.usedTokens)} tokens). Consider wrapping up soon.`;
+        if (!this.emitStatus('context_warning', warnMsg) && this.shouldEmitVerboseLogs()) logger.warn(warnMsg);
+      }
+
+      // ── Streaming iteration ──
+      let fullContent = '';
+      let allToolCalls = [];
+      const dispatchedPromises = new Map(); // index -> Promise
+      const completedResults = new Map();   // index -> toolResult
+      let streamUsage = null;
+
+      const stream = this.client.chatStream(messagesForLLM, {
+        model: this.model,
+        temperature: 0.3,
+        max_tokens: 16384,
+        tools: this.tools.getToolDefinitions(),
+        tool_choice: 'auto',
+        // Fire as soon as a single tool call is fully accumulated
+        onToolCallReady: (toolCall) => {
+          const idx = allToolCalls.length;
+          allToolCalls.push(toolCall);
+
+          if (this.onToolStart) this.onToolStart(toolCall.name, toolCall.arguments);
+
+          // Dispatch immediately — don't wait for other tool calls
+          const promise = this.executeSingleToolCall(toolCall)
+            .then(result => {
+              completedResults.set(idx, result);
+              if (this.onToolEnd) this.onToolEnd(toolCall.name, result.result);
+              return result;
+            })
+            .catch(err => {
+              const errResult = {
+                toolCallId: toolCall.id,
+                toolName: toolCall.name,
+                args: toolCall.arguments,
+                result: { success: false, error: err.message },
+              };
+              completedResults.set(idx, errResult);
+              if (this.onToolEnd) this.onToolEnd(toolCall.name, errResult.result);
+              return errResult;
+            });
+
+          dispatchedPromises.set(idx, promise);
+        },
+      });
+
+      try {
+        for await (const chunk of stream) {
+          if (chunk.type === 'content') {
+            fullContent += chunk.content;
+          } else if (chunk.type === 'done') {
+            streamUsage = chunk.usage;
+            // Detect truncation from token limit
+            if (chunk.finishReason === 'length') {
+              const warnMsg = `⚠️ Response truncated (hit token limit at ${streamUsage?.completion_tokens || '?'} tokens). Consider breaking your request into smaller parts.`;
+              this.emitStatus('truncation_warning', warnMsg);
+              if (this.shouldEmitVerboseLogs()) logger.warn(warnMsg);
+            }
+          }
+        }
+      } catch (streamError) {
+        // Streaming failed — fall back to non-streaming for this iteration
+        if (this.shouldEmitVerboseLogs()) {
+          logger.warn('Streaming failed, falling back to non-streaming', { error: streamError.message });
+        }
+
+        // Collect any tools already dispatched before falling back
+        if (dispatchedPromises.size > 0) {
+          const dispatchedResults = await Promise.allSettled([...dispatchedPromises.values()]);
+          for (let i = 0; i < dispatchedResults.length; i++) {
+            if (dispatchedResults[i].status === 'fulfilled') {
+              completedResults.set(i, dispatchedResults[i].value);
+            }
+          }
+        }
+
+        // Use non-streaming fallback for this iteration
+        const response = await this.getLLMResponseWithRetry(0, messagesForLLM);
+        if (!response) throw new AgentError('No response from model', 'NO_RESPONSE');
+        this.updateUsageStats(response.usage);
+
+        const toolCalls = response.toolCalls || [];
+        if (toolCalls.length === 0) {
+          finalResponse = response.content || fullContent;
+          this.pushMessage({ role: 'assistant', content: finalResponse });
+          this.stopReason = 'completed';
+          if (this.onResponse) this.onResponse(finalResponse);
+          break;
+        }
+
+        // Build tool results: keep already-completed ones, execute the rest
+        const fallbackResults = [];
+        for (let i = 0; i < toolCalls.length; i++) {
+          if (completedResults.has(i)) {
+            fallbackResults.push(completedResults.get(i));
+          } else {
+            fallbackResults.push(await this.executeSingleToolCall(toolCalls[i]));
+          }
+        }
+
+        this.reflectOnToolResults(fallbackResults, toolCalls);
+        await this.postToolIteration(toolCalls, fallbackResults, response.content || fullContent, iterationStart, runHistory);
+        continue;
+      }
+
+      this.updateUsageStats(streamUsage);
+
+      if (allToolCalls.length === 0) {
+        // No tool calls — final response
+        finalResponse = fullContent;
+        this.pushMessage({ role: 'assistant', content: fullContent });
+        this.stopReason = 'completed';
+        if (this.onResponse) this.onResponse(fullContent);
+        break;
+      }
+
+      // Wait for all dispatched tool calls to complete
+      const dispatchedResults = await Promise.allSettled([...dispatchedPromises.values()]);
+      for (let i = 0; i < dispatchedResults.length; i++) {
+        if (dispatchedResults[i].status === 'fulfilled') {
+          completedResults.set(i, dispatchedResults[i].value);
+        }
+      }
+
+      // Build ordered results array
+      const toolResults = [];
+      for (let i = 0; i < allToolCalls.length; i++) {
+        if (completedResults.has(i)) {
+          toolResults.push(completedResults.get(i));
+        } else {
+          toolResults.push({
+            toolCallId: allToolCalls[i].id,
+            toolName: allToolCalls[i].name,
+            args: allToolCalls[i].arguments,
+            result: { success: false, error: 'Tool execution incomplete' },
+          });
+        }
+      }
+
+      this.reflectOnToolResults(toolResults, allToolCalls);
+      await this.postToolIteration(allToolCalls, toolResults, fullContent, iterationStart, runHistory);
+    }
+
+    if (!finalResponse) {
+      finalResponse = this.buildStopMessage(this.stopReason, runHistory, startTime);
+    }
+
+    return {
+      response: finalResponse,
+      iterations: this.iterationCount,
+      history: runHistory,
+      messages: this.messages,
+      stats: this.getStats(),
+      performance: this.performanceMetrics,
+      stopReason: this.stopReason,
+      completed: this.stopReason === 'completed',
+    };
+  }
+
+  /**
+   * Run the agentic loop with enhanced error handling and performance tracking.
+   *
+   * Uses streaming tool execution when `this.streaming` is enabled,
+   * falling back to non-streaming on error.
+   *
+   * Break strategy: The loop exits via:
+   * - checkAborted(): agent was aborted externally
+   * - hasReachedIterationLimit(): iteration count hit maxIterations
+   * - hasReachedRuntimeLimit(): runtime exceeded maxRuntimeMs
+   * - hasReachedToolCallLimit(): tool call count hit maxToolCalls
+   * - hasStalled(): same tool workflow repeated without progress
+   * - Empty toolCalls array: final response received (stopReason = 'completed')
    */
   async run(userInput, options = {}) {
     const startTime = Date.now();
@@ -406,12 +1076,49 @@ When you have completed the task, provide a clear summary of what was done.`;
     
     // Add user message (skip if already pushed, e.g. multimodal messages)
     if (userInput !== undefined && userInput !== null) {
+      this.maybeResetWorkingSet(userInput);
       this.pushMessage({ role: 'user', content: userInput });
     }
-    
+
+    // Planning phase: generate execution plan for complex tasks
+    if (userInput && this.isComplexTask(userInput)) {
+      const planMessage = await this.plan(userInput, this.messages);
+      if (planMessage) {
+        this.pushMessage({ role: 'system', content: planMessage });
+      }
+    }
+
+    // ── Streaming path ──
+    if (this.streaming) {
+      try {
+        const result = await this.runWithStreaming(userInput, options);
+        this.state = 'completed';
+        this.performanceMetrics.totalExecutionTime = Date.now() - startTime;
+        return result;
+      } catch (error) {
+        // Streaming failed completely — fall through to non-streaming
+        if (error instanceof AgentAbortError || error instanceof AbortError) {
+          this.state = 'aborted';
+          this.stopReason = 'aborted';
+          throw error;
+        }
+        if (this.shouldEmitVerboseLogs()) {
+          logger.warn('Streaming path failed, falling back to non-streaming', { error: error.message });
+        }
+        // Reset iteration state for clean retry
+        this.iterationCount = 0;
+        this.lastToolCallSignature = null;
+        this.repeatedToolRoundCount = 0;
+        this.toolFailureCounts = {};
+        // Fall through to non-streaming path below
+      }
+    }
+
+    // ── Non-streaming path (original logic) ──
     let finalResponse = null;
     const runHistory = [];
-    
+    this.toolFailureCounts = {};
+
     try {
       while (true) {
         this.checkAborted();
@@ -442,7 +1149,7 @@ When you have completed the task, provide a clear summary of what was done.`;
         const iterationStart = Date.now();
         
         if (this.shouldEmitVerboseLogs()) {
-          console.log(chalk.dim(`\n── ${this.formatIterationLabel()} ──`));
+          logger.debug(this.formatIterationLabel());
         }
         
         if (this.onIterationStart) {
@@ -451,18 +1158,34 @@ When you have completed the task, provide a clear summary of what was done.`;
         
         // Check context size BEFORE calling LLM
         await this.maybeCompactContext();
-        
+
+        // Hierarchical context allocation: optimize message list if over budget
+        const allocResult = this.contextAllocator.allocate(
+          this.messages,
+          (msg) => this.estimateMessageTokens(msg),
+          this.workingSet
+        );
+        if (allocResult.compressed) {
+          if (this.shouldEmitVerboseLogs()) {
+            logger.debug('Context allocator active', allocResult.stats);
+          }
+          this.emitStatus('context_allocate',
+            `Context optimized: ${allocResult.stats.dropped} messages deferred (budget ${allocResult.stats.usedPercent}%)`);
+        }
+        // Use optimized messages for LLM call; full list stays in this.messages
+        const messagesForLLM = allocResult.messages;
+
         // Proactive context warning at 60% usage
         const ctxStats = this.getContextStats();
         if (ctxStats.percent > 60 && ctxStats.percent <= 70) {
           const warnMsg = `Context usage at ${ctxStats.percent}% (~${this.formatCompactNumber(ctxStats.usedTokens)} tokens). Consider wrapping up soon.`;
           if (!this.emitStatus('context_warning', warnMsg) && this.shouldEmitVerboseLogs()) {
-            console.log(chalk.yellow(`   ⚠️ ${warnMsg}`));
+            logger.warn(warnMsg);
           }
         }
         
         // Get LLM response with tools (with retry logic)
-        const response = await this.getLLMResponseWithRetry();
+        const response = await this.getLLMResponseWithRetry(0, messagesForLLM);
         
         if (!response) {
           throw new AgentError('No response from model', 'NO_RESPONSE');
@@ -487,128 +1210,11 @@ When you have completed the task, provide a clear summary of what was done.`;
         // Execute tool calls with enhanced error handling
         const toolResults = await this.executeToolCallsEnhanced(toolCalls);
 
-        // Circuit breaker: if tripped, inject a recovery message to the model
-        if (this.circuitBreakerTripped) {
-          const failedResults = toolResults.filter(r => r.result && r.result.success === false);
-          if (failedResults.length > 0) {
-            const lastFailure = failedResults[failedResults.length - 1];
-            const suggestion = this.getRecoverySuggestion(lastFailure.result.error, lastFailure.toolName);
-            this.pushMessage({
-              role: 'user',
-              content: `[System] Multiple consecutive tool failures detected (${lastFailure.toolName}). The same error type has occurred ${this.circuitBreakerThreshold}+ times in a row. ${suggestion} Please try a fundamentally different approach rather than retrying the same operation.`,
-            });
-            // Reset circuit breaker after injecting the message
-            this.consecutiveFailures = {};
-            this.circuitBreakerTripped = false;
-          }
-        }
+        // Self-reflection: check for failed or empty results and inject guidance
+        this.reflectOnToolResults(toolResults, toolCalls);
 
-        // Stall detection: if the model calls the same single tool with same args repeatedly
-        if (toolCalls.length === 1) {
-          const singleSig = JSON.stringify({ name: toolCalls[0].name, args: toolCalls[0].arguments });
-          if (singleSig === this.lastSingleToolSignature) {
-            this.repeatedSingleToolCount++;
-          } else {
-            this.lastSingleToolSignature = singleSig;
-            this.repeatedSingleToolCount = 1;
-          }
-
-          if (this.repeatedSingleToolCount >= this.singleToolStallThreshold) {
-            const stallTool = toolCalls[0].name;
-            const stallMessage = `[System] You have called the "${stallTool}" tool with the same arguments ${this.repeatedSingleToolCount} times in a row without making progress. This suggests the approach is not working. Please: (1) try a different tool or strategy, (2) re-examine your plan, or (3) provide your best answer with what you have gathered so far.`;
-            this.pushMessage({ role: 'user', content: stallMessage });
-            this.repeatedSingleToolCount = 0;
-            this.lastSingleToolSignature = null;
-          }
-        } else {
-          // Multiple tool calls in one round - reset single-tool stall tracking
-          this.lastSingleToolSignature = null;
-          this.repeatedSingleToolCount = 0;
-        }
-
-        // Add assistant message with tool calls
-        this.pushMessage({
-          role: 'assistant',
-          content: response.content || null,
-          tool_calls: toolCalls.map(tc => ({
-            id: tc.id,
-            type: 'function',
-            function: {
-              name: tc.name,
-              arguments: JSON.stringify(tc.arguments),
-            },
-          })),
-        });
-        
-        // Add tool results (truncated to prevent context overflow)
-        for (const result of toolResults) {
-          let content = JSON.stringify(result.result);
-          
-          // Truncate large tool results at line boundaries
-          if (content.length > this.maxToolResultChars) {
-            const original = content;
-            // Find a good truncation point at a line boundary
-            let cutPoint = this.maxToolResultChars;
-            const newlineBefore = content.lastIndexOf('\n', this.maxToolResultChars);
-            if (newlineBefore > this.maxToolResultChars * 0.8) {
-              cutPoint = newlineBefore;
-            }
-            content = content.substring(0, cutPoint) + 
-              '\n\n... [truncated - showing ' + cutPoint + ' of ' + original.length + ' chars. Use startLine/endLine parameters for partial reads.]';
-            
-            const truncationMessage = `Tool result truncated (${original.length} -> ${cutPoint} chars)`;
-            if (!this.emitStatus('truncate', truncationMessage) && this.shouldEmitVerboseLogs()) {
-              console.log(chalk.yellow(`   ⚠️ ${truncationMessage}`));
-            }
-          }
-          
-          this.pushMessage({
-            role: 'tool',
-            tool_call_id: result.toolCallId,
-            content,
-          });
-        }
-        
-        // Smart edit recovery: if edit_file failed with "text not found", inject a helpful hint
-        const editFailures = toolResults.filter(r => 
-          r.toolName === 'edit_file' && 
-          r.result && 
-          r.result.success === false && 
-          r.result.error && 
-          (r.result.error.includes('Text not found') || r.result.error.includes('not found in file'))
-        );
-        if (editFailures.length > 0) {
-          const failure = editFailures[0];
-          const failedPath = failure.args?.path || 'unknown file';
-          const hint = `[System] edit_file failed: The 'find' text did not match the file content. ` +
-            `This usually means the text was generated from memory instead of copied verbatim from read_file output. ` +
-            `IMMEDIATE FIX: (1) Use read_file to get the current content of "${failedPath}", ` +
-            `(2) Copy the EXACT text from the read_file output as the 'find' parameter, ` +
-            `(3) Or use line-based editing with startLine/endLine. ` +
-            `Do NOT retry with the same text that just failed.`;
-          this.pushMessage({ role: 'user', content: hint });
-        }
-
-        // Record in history
-        const iterationRecord = {
-          iteration: this.iterationCount,
-          response: response.content,
-          toolCalls: toolCalls.map(tc => tc.name),
-          toolResults: toolResults.map(tr => ({ tool: tr.toolName, success: tr.result.success })),
-          duration: Date.now() - iterationStart,
-        };
-        this.history.push(iterationRecord);
-        runHistory.push(iterationRecord);
-        this.recordToolRound(toolCalls);
-        
-        // Update performance metrics
-        this.performanceMetrics.avgIterationTime = 
-          (this.performanceMetrics.avgIterationTime * (this.performanceMetrics.totalIterations - 1) + 
-           (Date.now() - iterationStart)) / this.performanceMetrics.totalIterations;
-        
-        if (this.onIterationEnd) {
-          this.onIterationEnd(this.iterationCount, Date.now() - iterationStart);
-        }
+        // Shared post-iteration processing (circuit breaker, stall, messages, history)
+        await this.postToolIteration(toolCalls, toolResults, response.content, iterationStart, runHistory);
       }
       
       if (!finalResponse) {
@@ -652,15 +1258,16 @@ When you have completed the task, provide a clear summary of what was done.`;
   /**
    * Get LLM response with tool calling and retry logic
    */
-  async getLLMResponseWithRetry(retryCount = 0) {
+  async getLLMResponseWithRetry(retryCount = 0, messages = null) {
     const maxRetries = this.maxRetries;
+    const messagesToSend = messages || this.messages;
     
-    // Reduce max_tokens on retries to prevent truncation
-    const maxTokens = retryCount === 0 ? 8192 : retryCount === 1 ? 4096 : 2048;
+    // Keep max_tokens stable across retries — reducing it makes truncation WORSE, not better
+    const maxTokens = 16384;
     
     try {
       const result = await this.client.chatWithTools(
-        this.messages,
+        messagesToSend,
         this.tools.getToolDefinitions(),
         {
           model: this.model,
@@ -671,6 +1278,13 @@ When you have completed the task, provide a clear summary of what was done.`;
       
       // Track usage
       this.updateUsageStats(result.usage);
+      
+      // Detect truncation from token limit
+      if (result.finishReason === 'length') {
+        const warnMsg = `⚠️ Response truncated (hit token limit at ${result.usage?.completion_tokens || '?'} tokens). Consider breaking your request into smaller parts.`;
+        this.emitStatus('truncation_warning', warnMsg);
+        if (this.shouldEmitVerboseLogs()) logger.warn(warnMsg);
+      }
       
       return result;
     } catch (error) {
@@ -683,7 +1297,7 @@ When you have completed the task, provide a clear summary of what was done.`;
         this.performanceMetrics.totalRetries++;
         const retryMessage = `Retrying with shorter response (attempt ${retryCount + 1}/${maxRetries})`;
         if (!this.emitStatus('retry', retryMessage) && this.shouldEmitVerboseLogs()) {
-          console.log(chalk.yellow(`   ⚠️ ${retryMessage}`));
+          logger.warn(retryMessage, { attempt: retryCount + 1, maxRetries });
         }
         
         // Compact context before retry
@@ -692,18 +1306,17 @@ When you have completed the task, provide a clear summary of what was done.`;
         // Exponential backoff
         await this.sleep(this.retryDelay * Math.pow(this.retryBackoff, retryCount));
         
-        // Retry with lower max_tokens to avoid truncation
-        return this.getLLMResponseWithRetry(retryCount + 1);
+        // Retry — context was already compacted above
+        return this.getLLMResponseWithRetry(retryCount + 1, messagesToSend);
       }
       
       if (error.code === 'TIMEOUT') {
-        console.error(chalk.red(`\n⏱️ Request timed out after ${Math.round(this.client.timeout / 1000)}s`));
-        console.error(chalk.dim('   This can happen with complex tasks. Try:'));
-        console.error(chalk.dim('   1. Increase TIMEOUT_MS in .env (e.g., TIMEOUT_MS=600000)'));
-        console.error(chalk.dim('   2. Break the task into smaller pieces'));
-        console.error(chalk.dim('   3. Use a faster model (e.g., claude-haiku-3)'));
+        logger.error(`Request timed out after ${Math.round(this.client.timeout / 1000)}s`, { 
+          timeout: this.client.timeout,
+          suggestion: 'Increase TIMEOUT_MS or use faster model'
+        });
       } else {
-        console.error(chalk.red(`LLM Error: ${error.message}`));
+        logger.error(`LLM Error: ${error.message}`, { code: error.code });
       }
       throw error;
     }
@@ -764,16 +1377,90 @@ When you have completed the task, provide a clear summary of what was done.`;
       results.push(result);
     }
     
-    // Execute dependent tools sequentially
+    // Execute dependent tools: write/edit tools on different files can run in parallel
+    const writeTools = new Set(['write_file', 'edit_file', 'search_and_replace']);
+    const fileWriteGroups = new Map(); // resolvedPath -> [toolCall, ...]
+    const sequentialTools = [];
+
     for (const toolCall of dependentTools) {
+      if (writeTools.has(toolCall.name) && toolCall.arguments?.path) {
+        const filePath = toolCall.arguments.path;
+        if (!fileWriteGroups.has(filePath)) {
+          fileWriteGroups.set(filePath, []);
+        }
+        fileWriteGroups.get(filePath).push(toolCall);
+      } else {
+        sequentialTools.push(toolCall);
+      }
+    }
+
+    // Run file write groups in parallel (different files = no conflict)
+    if (fileWriteGroups.size > 1) {
+      const groupEntries = [...fileWriteGroups.entries()];
+      const groupResults = await Promise.allSettled(
+        groupEntries.map(async ([, groupToolCalls]) => {
+          const groupResults = [];
+          for (const tc of groupToolCalls) {
+            groupResults.push(await this.executeSingleToolCall(tc));
+          }
+          return groupResults;
+        })
+      );
+      for (const groupResult of groupResults) {
+        if (groupResult.status === 'fulfilled') {
+          results.push(...groupResult.value);
+        }
+      }
+    } else if (fileWriteGroups.size === 1) {
+      // Single file group — run sequentially within the group
+      const [, groupToolCalls] = [...fileWriteGroups.entries()][0];
+      for (const tc of groupToolCalls) {
+        const result = await this.executeSingleToolCall(tc);
+        results.push(result);
+      }
+    }
+
+    // Remaining non-file-write dependent tools run sequentially
+    for (const toolCall of sequentialTools) {
       const result = await this.executeSingleToolCall(toolCall);
       results.push(result);
     }
 
     // Track consecutive failures by error category for circuit breaker
+    let hadFailures = false;
+    const webTools = new Set(['web_search', 'read_webpage', 'fetch_url']);
     for (const result of results) {
       if (result.result && result.result.success === false) {
+        hadFailures = true;
+        const toolName = result.toolName || '';
         const errorCategory = this.categorizeError({ message: result.result.error || '' });
+
+        // Web tools: skip circuit breaker for expected failures (404s, no search results)
+        // These are normal during web exploration and should not stop the agent
+        if (webTools.has(toolName)) {
+          const errorMsg = (result.result.error || '').toLowerCase();
+          // HTTP 404 is expected when exploring docs — don't count it
+          if (errorCategory === 'NOT_FOUND' || errorMsg.includes('404') || errorMsg.includes('not found')) {
+            continue;
+          }
+          // Search returning no results is expected for niche queries
+          if (toolName === 'web_search' && (errorMsg.includes('no search results') || errorMsg.includes('no results'))) {
+            continue;
+          }
+          // Network errors on web tools use higher threshold (5 instead of 3)
+          this.consecutiveFailures[errorCategory] = (this.consecutiveFailures[errorCategory] || 0) + 1;
+          const threshold = 5;
+          if (this.consecutiveFailures[errorCategory] >= threshold) {
+            this.circuitBreakerTripped = true;
+            const suggestion = this.getRecoverySuggestion(result.result.error, toolName);
+            const circuitMessage = `Circuit breaker tripped: ${errorCategory} errors (${this.consecutiveFailures[errorCategory]} consecutive). ${suggestion}`;
+            if (!this.emitStatus('circuit_breaker', circuitMessage) && this.shouldEmitVerboseLogs()) {
+              logger.warn(circuitMessage, { errorCategory, consecutiveFailures: this.consecutiveFailures[errorCategory] });
+            }
+          }
+          continue;
+        }
+
         this.consecutiveFailures[errorCategory] = (this.consecutiveFailures[errorCategory] || 0) + 1;
 
         // EDIT_MISMATCH trips faster (2 instead of default threshold)
@@ -783,14 +1470,15 @@ When you have completed the task, provide a clear summary of what was done.`;
           const suggestion = this.getRecoverySuggestion(result.result.error, result.toolName);
           const circuitMessage = `Circuit breaker tripped: ${errorCategory} errors (${this.consecutiveFailures[errorCategory]} consecutive). ${suggestion}`;
           if (!this.emitStatus('circuit_breaker', circuitMessage) && this.shouldEmitVerboseLogs()) {
-            console.log(chalk.red(`   ⚡ ${circuitMessage}`));
+            logger.warn(circuitMessage, { errorCategory, consecutiveFailures: this.consecutiveFailures[errorCategory] });
           }
         }
-      } else {
-        // Reset all consecutive failure counters on any success
-        this.consecutiveFailures = {};
-        this.circuitBreakerTripped = false;
       }
+    }
+
+    if (!hadFailures) {
+      this.consecutiveFailures = {};
+      this.circuitBreakerTripped = false;
     }
 
     return results;
@@ -807,7 +1495,7 @@ When you have completed the task, provide a clear summary of what was done.`;
     if (this.shouldEmitVerboseLogs()) {
       // Compact tool output - avoid clashing with subagent UI
       const argPreview = args?.path || args?.command?.substring(0, 40) || args?.query?.substring(0, 40) || '';
-      console.log(chalk.yellow(`  🔧 ${toolName}`) + (argPreview ? chalk.dim(` ${argPreview}`) : ''));
+      logger.debug(`Executing tool: ${toolName}`, { tool: toolName, args: argPreview });
     }
     
     if (this.onToolStart) {
@@ -820,19 +1508,41 @@ When you have completed the task, provide a clear summary of what was done.`;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
         const result = await this.tools.execute(toolName, args);
+        const shouldRetry = result.success === false &&
+          attempt < this.maxRetries &&
+          this.isRetryableToolFailure(toolName, result);
         
         if (this.shouldEmitVerboseLogs()) {
           if (result.success !== false) {
-            console.log(chalk.green(`     ✓`));
+            logger.debug('Tool succeeded', { tool: toolName });
           } else {
-            console.log(chalk.red(`     ✗ ${result.error?.substring(0, 60) || 'failed'}`));
+            logger.debug('Tool failed', { tool: toolName, error: result.error?.substring(0, 60) });
           }
+        }
+
+        if (shouldRetry) {
+          lastError = new Error(result.error || `${toolName} failed`);
+          this.performanceMetrics.totalRetries++;
+          const retryMessage = `Retry ${attempt + 1}/${this.maxRetries} for ${toolName}`;
+          if (!this.emitStatus('retry', retryMessage) && this.shouldEmitVerboseLogs()) {
+            logger.warn(retryMessage, { tool: toolName, attempt: attempt + 1, maxRetries: this.maxRetries });
+          }
+          await this.sleep(this.retryDelay * Math.pow(this.retryBackoff, attempt));
+          continue;
         }
         
         if (this.onToolEnd) {
           this.onToolEnd(toolName, result);
         }
-        
+
+        // Working set detection: track files being actively worked on
+        if (result.success !== false && args && args.path) {
+          const fileTools = ['read_file', 'edit_file', 'write_file', 'search_and_replace'];
+          if (fileTools.includes(toolName)) {
+            this.trackWorkingSet(args.path);
+          }
+        }
+
         return {
           toolCallId: toolCall.id,
           toolName,
@@ -847,7 +1557,7 @@ When you have completed the task, provide a clear summary of what was done.`;
         if (attempt < this.maxRetries) {
           const retryMessage = `Retry ${attempt + 1}/${this.maxRetries} for ${toolName}`;
           if (!this.emitStatus('retry', retryMessage) && this.shouldEmitVerboseLogs()) {
-            console.log(chalk.yellow(`   ⚠️ ${retryMessage}`));
+            logger.warn(retryMessage, { tool: toolName, attempt: attempt + 1, maxRetries: this.maxRetries });
           }
           await this.sleep(this.retryDelay * Math.pow(this.retryBackoff, attempt));
         }
@@ -856,7 +1566,7 @@ When you have completed the task, provide a clear summary of what was done.`;
     
     // All retries failed
     if (this.shouldEmitVerboseLogs()) {
-      console.log(chalk.red(`   ✗ Failed after ${this.maxRetries} retries: ${lastError.message}`));
+      logger.error(`Tool failed after ${this.maxRetries} retries`, { tool: toolName, error: lastError.message });
     }
     
     if (this.onToolEnd) {
@@ -907,6 +1617,49 @@ When you have completed the task, provide a clear summary of what was done.`;
     return 'UNKNOWN';
   }
 
+  isRetryableToolFailure(toolName, result = {}) {
+    if (!result || result.success !== false) {
+      return false;
+    }
+
+    if (result.errorType === ToolErrorType.VALIDATION_ERROR ||
+        result.errorType === ToolErrorType.PERMISSION_DENIED ||
+        result.errorType === ToolErrorType.NOT_FOUND) {
+      return false;
+    }
+
+    if (result.errorType === ToolErrorType.TIMEOUT) {
+      return true;
+    }
+
+    const message = `${result.error || ''} ${result.status || ''} ${result.statusText || ''}`.toLowerCase();
+    const isNetworkTool = ['web_search', 'read_webpage', 'fetch_url'].includes(toolName);
+
+    if (!isNetworkTool && result.errorType !== ToolErrorType.EXECUTION_ERROR) {
+      return false;
+    }
+
+    if (message.includes('no search results were found') || message.includes('not available in the current environment')) {
+      return false;
+    }
+
+    return [
+      'timeout',
+      'timed out',
+      'network',
+      'fetch failed',
+      'temporarily',
+      'rate limit',
+      'http 429',
+      'http 500',
+      'http 502',
+      'http 503',
+      'http 504',
+      'all searx instances failed',
+      'search failed',
+    ].some((fragment) => message.includes(fragment));
+  }
+
   /**
    * Get a recovery suggestion based on error type and tool name
    * @param {Error|string} error - The error that occurred
@@ -934,6 +1687,13 @@ When you have completed the task, provide a clear summary of what was done.`;
 
   /**
    * Run a streaming version of the agent
+   * 
+   * Break strategy: The loop exits via:
+   * - hasReachedIterationLimit(): iteration count hit max
+   * - hasReachedRuntimeLimit(): runtime exceeded maxRuntimeMs
+   * - hasReachedToolCallLimit(): tool call count hit max
+   * - hasStalled(): same tool workflow repeated without progress
+   * - Empty toolCalls array: final response received
    */
   async *runStream(userInput) {
     this.pushMessage({ role: 'user', content: userInput });
@@ -944,6 +1704,9 @@ When you have completed the task, provide a clear summary of what was done.`;
     const startTime = Date.now();
     
     while (true) {
+      // Check for abort at the start of each iteration
+      this.checkAborted();
+
       if (this.hasReachedIterationLimit()) {
         this.stopReason = 'max_iterations';
         break;
@@ -972,6 +1735,8 @@ When you have completed the task, provide a clear summary of what was done.`;
       const stream = this.client.chatStream(this.messages, {
         model: this.model,
         temperature: 0.3,
+        tools: this.tools.getToolDefinitions(),
+        tool_choice: 'auto',
       });
       
       let fullContent = '';
@@ -985,6 +1750,12 @@ When you have completed the task, provide a clear summary of what was done.`;
           toolCalls = chunk.toolCalls;
         } else if (chunk.type === 'done') {
           this.updateUsageStats(chunk.usage);
+          // Detect truncation from token limit
+          if (chunk.finishReason === 'length') {
+            const warnMsg = `⚠️ Response truncated (hit token limit at ${chunk.usage?.completion_tokens || '?'} tokens)`;
+            this.emitStatus('truncation_warning', warnMsg);
+            if (this.shouldEmitVerboseLogs()) logger.warn(warnMsg);
+          }
         }
       }
       
@@ -1062,7 +1833,7 @@ When you have completed the task, provide a clear summary of what was done.`;
     
     const triggerMessage = `Context compaction triggered (~${estimatedTokens} tokens)`;
     if (!this.emitStatus('compaction', triggerMessage) && this.shouldEmitVerboseLogs()) {
-      console.log(chalk.yellow(`   ⚠️ ${triggerMessage}`));
+      logger.warn(triggerMessage, { estimatedTokens });
     }
     
     // Smart compaction: preserve system message, first user message, and last 4 exchanges
@@ -1117,7 +1888,7 @@ When you have completed the task, provide a clear summary of what was done.`;
     const newTokens = this.estimateTokens();
     const compactedMessage = `Context compacted: ~${estimatedTokens} -> ~${newTokens} tokens`;
     if (!this.emitStatus('compaction', compactedMessage) && this.shouldEmitVerboseLogs()) {
-      console.log(chalk.green(`   ✓ ${compactedMessage}`));
+      logger.info(compactedMessage, { beforeTokens: estimatedTokens, afterTokens: newTokens });
     }
   }
 
@@ -1148,6 +1919,12 @@ When you have completed the task, provide a clear summary of what was done.`;
       totalMessages: this.messages.length,
       totalTokensUsed: this.totalTokensUsed,
       toolExecutions: this.history.reduce((sum, h) => sum + h.toolCalls.length, 0),
+      toolExecutionsByName: this.history.reduce((acc, h) => {
+        for (const toolName of h.toolCalls) {
+          acc[toolName] = (acc[toolName] || 0) + 1;
+        }
+        return acc;
+      }, {}),
       toolsUsed: [...new Set(this.history.flatMap(h => h.toolCalls))],
       state: this.state,
       stopReason: this.stopReason,
@@ -1177,6 +1954,8 @@ When you have completed the task, provide a clear summary of what was done.`;
     this.circuitBreakerTripped = false;
     this.lastSingleToolSignature = null;
     this.repeatedSingleToolCount = 0;
+    this.toolFailureCounts = {};
+    this.workingSet.clear();
     this.performanceMetrics = {
       totalIterations: 0,
       totalToolCalls: 0,

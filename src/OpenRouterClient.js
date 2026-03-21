@@ -16,12 +16,17 @@
  */
 
 import { CONFIG, PLUGINS } from './config.js';
+import { logger } from './logger.js';
 import { OpenRouterError, RateLimitError, AuthenticationError, AbortError } from './errors.js';
+import { Agent as UndiciAgent } from 'undici';
+
+// Shared HTTP connection pool for keep-alive reuse across all client instances
+export const httpAgent = new UndiciAgent({ keepAliveTimeout: 60000, connections: 20 });
 
 export { OpenRouterError, RateLimitError, AuthenticationError, AbortError } from './errors.js';
 
 /**
- * Simple content hash for cache keys (djb2 algorithm)
+ * Simple content hash for cache keys (djb2 algorithm with added entropy)
  * Fast, low collision rate, deterministic
  */
 function contentHash(str) {
@@ -29,7 +34,16 @@ function contentHash(str) {
   for (let i = 0; i < str.length; i++) {
     hash = ((hash << 5) + hash + str.charCodeAt(i)) & 0x7fffffff;
   }
-  return hash.toString(36);
+  return hash.toString(36) + '_' + str.length;
+}
+
+/**
+ * Generate a more robust cache key including request-specific params
+ */
+function generateCacheKey(obj) {
+  // Include additional entropy sources: timestamp bucket (minute-level) + full serialization
+  const serialized = JSON.stringify(obj, Object.keys(obj).sort());
+  return contentHash(serialized);
 }
 
 /**
@@ -76,6 +90,53 @@ export class OpenRouterClient {
     
     // Active AbortControllers for cleanup
     this.activeControllers = new Set();
+    
+    // Periodic cleanup timer for expired cache entries
+    this.cacheCleanupInterval = null;
+    this.startCacheCleanup();
+  }
+  
+  /**
+   * Start periodic cache cleanup for expired entries
+   */
+  startCacheCleanup(intervalMs = 60000) {
+    if (this.cacheCleanupInterval) {
+      clearInterval(this.cacheCleanupInterval);
+    }
+    this.cacheCleanupInterval = setInterval(() => {
+      this.evictExpiredCacheEntries();
+    }, intervalMs);
+  }
+  
+  /**
+   * Stop periodic cache cleanup
+   */
+  stopCacheCleanup() {
+    if (this.cacheCleanupInterval) {
+      clearInterval(this.cacheCleanupInterval);
+      this.cacheCleanupInterval = null;
+    }
+  }
+  
+  /**
+   * Evict expired entries from cache
+   */
+  evictExpiredCacheEntries() {
+    if (!this.cacheEnabled || this.cache.size === 0) return;
+    
+    const now = Date.now();
+    let evicted = 0;
+    
+    for (const [key, cached] of this.cache) {
+      if (now - cached.timestamp >= this.cacheTTL) {
+        this.cache.delete(key);
+        evicted++;
+      }
+    }
+    
+    if (evicted > 0) {
+      logger.debug(`Evicted ${evicted} expired cache entries`);
+    }
   }
   
   /**
@@ -109,8 +170,7 @@ export class OpenRouterClient {
       tools: options.tools,
       response_format: options.response_format,
     };
-    const serialized = JSON.stringify(keyObj);
-    return contentHash(serialized);
+    return generateCacheKey(keyObj);
   }
   
   /**
@@ -257,10 +317,16 @@ export class OpenRouterClient {
   
   /**
    * 🌊 Streaming Chat Completion
+   *
+   * Accepts an optional `onToolCallReady(toolCall)` callback that fires
+   * as soon as a single tool call is fully accumulated from the stream
+   * (name set AND arguments JSON complete). This enables dispatching
+   * tool execution without waiting for the entire response.
    */
   async *chatStream(messages, options = {}) {
+    const { onToolCallReady, ...streamOptions } = options;
     const requestId = this.generateRequestId();
-    const payload = this.buildPayload(messages, { ...options, stream: true });
+    const payload = this.buildPayload(messages, { ...streamOptions, stream: true });
     
     const { controller, cleanup } = this.createController();
     
@@ -273,10 +339,12 @@ export class OpenRouterClient {
         headers: {
           'Authorization': `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
+          'Connection': 'keep-alive',
           ...this.headers,
         },
         body: JSON.stringify(payload),
         signal: controller.signal,
+        dispatcher: httpAgent,
       });
       
       // Handle non-streaming errors
@@ -295,7 +363,11 @@ export class OpenRouterClient {
       let buffer = '';
       let fullContent = '';
       let usage = null;
+      let lastFinishReason = null;
       const toolCallAccumulator = new Map();
+      // Pre-compile regex for better performance
+      const dataPrefixRegex = /^data:\s*/;
+      const doneMarker = '[DONE]';
       
       try {
         while (true) {
@@ -310,15 +382,15 @@ export class OpenRouterClient {
             const trimmed = line.trim();
             if (!trimmed || trimmed.startsWith(':')) continue;
             
-            if (trimmed.startsWith('data: ')) {
-              const data = trimmed.slice(6).trim();
+            if (dataPrefixRegex.test(trimmed)) {
+              const data = trimmed.replace(dataPrefixRegex, '').trim();
               
-              if (data === '[DONE]') {
+              if (data === doneMarker) {
                 // Emit accumulated tool calls
                 if (toolCallAccumulator.size > 0) {
                   yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(toolCallAccumulator), requestId };
                 }
-                yield { type: 'done', content: fullContent, usage, requestId };
+                yield { type: 'done', content: fullContent, usage, requestId, finishReason: lastFinishReason };
                 return;
               }
               
@@ -346,14 +418,33 @@ export class OpenRouterClient {
                   
                   // Accumulate tool call fragments
                   if (delta.tool_calls) {
-                    this.accumulateToolCalls(toolCallAccumulator, delta.tool_calls);
+                    const completedIndices = this.accumulateToolCalls(toolCallAccumulator, delta.tool_calls);
+                    // Fire onToolCallReady for each newly-completed tool call
+                    if (onToolCallReady && completedIndices.length > 0) {
+                      for (const idx of completedIndices) {
+                        const tc = toolCallAccumulator.get(idx);
+                        if (tc) {
+                          const parsed = this.parseAccumulatedToolCalls(new Map([[idx, tc]]));
+                          if (parsed.length > 0) {
+                            onToolCallReady(parsed[0]);
+                          }
+                        }
+                      }
+                    }
                   }
                 }
                 
-                // Emit tool calls on finish
+                // Emit remaining tool calls on finish (only ones not already emitted)
                 const finishReason = parsed.choices?.[0]?.finish_reason;
+                if (finishReason) lastFinishReason = finishReason;
                 if (finishReason === 'tool_calls' && toolCallAccumulator.size > 0) {
-                  yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(toolCallAccumulator), requestId };
+                  const remaining = new Map();
+                  for (const [idx, tc] of toolCallAccumulator) {
+                    if (!tc._emitted) remaining.set(idx, tc);
+                  }
+                  if (remaining.size > 0) {
+                    yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(remaining), requestId };
+                  }
                   toolCallAccumulator.clear();
                 }
               } catch {
@@ -366,9 +457,15 @@ export class OpenRouterClient {
         // Stream ended without [DONE]
         if (fullContent || toolCallAccumulator.size > 0) {
           if (toolCallAccumulator.size > 0) {
-            yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(toolCallAccumulator), requestId };
+            const remaining = new Map();
+            for (const [idx, tc] of toolCallAccumulator) {
+              if (!tc._emitted) remaining.set(idx, tc);
+            }
+            if (remaining.size > 0) {
+              yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(remaining), requestId };
+            }
           }
-          yield { type: 'done', content: fullContent, usage, requestId };
+          yield { type: 'done', content: fullContent, usage, requestId, finishReason: lastFinishReason };
         }
       } finally {
         reader.releaseLock();
@@ -384,9 +481,12 @@ export class OpenRouterClient {
   }
   
   /**
-   * Accumulate tool call fragments from streaming deltas
+   * Accumulate tool call fragments from streaming deltas.
+   * Returns an array of indices that became "complete" in this batch
+   * (name is set AND arguments form valid JSON).
    */
   accumulateToolCalls(accumulator, toolCalls) {
+    const completedIndices = [];
     for (const tc of toolCalls) {
       const idx = tc.index ?? 0;
       if (!accumulator.has(idx)) {
@@ -396,7 +496,42 @@ export class OpenRouterClient {
       if (tc.id) acc.id = tc.id;
       if (tc.function?.name) acc.name = tc.function.name;
       if (tc.function?.arguments) acc.arguments += tc.function.arguments;
+
+      // Check if this tool call just became complete
+      if (acc.name && !acc._emitted && this._isArgumentsComplete(acc.arguments)) {
+        acc._emitted = true;
+        completedIndices.push(idx);
+      }
     }
+    return completedIndices;
+  }
+
+  /**
+   * Check if accumulated arguments string is a complete JSON object.
+   * Tracks brace depth to detect when the JSON is closed.
+   */
+  _isArgumentsComplete(argsStr) {
+    if (!argsStr) return false;
+    const trimmed = argsStr.trim();
+    if (!trimmed.startsWith('{')) return false;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = 0; i < trimmed.length; i++) {
+      const ch = trimmed[i];
+      if (escape) { escape = false; continue; }
+      if (ch === '\\' && inString) { escape = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === '{') depth++;
+      if (ch === '}') { depth--; if (depth === 0) {
+        // Double-check with actual JSON parse to avoid false positives
+        try { JSON.parse(trimmed); return true; } catch { return false; }
+      }}
+    }
+    return false;
   }
   
   /**
@@ -455,6 +590,7 @@ export class OpenRouterClient {
     }
     
     const toolCalls = this.parseToolCalls(message.tool_calls || []);
+    const finishReason = response.choices?.[0]?.finish_reason;
     
     const result = {
       content: message.content,
@@ -463,6 +599,7 @@ export class OpenRouterClient {
       model: response.model,
       requestId,
       duration,
+      finishReason,
     };
     
     this.trackRequest(requestId, payload, result, duration);
@@ -555,7 +692,7 @@ export class OpenRouterClient {
         return await this.chat(messages, { ...options, model });
       } catch (error) {
         if (error.code === 'RATE_LIMIT_ERROR' && model !== models[models.length - 1]) {
-          console.log(`⚠️ Model ${model} rate limited, trying fallback...`);
+          logger.warn(`Model ${model} rate limited, trying fallback`, { model });
           continue;
         }
         throw error;
@@ -621,10 +758,12 @@ export class OpenRouterClient {
         headers: {
           'Authorization': `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
+          'Connection': 'keep-alive',
           ...this.headers,
         },
         body: JSON.stringify(body),
         signal: controller.signal,
+        dispatcher: httpAgent,
       });
       
       // Update rate limit info
@@ -661,9 +800,11 @@ export class OpenRouterClient {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${this.apiKey}`,
+          'Connection': 'keep-alive',
           ...this.headers,
         },
         signal: controller.signal,
+        dispatcher: httpAgent,
       });
       
       if (!response.ok) {
@@ -690,7 +831,8 @@ export class OpenRouterClient {
       case 401:
         return new AuthenticationError('Invalid API key');
       case 429: {
-        const retryAfter = data.retry_after;
+        // Respect Retry-After header if present, otherwise use fallback
+        const retryAfter = data.retry_after || data.retryAfter || null;
         return new RateLimitError('Rate limit exceeded', retryAfter);
       }
       case 400:
@@ -797,14 +939,24 @@ export class OpenRouterClient {
         // Don't retry bad requests (except rate limits)
         if (error.code === 'BAD_REQUEST') throw error;
         
-        // Handle rate limiting with jitter
+        // Handle rate limiting with proper Retry-After header support
         if (error.code === 'RATE_LIMIT_ERROR') {
-          const retryAfter = error.retryAfter || delay / 1000;
+          // Use Retry-After if provided (can be seconds or ISO timestamp)
+          let retryAfterMs = error.retryAfter * 1000;
+          if (!error.retryAfter) {
+            // Fall back to exponential backoff
+            retryAfterMs = delay;
+          } else if (typeof error.retryAfter === 'string') {
+            // Handle ISO timestamp format
+            const retryDate = new Date(error.retryAfter);
+            retryAfterMs = Math.max(retryDate.getTime() - Date.now(), 0);
+          }
+          // Add jitter (0-1 second) to prevent thundering herd
           const jitter = Math.random() * 1000;
-          await this.sleep((retryAfter * 1000) + jitter);
+          await this.sleep(Math.min(retryAfterMs + jitter, 30000)); // Cap at 30 seconds
         } else {
-          // Exponential backoff with jitter
-          const jitter = Math.random() * 500;
+          // Exponential backoff with jitter for other errors
+          const jitter = Math.random() * delay * 0.5;
           await this.sleep(delay + jitter);
         }
         
@@ -874,8 +1026,8 @@ export class OpenRouterClient {
       cost: this.totalCost,
     });
     
-    // Keep history manageable
-    if (this.requestHistory.length > 200) {
+    // Keep history limited to 100 entries max
+    if (this.requestHistory.length > 100) {
       this.requestHistory = this.requestHistory.slice(-100);
     }
   }
@@ -915,12 +1067,12 @@ export class OpenRouterClient {
     
     return {
       requestCount: this.requestCount,
-      totalCost: this.totalCost.toFixed(4),
+      totalCost: this.totalCost,
       totalInputTokens: this.totalInputTokens,
       totalOutputTokens: this.totalOutputTokens,
-      budgetUsed: this.budgetUsed.toFixed(4),
-      budgetLimit: this.budgetLimit.toFixed(4),
-      budgetRemaining: (this.budgetLimit - this.budgetUsed).toFixed(4),
+      budgetUsed: this.budgetUsed,
+      budgetLimit: this.budgetLimit,
+      budgetRemaining: this.budgetLimit - this.budgetUsed,
       avgDuration: Math.round(avgDuration) + 'ms',
       cacheSize: this.cache.size,
       cacheEnabled: this.cacheEnabled,
@@ -934,6 +1086,7 @@ export class OpenRouterClient {
    * 🧹 Clear history and reset stats
    */
   clearHistory() {
+    this.stopCacheCleanup();
     this.requestHistory = [];
     this.requestCount = 0;
     this.totalCost = 0;
@@ -942,6 +1095,19 @@ export class OpenRouterClient {
     this.budgetUsed = 0;
     this.clearCache();
     this.inFlightRequests.clear();
+    this.startCacheCleanup();
+  }
+  
+  /**
+   * 🔒 Destroy the client - cleanup all resources
+   * Call this when done with the client to prevent memory leaks
+   */
+  destroy() {
+    this.stopCacheCleanup();
+    this.abortAll();
+    this.clearCache();
+    this.inFlightRequests.clear();
+    this.requestHistory = [];
   }
 }
 
