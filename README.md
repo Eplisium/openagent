@@ -1,6 +1,6 @@
-# 🚀 OpenAgent v4.0
+# 🚀 OpenAgent v4.1
 
-> Production-grade AI agent with 400+ models. 2026 Edition with native fetch, AbortController, and request deduplication. On par with Claude Code, Cursor, and Codex.
+> Production-grade AI agent with 400+ models. Features native fetch (zero axios), AbortController, request deduplication, real cost tracking, and 2026 performance optimizations. On par with Claude Code, Cursor, and Codex.
 
 [![OpenRouter](https://img.shields.io/badge/OpenRouter-API-00D9FF?style=for-the-badge)](https://openrouter.ai)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js)](https://nodejs.org)
@@ -24,6 +24,7 @@ OpenAgent is a **full-featured agentic AI assistant** that runs in your terminal
 - 🛑 **Request cancellation** via AbortController
 - 🔁 **Request deduplication** for identical in-flight requests
 - 💰 **Real cost tracking** from API usage data
+- 🔌 **Protocol support** — MCP, A2A, and AG-UI
 
 ---
 
@@ -32,7 +33,8 @@ OpenAgent is a **full-featured agentic AI assistant** that runs in your terminal
 ### Installation
 
 ```bash
-cd "OR Test"
+git clone https://github.com/Eplisium/openagent.git
+cd openagent
 npm install
 ```
 
@@ -40,7 +42,7 @@ npm install
 
 ```bash
 # Copy example env file
-copy .env.example .env
+cp .env.example .env
 
 # Edit .env and add your OpenRouter API key
 # Get your key at: https://openrouter.ai/keys
@@ -54,6 +56,13 @@ npm start
 
 # Or run directly
 node src/cli.js
+```
+
+### Global Install (use anywhere)
+
+```bash
+npm link
+openagent    # or just: oagent
 ```
 
 ---
@@ -116,9 +125,9 @@ The main agent can **delegate tasks to specialized subagents** for parallel exec
 | ✅ **Reviewer** | Code quality review |
 | 🤖 **General** | Any task |
 
-### 🔄 Long-Running Task System (NEW!)
+### 🔄 Long-Running Task System
 
-OpenAgent now supports **long-running tasks** that span multiple sessions, inspired by Anthropic's research on effective agent harnesses:
+OpenAgent supports **long-running tasks** that span multiple sessions, inspired by Anthropic's research on effective agent harnesses:
 
 #### Key Features
 
@@ -224,7 +233,7 @@ plain text       - Run as agentic task (default)
 ## 📁 Project Structure
 
 ```
-OR Test/
+openagent/
 ├── src/
 │   ├── index.js              # Main entry point & exports
 │   ├── cli.js                # Interactive CLI interface
@@ -236,25 +245,33 @@ OR Test/
 │   │   ├── AgentSession.js   # Session & checkpoint manager
 │   │   ├── MultiAgent.js     # Multi-agent orchestrator
 │   │   └── SubagentManager.js # Subagent delegation manager
-│   └── tools/
-│       ├── index.js          # Tool exports
-│       ├── ToolRegistry.js   # Tool registration & execution
-│       ├── fileTools.js      # File operation tools
-│       ├── shellTools.js     # Shell execution tools
-│       ├── webTools.js       # Web browsing tools
-│       ├── gitTools.js       # Git integration tools
-│       └── subagentTools.js  # Subagent delegation tools
+│   ├── tools/
+│   │   ├── index.js          # Tool exports
+│   │   ├── ToolRegistry.js   # Tool registration & execution
+│   │   ├── fileTools.js      # File operation tools
+│   │   ├── shellTools.js     # Shell execution tools
+│   │   ├── webTools.js       # Web browsing tools
+│   │   ├── gitTools.js       # Git integration tools
+│   │   └── subagentTools.js  # Subagent delegation tools
+│   └── protocols/
+│       ├── a2a.js            # Agent-to-Agent protocol
+│       └── agui.js           # Agent-to-User Interface protocol
 ├── examples/
 │   ├── agent-demo.js         # Full agent capabilities demo
 │   ├── demo.js               # Feature showcase
-│   ├── interactive-chat.js   # CLI chat interface
 │   ├── streaming-demo.js     # Streaming showcase
 │   ├── tool-calling-demo.js  # Function calling
 │   ├── vision-demo.js        # Vision models
 │   ├── agents-demo.js        # Multi-agent workflows
 │   └── subagent-demo.js      # Subagent delegation demo
+├── tests/
+│   ├── test-suite.js         # Integration tests
+│   ├── cli-regressions.js    # CLI regression tests
+│   └── unit/                 # Unit tests (vitest)
 ├── package.json
 ├── .env.example
+├── CONTRIBUTING.md
+├── AGENTS.md
 └── README.md
 ```
 
@@ -378,7 +395,20 @@ See all models at [openrouter.ai/models](https://openrouter.ai/models)
 
 ---
 
-## 🆕 What's New in v4.0 (2026 Edition)
+## 🆕 What's New in v4.1
+
+| Feature | Description |
+|---------|-------------|
+| **Protocol Support** | MCP, A2A, and AG-UI protocols for agent interoperability |
+| **Plugin System** | Extensible plugin architecture with manifest validation |
+| **Memory Manager** | Persistent memory across sessions |
+| **Skill Manager** | Reusable skill definitions and execution |
+| **Hook System** | Lifecycle hooks for custom behavior |
+| **Structured Logging** | JSON-formatted logging with levels |
+| **Graph Workflows** | DAG-based workflow execution |
+| **Checkpoint System** | Git-based checkpoint management |
+
+### What's in v4.0
 
 | Feature | Description |
 |---------|-------------|
@@ -444,11 +474,7 @@ OpenAgent follows the same architecture principles as Claude Code and Codex:
 
 ## 🤝 Contributing
 
-This is a demonstration project. Feel free to:
-- Add new tools
-- Improve the agent loop
-- Add more agent capabilities
-- Extend multi-agent workflows
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and PR guidelines.
 
 ---
 
@@ -471,5 +497,5 @@ MIT License - Feel free to use in your projects!
 
 <p align="center">
   <strong>Built with 💙 for the AI community</strong><br>
-  <sub>v4.0 - 2026 Edition - Agentic AI for Everyone</sub>
+  <sub>v4.1 - 2026 Edition - Agentic AI for Everyone</sub>
 </p>

@@ -19,52 +19,29 @@
  */
 
 import chalk from 'chalk';
+import { parseXmlToolCalls, hasXmlToolCalls } from './tools/xmlToolParser.js';
 import ora from 'ora';
 import boxen from 'boxen';
 import gradient from 'gradient-string';
 import fs from 'fs-extra';
 import path from 'path';
-import os from 'os';
+import { fileURLToPath } from 'url';
 import { renderMarkdown } from './cli/markdown.js';
+import { renderDiff } from './cli/diffViewer.js';
 import { AgentSession } from './agent/AgentSession.js';
 import { CONFIG } from './config.js';
+import { getInstallationDir, isInsideInstallationDir } from './paths.js';
 import { ModelBrowser } from './ModelBrowser.js';
 import { processInput, readDroppedFile, formatDroppedContent } from './inputHandler.js';
 import { isVisionModel, buildMultimodalMessage } from './vision.js';
 import { gradients, boxStyles } from './utils.js';
-import { COMMAND_ALIASES, resolveCommand, parseCommand } from './cli/commands.js';
+import { resolveCommand, parseCommand } from './cli/commands.js';
 import { multilinePrompt, MultilineInput } from './cli/multilineInput.js';
 import { createReadlineInterfaceWithTerminalReset, promptWithTerminalReset } from './cli/terminal.js';
 import { runOnboarding } from './cli/onboarding.js';
 import { showStats, showCost, showAgents } from './cli/stats.js';
-
-const VERSION = '4.1.0';
-
-// ═══════════════════════════════════════════════════════════════════
-// 🏠 Local State Management
-// ═══════════════════════════════════════════════════════════════════
-
-const STATE_DIR = path.join(os.homedir(), '.openagent');
-const STATE_FILE = path.join(STATE_DIR, 'state.json');
-
-const DEFAULT_STATE = {
-  version: VERSION,
-  firstRun: true,
-  lastUsed: null,
-  totalSessions: 0,
-  preferences: {
-    showTips: true,
-    autoSuggest: true,
-    verboseErrors: true,
-    renderMarkdown: true,
-  },
-  stats: {
-    totalTasks: 0,
-    totalTokens: 0,
-    totalCost: 0,
-    favoriteCommands: {},
-  }
-};
+import { VERSION, STATE_DIR, STATE_FILE, DEFAULT_STATE } from './cli/state.js';
+import { getTheme, listThemes, nextTheme, THEME_ORDER } from './cli/themes.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // 🎯 Workflow Templates
@@ -179,6 +156,66 @@ const PROMPT_SUGGESTIONS = {
   ]
 };
 
+const COMMAND_ENTRIES = [
+  ['/agent <task>', 'Run agentic task (with tools)'],
+  ['/chat <msg>', 'Simple chat (no tools)'],
+  ['/templates', 'Browse workflow templates'],
+  ['/doctor', 'Environment health check'],
+  ['/model', 'Change AI model'],
+  ['/model <id>', 'Switch to specific model'],
+  ['/stream', 'Toggle chat streaming'],
+  ['/verbose', 'Toggle verbose mode'],
+  ['/render', 'Toggle markdown rendering'],
+  ['/tools', 'List available tools'],
+  ['/agents', 'Show subagent system status'],
+  ['/stats', 'Show statistics'],
+  ['/context', 'Show context usage'],
+  ['/new', 'Start a fresh session'],
+  ['/clear', 'Clear conversation history'],
+  ['/session save [name]', 'Save session checkpoint'],
+  ['/session restore <id>', 'Restore session checkpoint'],
+  ['/session list', 'List saved sessions'],
+  ['/save', 'Save session (alias)'],
+  ['/load', 'Load session'],
+  ['/history', 'Show command history'],
+  ['/paste', 'Capture large multi-line input'],
+  ['/cost', 'Show cost breakdown'],
+  ['/undo', 'Undo last file change'],
+  ['/diff', 'Show pending file changes'],
+  ['/export', 'Export conversation as markdown'],
+  ['/help', 'Show all commands'],
+  ['/exit', 'Exit'],
+];
+
+const SHORTCUT_ENTRIES = [
+  'q=exit',
+  'c=chat',
+  'a=agent',
+  'n=new',
+  'm=model',
+  's=stats',
+  'h=help',
+  'tmp=templates',
+  'doc=doctor',
+  'u=undo',
+  'd=diff',
+  'co=cost',
+  'ex=export',
+];
+
+const INPUT_SHORTCUT_ENTRIES = [
+  '↵ send',
+  'Ctrl+O newline',
+  'Ctrl+L clear screen',
+  'Ctrl+T cycle theme',
+  'Ctrl+P session stats',
+  'Ctrl+V paste',
+  'Ctrl+C copy',
+  'Ctrl+K exit',
+  'Ctrl+Z undo',
+  'Ctrl+A select all',
+];
+
 // ═══════════════════════════════════════════════════════════════════
 // 🏥 Health Check Diagnostics
 // ═══════════════════════════════════════════════════════════════════
@@ -287,6 +324,9 @@ export class CLI {
     this.history = [];
     this.mode = 'agent'; // 'agent' or 'chat'
     
+    // Maximum history entries to prevent unbounded memory growth
+    this.maxHistorySize = 100;
+    
     // Session tracking
     this.sessionStartTime = Date.now();
     this.totalCost = 0;
@@ -305,10 +345,15 @@ export class CLI {
     this.currentTask = null;
     this.taskStartTime = null;
     this.promptCount = 0;
+    this.promptActive = false;
 
-    
-    // Command aliases (imported from cli/commands.js)
-    this.aliases = COMMAND_ALIASES;
+    // Theme system
+    this.currentTheme = 'catppuccin';
+    this.theme = getTheme('catppuccin');
+
+    // File content cache for inline diffs
+    this.fileContentCache = new Map();
+
   }
 
   async start() {
@@ -318,11 +363,6 @@ export class CLI {
     await this.loadState();
     
     this.printBanner();
-
-    // First-run onboarding
-    if (this.state.firstRun) {
-      await runOnboarding(this.state, () => this.saveState());
-    }
 
     if (!CONFIG.API_KEY) {
       this.showSmartError('api_key_missing', {
@@ -354,6 +394,11 @@ export class CLI {
       process.exit(1);
     }
 
+    // First-run onboarding (after model browser is ready)
+    if (this.state.firstRun) {
+      await runOnboarding(this.state, () => this.saveState(), this.modelBrowser);
+    }
+
     // Let user select a model
     const selectedModel = await this.selectModel();
     
@@ -367,8 +412,33 @@ export class CLI {
       process.exit(1);
     }
 
-    console.log(chalk.gray(`  Model: ${chalk.cyan(this.session.agent.model)}`));
-    console.log(chalk.gray(`  OpenAgent home: ${this.session.workspaceManager.openAgentDir}`));
+    // Get model info for display
+    const modelInfo = this.modelBrowser.getModel(selectedModel);
+    const contextLength = modelInfo?.contextLength || CONFIG.MAX_CONTEXT_TOKENS;
+    const toolCount = this.session.toolRegistry?.list()?.length || 0;
+    
+    // Show session info box
+    console.log(boxen(
+      `${chalk.bold('🚀 OpenAgent')} ${chalk.gray(`v${VERSION}`)}\n\n` +
+      `${chalk.bold('Model:')} ${chalk.cyan(this.session.agent.model)}\n` +
+      `${chalk.bold('Context:')} ${this.formatCompactNumber(contextLength)}\n` +
+      `${chalk.bold('Tools:')} ${toolCount} available\n` +
+      `${chalk.bold('Dir:')} ${chalk.gray(this.workingDir)}`,
+      { ...box.info, title: '📋 Session Info', titleAlignment: 'center' }
+    ));
+
+    // Warn if running from the OpenAgent installation directory
+    if (isInsideInstallationDir(this.workingDir)) {
+      const installDir = getInstallationDir();
+      console.log(boxen(
+        chalk.yellow('⚠️  You are running OpenAgent from its installation directory.\n') +
+        chalk.yellow('The AI will NOT be able to write files here.\n') +
+        chalk.gray(`Installation: ${installDir}\n`) +
+        chalk.gray('To work on a project, run OpenAgent from your project directory:') +
+        chalk.cyan('\n  cd /path/to/your/project && openagent'),
+        { ...box.warning, title: '🛡️ Installation Protection Active', titleAlignment: 'center' }
+      ));
+    }
 
     // Start auto-save timer
     if (this.autoSave) {
@@ -377,32 +447,9 @@ export class CLI {
 
     console.log(boxen(
       `${chalk.bold('Commands:')}\n\n` +
-      `${chalk.cyan('/agent <task>')}     ${chalk.gray('- Run agentic task (with tools)')}\n` +
-      `${chalk.cyan('/chat <msg>')}      ${chalk.gray('- Simple chat (no tools)')}\n` +
-      `${chalk.cyan('/templates')}       ${chalk.gray('- Browse workflow templates')}\n` +
-      `${chalk.cyan('/doctor')}          ${chalk.gray('- Environment health check')}\n` +
-      `${chalk.cyan('/model')}           ${chalk.gray('- Change AI model')}\n` +
-      `${chalk.cyan('/stream')}          ${chalk.gray('- Toggle chat streaming')}\n` +
-      `${chalk.cyan('/verbose')}         ${chalk.gray('- Toggle verbose mode')}\n` +
-      `${chalk.cyan('/render')}         ${chalk.gray('- Toggle markdown rendering')}\n` +
-      `${chalk.cyan('/tools')}           ${chalk.gray('- List available tools')}\n` +
-      `${chalk.cyan('/agents')}          ${chalk.gray('- Show subagent system status')}\n` +
-      `${chalk.cyan('/stats')}           ${chalk.gray('- Show statistics')}\n` +
-      `${chalk.cyan('/new')}             ${chalk.gray('- Start a fresh session')}\n` +
-      `${chalk.cyan('/clear')}           ${chalk.gray('- Clear conversation')}\n` +
-      `${chalk.cyan('/save')}            ${chalk.gray('- Save session')}\n` +
-      `${chalk.cyan('/load')}            ${chalk.gray('- Load session')}\n` +
-      `${chalk.cyan('/history')}         ${chalk.gray('- Show command history')}\n` +
-
-      `${chalk.cyan('/cost')}            ${chalk.gray('- Show cost breakdown')}\n` +
-      `${chalk.cyan('/undo')}            ${chalk.gray('- Undo last file change')}\n` +
-      `${chalk.cyan('/diff')}            ${chalk.gray('- Show pending file changes')}\n` +
-      `${chalk.cyan('/export')}          ${chalk.gray('- Export conversation as markdown')}\n` +
-
-      `${chalk.cyan('/help')}            ${chalk.gray('- Show all commands')}\n` +
-      `${chalk.cyan('/exit')}            ${chalk.gray('- Exit')}\n\n` +
-      `${chalk.dim('Shortcuts:')} ${chalk.gray('q=exit, c=chat, a=agent, n=new, m=model, s=stats, h=help, tmp=templates, doc=doctor, u=undo, d=diff, co=cost, ex=export')}\n` +
-      `${chalk.dim('Input:')} ${chalk.gray('↵ send · ⇧↵ newline · Ctrl+V paste · Ctrl+C copy · Ctrl+Z undo · Ctrl+A select all')}\n` +
+      `${this.formatCommandList()}\n\n` +
+      `${chalk.dim('Shortcuts:')} ${chalk.gray(this.getShortcutSummary())}\n` +
+      `${chalk.dim('Input:')} ${chalk.gray(this.getInputShortcutSummary())}\n` +
       `${chalk.dim('Tip: Just type a message to run as an agentic task')}`,
       { ...box.default, title: '🤖 OpenAgent', titleAlignment: 'center' }
     ));
@@ -490,7 +537,7 @@ export class CLI {
         return;
       }
 
-      if (Date.now() - this.lastSaveTime <= this.autoSaveInterval) {
+      if (Date.now() - this.lastSaveTime < this.autoSaveInterval) {
         return;
       }
 
@@ -498,7 +545,7 @@ export class CLI {
         this.sessionSaveInFlight = this.session.save();
         await this.sessionSaveInFlight;
         this.lastSaveTime = Date.now();
-        if (this.verbose) {
+        if (this.verbose && !this.promptActive) {
           console.log(chalk.dim('\n💾 Auto-saved session'));
         }
       } catch (error) {
@@ -534,17 +581,39 @@ export class CLI {
     while (true) {
       const statusLine = this.buildPromptStatusLine();
       const promptStr = chalk.cyan('❯ ');
-      
-      const input = await multilinePrompt({
-        prompt: promptStr,
-        statusLine: statusLine,
-        placeholder: 'Type your message... (Shift+Enter for new line, Enter to send, Ctrl+K to exit)',
-      });
+
+      let input;
+      this.promptActive = true;
+      try {
+        input = await multilinePrompt({
+          prompt: promptStr,
+          statusLine: statusLine,
+          placeholder: 'Type your message... (Enter sends, Ctrl+O newline, Ctrl+L clear, Ctrl+T theme)',
+        });
+      } finally {
+        this.promptActive = false;
+      }
       this.promptCount++;
 
       // CANCEL sentinel means Ctrl+K was pressed on empty buffer — exit the app
       if (input === MultilineInput.CANCEL) {
         break;
+      }
+
+      // Keyboard shortcut sentinels
+      if (input === MultilineInput.CLEAR_SCREEN) {
+        console.clear();
+        continue;
+      }
+      if (input === MultilineInput.CYCLE_THEME) {
+        this.currentTheme = nextTheme(this.currentTheme);
+        this.theme = getTheme(this.currentTheme);
+        console.log(chalk.hex(this.theme.accent)(`🎨 Theme: ${this.theme.name}`));
+        continue;
+      }
+      if (input === MultilineInput.SHOW_STATS) {
+        this.printSessionStats();
+        continue;
       }
       const trimmed = input.trim();
       if (!trimmed) continue;
@@ -604,13 +673,7 @@ export class CLI {
       }
 
       // Check for command alias
-      let command = trimmed;
-      if (trimmed.startsWith('/')) {
-        const cmd = trimmed.slice(1).split(' ')[0].toLowerCase();
-        if (this.aliases[cmd]) {
-          command = '/' + this.aliases[cmd] + trimmed.slice(cmd.length + 1);
-        }
-      }
+      const command = trimmed.startsWith('/') ? resolveCommand(trimmed) : trimmed;
 
       if (command.startsWith('/')) {
         const shouldContinue = await this.handleCommand(command);
@@ -722,32 +785,128 @@ export class CLI {
     return sessionId.replace(/^session_/, '').slice(-8);
   }
 
+  formatCommandList(entries = COMMAND_ENTRIES) {
+    const commandWidth = entries.reduce((max, [command]) => Math.max(max, command.length), 0);
+    return entries
+      .map(([command, description]) =>
+        `${chalk.cyan(command.padEnd(commandWidth + 2))}${chalk.gray(`- ${description}`)}`
+      )
+      .join('\n');
+  }
+
+  getShortcutSummary() {
+    return SHORTCUT_ENTRIES.join(', ');
+  }
+
+  getInputShortcutSummary() {
+    return INPUT_SHORTCUT_ENTRIES.join(' · ');
+  }
+
+  getProjectMemoryLabel() {
+    const memoryPath = this.session?.memoryManager?.paths?.projectMemory;
+    if (!memoryPath) {
+      return 'openagent:memory/MEMORY.md';
+    }
+
+    const relativePath = path.relative(this.workingDir, memoryPath);
+    if (!relativePath || relativePath.startsWith('..')) {
+      return memoryPath;
+    }
+
+    return relativePath;
+  }
+
   buildPromptStatusLine() {
     if (!this.session?.agent) {
       return chalk.dim('─ ready');
     }
 
     const context = this.session.agent.getContextStats();
-    const contextColor = context.percent > 70 ? chalk.red : context.percent > 40 ? chalk.yellow : chalk.green;
+    
+    // Color coding based on context usage
+    let contextColor;
+    let contextBar;
+    const barLength = 10;
+    const filledBars = Math.round((context.percent / 100) * barLength);
+    
+    if (context.percent > 70) {
+      contextColor = chalk.red;
+      contextBar = chalk.red('█'.repeat(filledBars)) + chalk.dim('░'.repeat(barLength - filledBars));
+    } else if (context.percent > 40) {
+      contextColor = chalk.yellow;
+      contextBar = chalk.yellow('█'.repeat(filledBars)) + chalk.dim('░'.repeat(barLength - filledBars));
+    } else {
+      contextColor = chalk.green;
+      contextBar = chalk.green('█'.repeat(filledBars)) + chalk.dim('░'.repeat(barLength - filledBars));
+    }
+    
+    // Get session stats
+    const stats = this.session.agent.getStats();
+    const clientStats = this.session.agent.client.getStats();
+    
+    // Format cost
+    const costStr = clientStats.totalCost > 0 
+      ? chalk.yellow(`$${clientStats.totalCost.toFixed(2)}`)
+      : chalk.dim('$0.00');
+    
+    // Format elapsed time since session start
+    const elapsedMs = Date.now() - this.sessionStartTime;
+    const elapsedStr = this.formatElapsedTime(elapsedMs);
+    
+    // Tool call count
+    const toolCount = stats.toolExecutions || 0;
+    const toolStr = toolCount > 0 
+      ? chalk.white(`${toolCount} tools`)
+      : chalk.dim('0 tools');
+    
+    // Shorten working dir for display (show last 2 path components)
+    const dirParts = this.workingDir.replace(/\\/g, '/').split('/');
+    const shortDir = dirParts.length > 2
+      ? '…/' + dirParts.slice(-2).join('/')
+      : this.workingDir;
+
     const segments = [
-      `${chalk.dim('model')} ${chalk.cyan(this.shortenModelLabel(this.session.agent.model))}`,
-      `${chalk.dim('ctx est')} ${contextColor(`${this.formatCompactNumber(context.usedTokens)}/${this.formatCompactNumber(context.maxTokens)} (${context.percent}%)`)}`,
-      `${chalk.dim('stream')} ${this.streaming ? chalk.green('chat-on') : chalk.gray('chat-off')}`,
-      `${chalk.dim('session')} ${chalk.gray(this.getSessionLabel())}`,
+      `${chalk.dim('🤖')} ${chalk.cyan(this.shortenModelLabel(this.session.agent.model))}`,
+      `${chalk.dim('[')}${contextBar}${chalk.dim(']')} ${contextColor(context.percent + '%')}`,
+      costStr,
+      toolStr,
+      `${chalk.dim(elapsedStr)}`,
+      `${chalk.gray(shortDir)}`,
     ];
+    
     const workspaceLabel = this.getWorkspaceLabel();
 
     if (workspaceLabel !== 'none') {
-      segments.push(`${chalk.dim('ws')} ${chalk.gray(workspaceLabel)}`);
+      segments.splice(5, 0, `${chalk.dim('ws')} ${chalk.gray(workspaceLabel)}`);
     }
 
     return `${chalk.dim('─ ')}${segments.join(chalk.dim(' │ '))}`;
+  }
+  
+  /**
+   * Format elapsed time for display
+   */
+  formatElapsedTime(ms) {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes % 60}m elapsed`;
+    } else if (minutes > 0) {
+      return `${minutes}m ${seconds % 60}s elapsed`;
+    } else {
+      return `${seconds}s elapsed`;
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════
   // 🤖 Agent Task with Real-Time Tool Visualization
   // ═══════════════════════════════════════════════════════════════
 
+  /**
+   * Run agent task with separators and smooth transitions
+   */
   async runAgentTask(task) {
     const startTime = Date.now();
     this.taskStartTime = startTime;
@@ -763,9 +922,13 @@ export class CLI {
       onStatus: this.session.agent.onStatus,
     };
 
+    // Show separator before agent runs
+    console.log(chalk.dim('──────────────────────'));
+    
     // Set up enhanced visual callbacks
-    this.session.agent.onIterationStart = () => {
-      console.log(chalk.dim(`\n── ${this.session.agent.formatIterationLabel()} ──`));
+    this.session.agent.onIterationStart = (iteration) => {
+      const iterationLabel = this.session.agent.formatIterationLabel();
+      console.log(chalk.dim(`\n── ${iterationLabel} ──`));
     };
 
     this.session.agent.onToolStart = (toolName, args) => {
@@ -795,8 +958,35 @@ export class CLI {
       console.log(formatter(`   ${message}`));
     };
 
+    // Progress indicator for long-running tasks
+    let progressInterval = null;
+    const startProgressIndicator = () => {
+      let elapsed = 0;
+      progressInterval = setInterval(() => {
+        elapsed += 1;
+        const elapsedStr = elapsed.toFixed(1) + 's';
+        process.stdout.write(`\r  ${chalk.yellow('⏳')} ${chalk.gray('Working...')} ${chalk.white(elapsedStr)}  `);
+      }, 1000);
+    };
+    
+    const stopProgressIndicator = () => {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
+        process.stdout.write('\r' + ' '.repeat(40) + '\r'); // Clear the progress line
+      }
+    };
+    
+    // Start progress after 5 seconds
+    const progressTimeout = setTimeout(startProgressIndicator, 5000);
+
     try {
       const result = await this.session.run(task);
+      
+      // Clear the progress timeout and indicator
+      clearTimeout(progressTimeout);
+      stopProgressIndicator();
+      
       const duration = Date.now() - startTime;
 
       // Only print if onResponse callback didn't already handle it
@@ -808,6 +998,9 @@ export class CLI {
 
       // Print enhanced summary stats
       this.printEnhancedTaskSummary(result, duration);
+      
+      // Show completion message
+      console.log(chalk.dim(`\n✨ Done in ${this.formatDuration(duration)}`));
 
       // Update state
       if (this.state?.stats) {
@@ -815,8 +1008,6 @@ export class CLI {
         this.state.stats.totalTokens += result.stats?.totalTokensUsed || 0;
         this.state.stats.totalCost += result.performance?.totalCost || 0;
       }
-      await this.saveState();
-
       this.history.push({
         type: 'agent',
         task,
@@ -825,6 +1016,7 @@ export class CLI {
         timestamp: new Date().toISOString(),
         duration,
       });
+      await this.saveState();
 
     } catch (error) {
       this.showSmartError('task_execution', {
@@ -858,6 +1050,10 @@ export class CLI {
       onIterationEnd: this.session.agent.onIterationEnd,
       onStatus: this.session.agent.onStatus,
     };
+    
+    // Show separator before agent runs
+    console.log(chalk.dim('──────────────────────'));
+    
     this.session.agent.onIterationStart = () => { console.log(chalk.dim(`\n── ${this.session.agent.formatIterationLabel()} ──`)); };
     this.session.agent.onToolStart = (toolName, args) => { toolCallCount++; this.printEnhancedToolCallStart(toolName, args, toolCallCount, startTime); };
     this.session.agent.onToolEnd = (toolName, result) => { this.printEnhancedToolCallEnd(toolName, result, startTime, toolCallCount); };
@@ -869,12 +1065,26 @@ export class CLI {
       const duration = Date.now() - startTime;
       if (result.response && !responsePrinted) { this.printAIResponse(this.deduplicateResponse(result.response)); responsePrinted = true; }
       this.printEnhancedTaskSummary(result, duration);
+      
+      // Show completion message
+      console.log(chalk.dim(`\n✨ Done in ${this.formatDuration(duration)}`));
+      
       if (this.state?.stats) { this.state.stats.totalTasks++; this.state.stats.totalTokens += result.stats?.totalTokensUsed || 0; this.state.stats.totalCost += result.performance?.totalCost || 0; }
-      await this.saveState();
       this.history.push({ type: 'agent', task: this.currentTask, iterations: result.iterations, toolsUsed: result.stats.toolExecutions, timestamp: new Date().toISOString(), duration });
+      // Trim history to prevent unbounded growth
+      if (this.history.length > this.maxHistorySize) {
+        this.history = this.history.slice(-this.maxHistorySize);
+      }
+      await this.saveState();
     } catch (error) {
+      // Clear progress indicator on error
+      clearTimeout(progressTimeout);
+      stopProgressIndicator();
       this.showSmartError('task_execution', { message: error.message, task: this.currentTask, suggestions: this.generateErrorSuggestions(error, this.currentTask) });
     } finally {
+      // Ensure progress indicator is stopped
+      clearTimeout(progressTimeout);
+      stopProgressIndicator();
       this.session.agent.onToolStart = previousCallbacks.onToolStart;
       this.session.agent.onToolEnd = previousCallbacks.onToolEnd;
       this.session.agent.onResponse = previousCallbacks.onResponse;
@@ -892,6 +1102,7 @@ export class CLI {
 
   async runChat(message) {
     const startTime = Date.now();
+    let succeeded = false;
 
     if (this.streaming) {
       // Real-time streaming (raw text during stream; markdown rendered via printAIResponse for non-streaming)
@@ -904,18 +1115,33 @@ export class CLI {
         );
 
         let fullContent = '';
+        let sawToolCalls = false;
         for await (const chunk of stream) {
           if (chunk.type === 'content') {
-            process.stdout.write(chalk.white(chunk.content));
             fullContent += chunk.content;
+          } else if (chunk.type === 'tool_calls') {
+            sawToolCalls = true;
           } else if (chunk.type === 'done') {
             this.session.agent.updateUsageStats(chunk.usage);
           }
         }
 
+        let displayContent = fullContent;
+        if (displayContent && hasXmlToolCalls(displayContent)) {
+          displayContent = parseXmlToolCalls(displayContent).cleanContent;
+        }
+        if (typeof displayContent !== 'string') {
+          displayContent = displayContent == null ? '' : String(displayContent);
+        }
+        if (sawToolCalls && !displayContent.trim()) {
+          displayContent = '[Model returned tool calls in chat mode; suppressed from regular chat output.]';
+        }
+
+        process.stdout.write(chalk.white(displayContent));
         console.log(''); // New line
         this.session.agent.pushMessage({ role: 'user', content: message });
-        this.session.agent.pushMessage({ role: 'assistant', content: fullContent });
+        this.session.agent.pushMessage({ role: 'assistant', content: displayContent });
+        succeeded = true;
 
       } catch (error) {
         console.log(chalk.red(`\n✗ ${error.message}`));
@@ -933,12 +1159,26 @@ export class CLI {
         const result = await this.session.agent.chat(message);
         spinner.stop();
         this.printAIResponse(result.content);
+        succeeded = true;
       } catch (error) {
         spinner.fail(chalk.red(`Error: ${error.message}`));
       }
     }
 
     const duration = Date.now() - startTime;
+    if (succeeded) {
+      this.history.push({
+        type: 'chat',
+        task: message,
+        timestamp: new Date().toISOString(),
+        duration,
+      });
+      // Trim history to prevent unbounded growth
+      if (this.history.length > this.maxHistorySize) {
+        this.history = this.history.slice(-this.maxHistorySize);
+      }
+      await this.saveState();
+    }
     console.log(chalk.dim(`  └─ ${duration}ms`));
   }
 
@@ -957,6 +1197,39 @@ export class CLI {
   }
 
   /**
+   * Show thinking spinner during LLM response time
+   */
+  showThinkingSpinner() {
+    const frames = ['🤔', '🤔.', '🤔..', '🤔...'];
+    let frame = 0;
+    const interval = setInterval(() => {
+      process.stdout.write(`\r${chalk.gray(frames[frame])} `);
+      frame = (frame + 1) % frames.length;
+    }, 300);
+    
+    return {
+      stop: () => {
+        clearInterval(interval);
+        process.stdout.write('\r' + ' '.repeat(10) + '\r');
+      }
+    };
+  }
+
+  /**
+   * Show AI responding indicator
+   */
+  showRespondingIndicator() {
+    const indicator = chalk.cyan('💬 ') + chalk.gray('AI responding...');
+    process.stdout.write(indicator + ' ');
+    
+    return {
+      clear: () => {
+        process.stdout.write('\r' + ' '.repeat(indicator.length + 5) + '\r');
+      }
+    };
+  }
+
+  /**
    * Check if markdown rendering is enabled in preferences
    */
   isMarkdownEnabled() {
@@ -966,21 +1239,39 @@ export class CLI {
   printEnhancedToolCallStart(toolName, args, count, taskStartTime) {
     const elapsed = Date.now() - taskStartTime;
     const elapsedStr = this.formatDuration(elapsed);
+    const t = this.theme;
     
     // Detect subagent tools and use minimal output for them
     const isSubagentTool = toolName.startsWith('delegate_') || toolName === 'subagent_status';
     
     if (isSubagentTool) {
-      // Subagent tools get their own beautiful UI from SubagentManager
-      // Just show a brief header here
       console.log('');
-      console.log(`${chalk.cyan('⚡')} ${chalk.cyan.bold(toolName)} ${chalk.dim(`[${elapsedStr}]`)}`);
+      console.log(`${chalk.hex(t.tool)('⚡')} ${chalk.hex(t.tool).bold(toolName)} ${chalk.dim(`[${elapsedStr}]`)}`);
       return;
     }
+
+    // Spinner frame for active tool
+    const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    const frame = spinnerFrames[count % spinnerFrames.length];
     
-    // Regular tools get compact, clean output
+    // Regular tools get compact, clean output with theme colors
     const argPreview = this.formatToolArgs(toolName, args);
-    console.log(`  ${chalk.yellow('⚙')} ${chalk.yellow(toolName)} ${argPreview}${chalk.dim(` [${elapsedStr}]`)}`);
+
+    // Enhanced display for specific tool types
+    let extraInfo = '';
+    if (toolName === 'edit_file' && args) {
+      const findPreview = args.find ? args.find.substring(0, 60) : '';
+      const replacePreview = args.replace ? args.replace.substring(0, 60) : '';
+      if (findPreview) {
+        extraInfo = `\n  ${chalk.dim('├─')} ${chalk.red('- ' + findPreview)}${chalk.dim(' → ')}${chalk.green('+ ' + replacePreview)}`;
+      }
+    } else if (toolName === 'exec' && args?.command) {
+      extraInfo = `\n  ${chalk.dim('├─')} ${chalk.hex(t.muted)('$ ' + args.command.substring(0, 80))}`;
+    } else if (toolName === 'read_file' && args?.path) {
+      extraInfo = `\n  ${chalk.dim('├─')} ${chalk.hex(t.muted)(args.path)}`;
+    }
+
+    process.stdout.write(`  ${chalk.hex(t.tool)(frame)} ${chalk.hex(t.tool)(toolName)} ${argPreview}${chalk.dim(` [${elapsedStr}]`)}${extraInfo}`);
   }
 
   /**
@@ -1089,10 +1380,9 @@ ${g.title('╚══════════════════════
   // ═══════════════════════════════════════════════════════════════
 
   async handleCommand(cmd) {
-    const [command, ...args] = cmd.slice(1).split(' ');
-    const argStr = args.join(' ');
+    const { name: command, args: argStr } = parseCommand(cmd);
 
-    switch (command.toLowerCase()) {
+    switch (command) {
       case 'exit':
       case 'quit':
       case 'q':
@@ -1125,7 +1415,20 @@ ${g.title('╚══════════════════════
         break;
 
       case 'model':
-        await this.changeModel();
+        if (argStr) {
+          // Direct model switch: /model <model-id> — validate model exists first
+          const modelInfo = this.modelBrowser?.getModel(argStr);
+          if (!modelInfo) {
+            console.log(chalk.yellow(`⚠ Model not found: ${argStr}`));
+            console.log(chalk.gray('  Use /model (no args) to browse available models.'));
+          } else {
+            const synced = this.syncSessionModelState(argStr);
+            await this.modelBrowser.addRecent(argStr);
+            console.log(chalk.green(`✓ Model: ${chalk.cyan(argStr)} ${chalk.gray(`(${this.formatCompactNumber(synced.contextLength || 0)} ctx)`)}`));
+          }
+        } else {
+          await this.changeModel();
+        }
         break;
 
       case 'stream':
@@ -1185,6 +1488,13 @@ ${g.title('╚══════════════════════
         this.showCost();
         break;
 
+      case 'context':
+        this.showContext();
+        break;
+
+      case 'session':
+        await this.handleSessionCommand(argStr);
+        break;
 
       case 'undo':
         await this.handleUndo();
@@ -1271,15 +1581,32 @@ ${g.title('╚══════════════════════
     throw new Error('No models available. Check your API key and internet connection.');
   }
 
+  /**
+   * Handle model change - shows model card when switching
+   */
   async changeModel() {
     const modelId = await this.modelBrowser.pickModel({
       currentModel: this.session.agent.model,
     });
 
     if (modelId) {
+      // Show model switch card
       const synced = this.syncSessionModelState(modelId);
       await this.modelBrowser.addRecent(modelId);
-      console.log(chalk.green(`✓ Model: ${chalk.cyan(modelId)} ${chalk.gray(`(${this.formatCompactNumber(synced?.contextLength || 0)} ctx)`)}`));
+      
+      // Get model info for display
+      const modelInfo = this.modelBrowser.getModel(modelId);
+      const contextLength = synced?.contextLength || modelInfo?.contextLength || 0;
+      const inputCost = modelInfo?.inputPrice || 0;
+      const outputCost = modelInfo?.outputPrice || 0;
+      
+      console.log(boxen(
+        `${chalk.green('✓ Model switched')}\n\n` +
+        `${chalk.bold('🔄 Switched to:')} ${chalk.cyan(modelId.split('/').pop())}\n` +
+        `${chalk.gray('Context:')} ${this.formatCompactNumber(contextLength)}\n` +
+        `${chalk.gray('Pricing:')} $${inputCost.toFixed(2)}/M input · $${outputCost.toFixed(2)}/M output`,
+        { ...box.success, title: '🤖 Model', titleAlignment: 'center' }
+      ));
     }
   }
 
@@ -1402,12 +1729,84 @@ ${g.title('╚══════════════════════
       return;
     }
 
+    const entries = this.history.slice(-10).reverse();
+    let totalDuration = 0;
+    let totalTools = 0;
+    let agentCount = 0;
+    let chatCount = 0;
+    
+    const content = entries.map((entry, index) => {
+      // Track totals
+      totalDuration += entry.duration || 0;
+      totalTools += entry.toolsUsed || 0;
+      if (entry.type === 'agent') agentCount++;
+      if (entry.type === 'chat') chatCount++;
+      
+      // Icon by type
+      const typeIcon = entry.type === 'agent' ? '🤖' : entry.type === 'chat' ? '💬' : '📁';
+      const typeColor = entry.type === 'agent' ? chalk.cyan : entry.type === 'chat' ? chalk.magenta : chalk.yellow;
+      
+      // Duration color coding
+      let durationColor;
+      const duration = entry.duration || 0;
+      if (duration < 5000) {
+        durationColor = chalk.green; // Fast - green
+      } else if (duration < 30000) {
+        durationColor = chalk.yellow; // Medium - yellow
+      } else {
+        durationColor = chalk.red; // Slow - red
+      }
+      
+      // Format duration
+      const durationStr = durationColor(this.formatDuration(duration));
+      
+      // Relative timestamp
+      const timestamp = entry.timestamp ? this.getRelativeTime(new Date(entry.timestamp)) : '';
+      
+      // Build summary line
+      const summaryParts = [];
+      if (entry.iterations !== undefined) summaryParts.push(`${entry.iterations} iter`);
+      if (entry.toolsUsed !== undefined) summaryParts.push(`${entry.toolsUsed} tools`);
+      summaryParts.push(durationStr);
+      if (timestamp) summaryParts.push(timestamp);
+      
+      const summary = summaryParts.join(chalk.dim(' • '));
+      
+      return `${chalk.gray(`${index + 1}.`)} ${typeIcon} ${typeColor(entry.type)}: ${this.truncateInline(entry.task || '', 60)}\n   ${chalk.dim(summary)}`;
+    }).join('\n\n');
+    
+    // Summary at bottom
+    const summaryContent = [
+      `${chalk.bold('Summary:')}`,
+      `  ${chalk.cyan('🤖 Agent tasks:')} ${agentCount}`,
+      `  ${chalk.magenta('💬 Chat messages:')} ${chatCount}`,
+      `  ${chalk.white('⏱️ Total time:')} ${this.formatDuration(totalDuration)}`,
+      `  ${chalk.yellow('🔧 Total tools:')} ${totalTools}`,
+    ].join('\n');
+
     console.log(boxen(
-      this.history.slice(-10).map((h, i) =>
-        `${chalk.gray(`${i + 1}.`)} ${chalk.cyan(h.type)}: ${(h.task || '').substring(0, 50)}...\n   ${chalk.dim(new Date(h.timestamp).toLocaleTimeString())}`
-      ).join('\n'),
+      content + '\n\n' + chalk.dim('─'.repeat(40)) + '\n\n' + summaryContent,
       { ...box.info, title: '📜 History' }
     ));
+  }
+  
+  /**
+   * Get relative time string (e.g., "2m ago", "1h ago")
+   */
+  getRelativeTime(date) {
+    const now = new Date();
+    const diffMs = now - date;
+    const diffSec = Math.floor(diffMs / 1000);
+    const diffMin = Math.floor(diffSec / 60);
+    const diffHour = Math.floor(diffMin / 60);
+    const diffDay = Math.floor(diffHour / 24);
+    
+    if (diffSec < 60) return 'just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    if (diffHour < 24) return `${diffHour}h ago`;
+    if (diffDay < 7) return `${diffDay}d ago`;
+    
+    return date.toLocaleDateString();
   }
 
   async saveSession() {
@@ -1456,6 +1855,7 @@ ${g.title('╚══════════════════════
       this.syncSessionModelState(this.session.agent.model);
       console.log(chalk.green(`✓ Loaded ${sessionId}`));
       console.log(chalk.gray(`  Model: ${chalk.cyan(this.session.agent.model)}`));
+      console.log(chalk.gray(`  Project memory: ${chalk.cyan(this.getProjectMemoryLabel())}`));
       if (this.session.activeWorkspace?.workspaceDir) {
         console.log(chalk.gray(`  Workspace: ${this.getWorkspaceLabel()}`));
       }
@@ -1564,10 +1964,22 @@ ${g.title('╚══════════════════════
       `${chalk.gray(tmpl.description)}\n\n` +
       `${chalk.bold('Steps:')}` +
       tmpl.steps.map((s, i) => `\n${chalk.cyan(i + 1)}. ${s}`).join('') +
-      `\n\n${chalk.dim('Press Enter to run this workflow, or Escape to cancel')}`,
+      `\n\n${chalk.dim('Choose whether to run it now or cancel.')}`,
       { ...box.info, title: '📋 Template' }
     ));
-    
+
+    const { shouldRun } = await promptWithTerminalReset([{
+      type: 'confirm',
+      name: 'shouldRun',
+      message: `Run ${tmpl.name} now?`,
+      default: true,
+    }]);
+
+    if (!shouldRun) {
+      console.log(chalk.gray('Cancelled.'));
+      return;
+    }
+
     // Run the template prompt as an agent task
     await this.runAgentTask(tmpl.prompt);
   }
@@ -1575,31 +1987,14 @@ ${g.title('╚══════════════════════
   showHelp() {
     console.log(boxen(
       `${chalk.bold('Commands')}\n\n` +
-      `${chalk.cyan('/agent <task>')}  - Run agentic task (with tools)\n` +
-      `${chalk.cyan('/chat <msg>')}   - Simple chat (no tools)\n` +
-      `${chalk.cyan('/templates')}    - Browse workflow templates\n` +
-      `${chalk.cyan('/doctor')}       - Environment health check\n` +
-      `${chalk.cyan('/model')}        - Change AI model\n` +
-      `${chalk.cyan('/stream')}       - Toggle chat streaming\n` +
-      `${chalk.cyan('/verbose')}      - Toggle verbose mode\n` +
-      `${chalk.cyan('/render')}       - Toggle markdown rendering\n` +
-      `${chalk.cyan('/tools')}        - List available tools\n` +
-      `${chalk.cyan('/agents')}       - Show subagent status\n` +
-      `${chalk.cyan('/stats')}        - Show statistics\n` +
-      `${chalk.cyan('/cost')}         - Show cost breakdown\n` +
-      `${chalk.cyan('/undo')}         - Restore a .bak file\n` +
-      `${chalk.cyan('/diff')}         - Show diffs for .bak files\n` +
-      `${chalk.cyan('/export')}       - Export conversation as markdown\n` +
-      `${chalk.cyan('/new')}          - Start a fresh session\n` +
-      `${chalk.cyan('/clear')}        - Clear conversation\n` +
-      `${chalk.cyan('/save')}         - Save session\n` +
-      `${chalk.cyan('/load')}         - Load session\n` +
-      `${chalk.cyan('/history')}      - Show command history\n` +
-      `${chalk.cyan('/reset')}        - Alias for /new\n` +
-      `${chalk.cyan('/help')}         - Show this help\n` +
-      `${chalk.cyan('/exit')}         - Exit\n\n` +
+      `${this.formatCommandList([...COMMAND_ENTRIES.slice(0, -1), ['/reset', 'Alias for /new'], COMMAND_ENTRIES.at(-1)])}\n\n` +
       `${chalk.bold('Aliases')}\n\n` +
-      `${chalk.cyan('q')}=exit ${chalk.cyan('c')}=chat ${chalk.cyan('a')}=agent ${chalk.cyan('n')}=new ${chalk.cyan('m')}=model ${chalk.cyan('s')}=stats ${chalk.cyan('h')}=help ${chalk.cyan('u')}=undo ${chalk.cyan('d')}=diff ${chalk.cyan('co')}=cost ${chalk.cyan('ex')}=export\n\n` +
+      `${SHORTCUT_ENTRIES.map((entry) => {
+        const [alias, target] = entry.split('=');
+        return `${chalk.cyan(alias)}=${target}`;
+      }).join(' ')}\n\n` +
+      `${chalk.bold('Input')}\n\n` +
+      `${chalk.gray(this.getInputShortcutSummary())}\n\n` +
       `${chalk.bold('Shortcuts')}\n\n` +
       `${chalk.cyan('! <cmd>')}       - Run shell command\n` +
       `${chalk.cyan('plain text')}    - Run as agentic task`,
@@ -1627,6 +2022,116 @@ ${g.title('╚══════════════════════
       `${chalk.cyan('Tasks Completed:')} ${this.taskCount}`,
       { ...box.stats, title: '💰 Cost' }
     ));
+  }
+
+  /**
+   * Show context usage statistics
+   */
+  showContext() {
+    const contextStats = this.session.agent.getContextStats();
+    
+    // Get tokens from client stats
+    const clientStats = this.session.agent.client.getStats();
+    
+    const contextColor = contextStats.percent > 70 ? chalk.red : 
+                         contextStats.percent > 40 ? chalk.yellow : chalk.green;
+    
+    console.log(boxen(
+      `${chalk.bold('Context Usage')}\n\n` +
+      `${chalk.cyan('Used Tokens:')} ${this.formatCompactNumber(contextStats.usedTokens)} / ${this.formatCompactNumber(contextStats.maxTokens)}\n` +
+      `${chalk.cyan('Usage:')} ${contextColor(contextStats.percent + '%')}\n` +
+      `${chalk.cyan('Compactions:')} ${contextStats.compactions}\n` +
+      `${chalk.cyan('Last Prompt:')} ${this.formatCompactNumber(contextStats.lastPromptTokens)} tokens\n` +
+      `${chalk.cyan('Last Completion:')} ${this.formatCompactNumber(contextStats.lastCompletionTokens)} tokens\n` +
+      `${chalk.cyan('Total Messages:')} ${this.session.agent.messages.length}\n` +
+      `${chalk.cyan('History Items:')} ${this.session.agent.history.length}`,
+      { ...box.stats, title: '📊 Context' }
+    ));
+  }
+
+  /**
+   * Handle session subcommands: save, restore, list
+   */
+  async handleSessionCommand(args) {
+    const parts = args.trim().split(/\s+/);
+    const subcommand = parts[0]?.toLowerCase();
+    const subArgs = parts.slice(1).join(' ');
+    
+    switch (subcommand) {
+      case 'save':
+      case '':
+        // /session save [name]
+        await this.sessionSaveWithName(subArgs);
+        break;
+        
+      case 'restore':
+        // /session restore <id>
+        if (!subArgs) {
+          console.log(chalk.gray('Usage: /session restore <checkpoint-id>'));
+          console.log(chalk.gray('Use /session list to see available checkpoints'));
+        } else {
+          await this.sessionRestoreCheckpoint(subArgs);
+        }
+        break;
+        
+      case 'list':
+        // /session list
+        await this.sessionListCheckpoints();
+        break;
+        
+      default:
+        console.log(chalk.gray('Usage: /session <save|restore|list>'));
+        console.log(chalk.gray('  save [name]    - Save current session'));
+        console.log(chalk.gray('  restore <id>   - Restore a checkpoint'));
+        console.log(chalk.gray('  list           - List available checkpoints'));
+    }
+  }
+
+  /**
+   * Save session with optional name
+   */
+  async sessionSaveWithName(name) {
+    const label = name || `manual_${Date.now()}`;
+    const checkpointId = this.session.createCheckpoint(label);
+    console.log(chalk.green(`✓ Checkpoint created: ${chalk.cyan(checkpointId)}`));
+    
+    // Also save full session
+    await this.session.save();
+    console.log(chalk.green(`✓ Session saved`));
+  }
+
+  /**
+   * Restore a session checkpoint
+   */
+  async sessionRestoreCheckpoint(checkpointId) {
+    const result = this.session.restoreCheckpoint(checkpointId);
+    if (result.success) {
+      console.log(chalk.green(`✓ Restored checkpoint: ${chalk.cyan(result.label)}`));
+      console.log(chalk.gray(`  Messages: ${result.messageCount}, History: ${result.historyCount}`));
+    } else {
+      console.log(chalk.red(`✗ ${result.error}`));
+    }
+  }
+
+  /**
+   * List session checkpoints
+   */
+  async sessionListCheckpoints() {
+    const checkpoints = this.session.listCheckpoints();
+    
+    if (checkpoints.length === 0) {
+      console.log(chalk.gray('No checkpoints found'));
+      return;
+    }
+    
+    console.log(chalk.bold('\n📋 Session Checkpoints\n'));
+    for (const cp of checkpoints) {
+      const date = new Date(cp.timestamp).toLocaleString();
+      console.log(`  ${chalk.cyan(cp.id)}`);
+      console.log(`    ${chalk.gray('Label:')} ${cp.label} ${chalk.gray('|')} ${chalk.gray(date)}`);
+      console.log(`    ${chalk.gray('Messages:')} ${cp.messages} ${chalk.gray('|')} ${chalk.gray('Iterations:')} ${cp.iterations}`);
+      console.log('');
+    }
   }
   
   /**
@@ -1866,10 +2371,10 @@ ${g.title('╚══════════════════════
           // Update last used
           lastUsed: new Date().toISOString(),
         };
-        
+        this.history = this.state.history || [];
+
         if (this.verbose) {
           console.log(chalk.dim('📂 Loaded local state'));
-        this.history = this.state.history || [];
         }
       } else {
         // First run
@@ -1930,18 +2435,194 @@ ${g.title('╚══════════════════════
    * Show smart error with suggestions
    */
   showSmartError(errorType, details = {}) {
-    const { message, suggestions = [] } = details;
+    const { message, suggestions = [], httpStatus, errorData, context } = details;
     
-    let content = `${chalk.red('❌ Error')}\n\n${chalk.white(message || 'An error occurred')}`;
+    // Determine error category
+    const errorCategory = this.categorizeError(errorType, message, errorData);
     
-    if (suggestions.length > 0) {
-      content += `\n\n${chalk.bold('Suggestions:')}`;
-      for (const suggestion of suggestions) {
-        content += `\n${chalk.green('•')} ${suggestion}`;
+    // Build error content based on category
+    let content = '';
+    let title = '❌ Error';
+    let fixSuggestions = suggestions.length > 0 ? suggestions : errorCategory.suggestions;
+    
+    // Header with error type and status
+    if (httpStatus) {
+      title += ` ${chalk.yellow('⚠')} ${chalk.white(httpStatus)}`;
+    } else if (errorCategory.statusCode) {
+      title += ` ${chalk.yellow('⚠')} ${chalk.white(errorCategory.statusCode)}`;
+    }
+    
+    content += `${title}\n\n`;
+    content += `${chalk.white(message || 'An error occurred')}\n`;
+    
+    // Fix suggestions section
+    if (fixSuggestions.length > 0) {
+      content += `\n${chalk.bold('🔧 Fix:')}\n`;
+      for (let i = 0; i < fixSuggestions.length; i++) {
+        content += `${chalk.green(`${i + 1}.`)} ${fixSuggestions[i]}\n`;
       }
     }
     
+    // Error details section (for API errors, etc.)
+    if (errorData) {
+      const detailsStr = typeof errorData === 'string' ? errorData : JSON.stringify(errorData, null, 2);
+      const truncatedDetails = detailsStr.length > 500 ? detailsStr.substring(0, 500) + '...' : detailsStr;
+      content += `\n${chalk.bold('🔍 Details:')}\n`;
+      content += chalk.gray(truncatedDetails);
+    }
+    
+    // Context hint
+    if (context) {
+      content += `\n\n${chalk.dim('Context: ' + context)}`;
+    }
+    
     console.log(boxen(content, box.error));
+    
+    // Check for command typos and suggest corrections
+    if (errorCategory.commandHint) {
+      console.log(chalk.dim(`\n💡 ${errorCategory.commandHint}`));
+    }
+  }
+
+  /**
+   * Categorize error and provide appropriate suggestions
+   */
+  categorizeError(errorType, message, errorData) {
+    const msg = (message || '').toLowerCase();
+    const dataStr = typeof errorData === 'string' ? errorData : JSON.stringify(errorData || {}).toLowerCase();
+    const combinedMsg = msg + ' ' + dataStr;
+    
+    // Common command typos
+    const commandTypos = {
+      '/hel': '/help',
+      '/hlp': '/help',
+      '/hep': '/help',
+      '/hel p': '/help',
+      '/exi': '/exit',
+      '/exot': '/exit',
+      '/qui': '/quit',
+      '/qit': '/quit',
+      '/stat': '/stats',
+      '/satats': '/stats',
+      '/modle': '/model',
+      '/modle': '/model',
+      '/histroy': '/history',
+      '/histoy': '/history',
+      '/histry': '/history',
+    };
+    
+    // Check for command typos in the message
+    for (const [typo, correct] of Object.entries(commandTypos)) {
+      if (msg.includes(typo)) {
+        return {
+          statusCode: null,
+          suggestions: [],
+          commandHint: `Did you mean ${chalk.cyan(correct)}?`,
+        };
+      }
+    }
+    
+    // API errors (401, 403, 429, 500, etc.)
+    if (combinedMsg.includes('api key') || combinedMsg.includes('unauthorized') || 
+        combinedMsg.includes('401') || combinedMsg.includes('403') || combinedMsg.includes('invalid key')) {
+      return {
+        statusCode: combinedMsg.includes('401') ? '401' : combinedMsg.includes('403') ? '403' : null,
+        suggestions: [
+          'Check OPENROUTER_API_KEY in your .env file',
+          'Get a new key → https://openrouter.ai/keys',
+          'Run /doctor to diagnose',
+        ],
+      };
+    }
+    
+    // Rate limit errors
+    if (combinedMsg.includes('rate limit') || combinedMsg.includes('429') || combinedMsg.includes('too many requests')) {
+      return {
+        statusCode: '429',
+        suggestions: [
+          'Wait a moment and try again',
+          'Consider using a different model',
+          'Check your API quota at https://openrouter.ai/accounts',
+        ],
+      };
+    }
+    
+    // Network errors
+    if (combinedMsg.includes('network') || combinedMsg.includes('fetch') || 
+        combinedMsg.includes('econnrefused') || combinedMsg.includes('timeout') || combinedMsg.includes('enotfound')) {
+      return {
+        statusCode: null,
+        suggestions: [
+          'Check your internet connection',
+          'Verify the API endpoint is accessible',
+          'Try again in a few seconds',
+        ],
+      };
+    }
+    
+    // File errors
+    if (combinedMsg.includes('enoent') || combinedMsg.includes('eacces') || 
+        combinedMsg.includes('permission') || combinedMsg.includes('not found') || combinedMsg.includes('no such file')) {
+      const pathMatch = dataStr.match(/"path":\s*"([^"]+)"/) || msg.match(/([A-Za-z]:\\[^\s]+|\/[^\s]+\/[^\s]+)/);
+      const filePath = pathMatch ? pathMatch[1] : 'the file';
+      
+      return {
+        statusCode: null,
+        suggestions: [
+          `Check that ${chalk.cyan(filePath)} exists`,
+          'Verify file permissions',
+          'Use absolute paths instead of relative paths',
+        ],
+      };
+    }
+    
+    // Agent errors (iteration limits, tool limits)
+    if (combinedMsg.includes('iteration') || combinedMsg.includes('max iterations') || 
+        combinedMsg.includes('tool call') || combinedMsg.includes('max tools')) {
+      return {
+        statusCode: null,
+        suggestions: [
+          'Break your task into smaller steps',
+          'Use /clear to reset the conversation',
+          'Try a simpler request first',
+        ],
+      };
+    }
+    
+    // Context/token errors
+    if (combinedMsg.includes('context') || combinedMsg.includes('token') || combinedMsg.includes('max tokens')) {
+      return {
+        statusCode: null,
+        suggestions: [
+          'Use /clear to reset conversation context',
+          'Try a model with larger context window',
+          'Break long conversations into shorter ones',
+        ],
+      };
+    }
+    
+    // Server errors
+    if (combinedMsg.includes('500') || combinedMsg.includes('502') || combinedMsg.includes('503') ||
+        combinedMsg.includes('internal error') || combinedMsg.includes('server error')) {
+      return {
+        statusCode: '5xx',
+        suggestions: [
+          'This is a server-side issue, not your fault',
+          'Wait a moment and try again',
+          'Check https://status.openrouter.ai for outages',
+        ],
+      };
+    }
+    
+    // Default fallback
+    return {
+      statusCode: null,
+      suggestions: [
+        'Try /doctor to check your environment',
+        'Use /clear and try again',
+        'Check the error details above',
+      ],
+    };
   }
 
   /**
@@ -2036,20 +2717,24 @@ ${g.title('╚══════════════════════
   }
 
   /**
-   * Enhanced tool call end with timing
+   * Enhanced tool call end with timing and rich result display
    */
   printEnhancedToolCallEnd(toolName, result, taskStartTime, count) {
+    const t = this.theme;
     // Subagent tools handle their own output via SubagentManager UI
     const isSubagentTool = toolName.startsWith('delegate_') || toolName === 'subagent_status';
+    const resultData = result.result || result;
     if (isSubagentTool) {
-      // Just show a brief completion status
-      if (result.success !== false) {
-        const resultData = result.result || result;
+      if (resultData?.partial) {
+        const successful = resultData.summary?.successful ?? 0;
+        const total = resultData.summary?.total ?? 0;
+        console.log(chalk.hex(t.warning)(`  ⚠ ${toolName}: partial success (${successful}/${total} tasks)`));
+      } else if (result.success !== false) {
         const taskCount = resultData?.summary?.total || resultData?.stats?.total || '';
         const info = taskCount ? ` (${taskCount} tasks)` : '';
-        console.log(chalk.green(`  ✓ ${toolName} done${info}`));
+        console.log(chalk.hex(t.success)(`  ✓ ${toolName} done${info}`));
       } else {
-        console.log(chalk.red(`  ✗ ${toolName}: ${result.error || result.result?.error || 'failed'}`));
+        console.log(chalk.hex(t.error)(`  ✗ ${toolName}: ${result.error || result.result?.error || 'failed'}`));
       }
       return;
     }
@@ -2058,26 +2743,313 @@ ${g.title('╚══════════════════════
     const elapsedStr = this.formatDuration(elapsed);
     
     if (result.success !== false) {
-      console.log(chalk.green(`    ✓`) + chalk.dim(` ${elapsedStr}`));
+      console.log(chalk.hex(t.success)(`    ✓`) + chalk.dim(` ${elapsedStr}`));
       
-      // Show abbreviated result preview for useful output
-      const resultData = result.result || result;
-      if (resultData?.stdout && resultData.stdout.length > 0) {
-        const preview = resultData.stdout.substring(0, 120).replace(/\n/g, ' ');
-        console.log(chalk.dim(`    └─ ${preview}${resultData.stdout.length > 120 ? '...' : ''}`));
+      // Show rich result previews based on tool type
+      switch (toolName) {
+        case 'read_file': {
+          const content = resultData?.content || '';
+          const lines = content.split('\n');
+          const lineCount = lines.length;
+          const sizeStr = content.length > 1024
+            ? `${(content.length / 1024).toFixed(1)}KB`
+            : `${content.length}B`;
+          // Cache file content for inline diffs on future writes/edits
+          const cachePath = resultData?.path || resultData?.file;
+          if (cachePath && content) {
+            this.fileContentCache.set(cachePath, content);
+          }
+          if (lineCount > 0) {
+            console.log(chalk.hex(t.muted)(`    ├─ ${lineCount} lines · ${sizeStr}`));
+            const preview = lines.slice(0, 3).join('\n');
+            if (preview) {
+              console.log(chalk.hex(t.muted)(`    └─ ${preview.split('\n').slice(0, 2).join('\n    │ ')}`));
+              if (lineCount > 3) {
+                console.log(chalk.hex(t.muted)(`    │ ${chalk.gray('...')} ${lineCount - 3} more lines`));
+              }
+            }
+          }
+          break;
+        }
+        
+        case 'write_file':
+        case 'edit_file': {
+          const filePath = resultData?.path || resultData?.file || 'unknown';
+          const linesWritten = resultData?.linesWritten || resultData?.linesModified || 0;
+          const linesDeleted = resultData?.linesDeleted || 0;
+          let changeInfo = '';
+          if (linesWritten > 0 || linesDeleted > 0) {
+            const addPart = linesWritten > 0 ? chalk.hex(t.success)('+' + linesWritten) : '';
+            const delPart = linesDeleted > 0 ? chalk.hex(t.error)(' -' + linesDeleted) : '';
+            changeInfo = ` (${addPart}${delPart})`;
+          }
+          console.log(chalk.hex(t.muted)(`    └─ ${filePath}${changeInfo}`));
+
+          // Show inline diff if we have cached content
+          const cachedContent = this.fileContentCache.get(filePath);
+          const newContent = resultData?.content;
+          if (cachedContent !== undefined && newContent !== undefined) {
+            try {
+              const themeObj = {
+                accent: (s) => chalk.hex(t.accent)(s),
+                muted: (s) => chalk.hex(t.muted)(s),
+                error: (s) => chalk.hex(t.error)(s),
+                success: (s) => chalk.hex(t.success)(s),
+              };
+              const diffOutput = renderDiff(cachedContent, newContent, filePath, themeObj);
+              console.log(diffOutput);
+              // Update cache with new content
+              this.fileContentCache.set(filePath, newContent);
+            } catch {}
+          } else if (newContent !== undefined) {
+            // No cached before-image — just show line count
+            const lineCount = newContent.split('\n').length;
+            console.log(chalk.hex(t.muted)(`    │ ${lineCount} lines`));
+            this.fileContentCache.set(filePath, newContent);
+          }
+          break;
+        }
+        
+        case 'exec':
+        case 'shell_exec': {
+          const exitCode = resultData?.exitCode ?? 0;
+          const exitStr = exitCode === 0
+            ? chalk.hex(t.success)(`exit:${exitCode}`)
+            : chalk.hex(t.error)(`exit:${exitCode}`);
+          if (resultData?.stdout && resultData.stdout.length > 0) {
+            const firstLine = resultData.stdout.split('\n')[0].substring(0, 80);
+            console.log(chalk.hex(t.muted)(`    ├─ ${exitStr}`));
+            console.log(chalk.hex(t.muted)(`    └─ ${firstLine}`));
+          } else {
+            console.log(chalk.hex(t.muted)(`    └─ ${exitStr}`));
+          }
+          break;
+        }
+        
+        case 'web_search': {
+          const results = resultData?.results || [];
+          const cnt = results.length;
+          if (cnt > 0) {
+            console.log(chalk.hex(t.muted)(`    ├─ ${cnt} result${cnt === 1 ? '' : 's'}`));
+            results.slice(0, 3).forEach((r, i) => {
+              const title = r.title ? r.title.substring(0, 60) : 'No title';
+              console.log(chalk.hex(t.muted)(`    │ ${i + 1}. ${title}`));
+            });
+            if (cnt > 3) {
+              console.log(chalk.hex(t.muted)(`    │ ${chalk.gray('...')} ${cnt - 3} more`));
+            }
+          }
+          break;
+        }
+        
+        case 'git_status': {
+          const status = resultData?.status || {};
+          const files = Object.keys(status).length;
+          if (files > 0) {
+            console.log(chalk.hex(t.muted)(`    ├─ ${files} file${files === 1 ? '' : 's'} changed`));
+            const staged = status.filter?.length || 0;
+            const modified = status.modified?.length || 0;
+            const untracked = status.untracked?.length || 0;
+            console.log(chalk.hex(t.muted)(`    └─ ${staged ? ' +' + staged : ''}${modified ? ' ~' + modified : ''}${untracked ? ' ?' + untracked : ''}`));
+          } else {
+            console.log(chalk.hex(t.muted)(`    └─ working tree clean`));
+          }
+          break;
+        }
+        
+        case 'git_log': {
+          const commits = resultData?.commits || [];
+          if (commits.length > 0) {
+            console.log(chalk.hex(t.muted)(`    ├─ ${commits.length} commits`));
+            commits.slice(0, 3).forEach((c) => {
+              const msg = c.message ? c.message.substring(0, 50) : 'No message';
+              console.log(chalk.hex(t.muted)(`    │ ${chalk.hex(t.accent)(c.hash?.substring(0, 7) || '???????')} ${msg}`));
+            });
+          }
+          break;
+        }
+        
+        case 'list_directory': {
+          const entries = resultData?.entries || resultData?.files || [];
+          const fileCount = entries.length;
+          if (fileCount > 0) {
+            console.log(chalk.hex(t.muted)(`    ├─ ${fileCount} item${fileCount === 1 ? '' : 's'}`));
+            entries.slice(0, 3).map(e => typeof e === 'string' ? e : e.name).forEach(e => {
+              console.log(chalk.hex(t.muted)(`    │ ${e}`));
+            });
+            if (fileCount > 3) {
+              console.log(chalk.hex(t.muted)(`    │ ${chalk.gray('...')} ${fileCount - 3} more`));
+            }
+          }
+          break;
+        }
+        
+        case 'read_webpage': {
+          const preview = [
+            resultData.title ? this.truncateInline(resultData.title, 90) : null,
+            resultData.status ? `HTTP ${resultData.status}` : null,
+          ].filter(Boolean).join(' • ');
+          if (preview) {
+            console.log(chalk.hex(t.muted)(`    └─ ${preview}`));
+          }
+          break;
+        }
+        
+        case 'fetch_url': {
+          const preview = [
+            resultData.status ? `HTTP ${resultData.status}` : null,
+            resultData.statusText || null,
+          ].filter(Boolean).join(' ');
+          if (preview) {
+            console.log(chalk.hex(t.muted)(`    └─ ${preview}`));
+          }
+          break;
+        }
+        
+        default: {
+          // Generic fallback for other tools
+          if (resultData?.stdout && resultData.stdout.length > 0) {
+            const preview = resultData.stdout.substring(0, 120).replace(/\n/g, ' ');
+            console.log(chalk.hex(t.muted)(`    └─ ${preview}${resultData.stdout.length > 120 ? '...' : ''}`));
+          }
+          break;
+        }
       }
     } else {
-      const errorMsg = result.error || result.result?.error || 'Unknown error';
-      console.log(chalk.red(`    ✗ ${errorMsg.substring(0, 80)}`));
+      const statusSummary = resultData?.status ? `HTTP ${resultData.status}` : null;
+      const errorMsg = result.error || result.result?.error || statusSummary || 'Unknown error';
+      const truncated = errorMsg.substring(0, 200);
+      console.log(chalk.hex(t.error)(`    ✗ ${truncated}`));
     }
   }
 
   /**
-   * Enhanced task summary with better formatting
+   * Print session stats inline (triggered by Ctrl+P)
+   */
+  printSessionStats() {
+    if (!this.session?.agent) {
+      console.log(chalk.gray('  No active session'));
+      return;
+    }
+    const stats = this.session.agent.getStats();
+    const contextStats = this.session.agent.getContextStats();
+    const clientStats = this.session.agent.client.getStats();
+    const elapsedMs = Date.now() - this.sessionStartTime;
+    const elapsedStr = this.formatElapsedTime(elapsedMs);
+    const t = this.theme;
+
+    console.log('');
+    console.log(chalk.hex(t.header)(`  ══ Session Stats ══`));
+    console.log(`  ${chalk.hex(t.text)('Tokens:')}   ${chalk.white(stats.totalTokensUsed.toLocaleString())}`);
+    console.log(`  ${chalk.hex(t.text)('Context:')}   ${chalk.white(contextStats.usedTokens.toLocaleString())}/${chalk.white(contextStats.maxTokens.toLocaleString())} (${contextStats.percent}%)`);
+    console.log(`  ${chalk.hex(t.text)('Cost:')}      ${chalk.yellow('$' + (clientStats.totalCost || 0).toFixed(4))}`);
+    console.log(`  ${chalk.hex(t.text)('Tools:')}     ${chalk.white(stats.toolExecutions)} calls`);
+    console.log(`  ${chalk.hex(t.text)('Iterations:')} ${chalk.white(stats.iterations)}`);
+    console.log(`  ${chalk.hex(t.text)('Time:')}      ${chalk.white(elapsedStr)}`);
+    console.log(`  ${chalk.hex(t.text)('Messages:')}  ${chalk.white(stats.totalMessages)}`);
+    console.log(`  ${chalk.hex(t.text)('Theme:')}     ${chalk.hex(t.accent)(t.name)}`);
+    console.log('');
+  }
+
+  /**
+   * Enhanced task summary with better formatting - Visual card style
    */
   printEnhancedTaskSummary(result, duration) {
-    this.printTaskSummary(result, duration);
+    const seconds = (duration / 1000).toFixed(1);
+    const modelId = this.session.agent.model;
+    const modelShort = modelId.split('/').pop();
+    this.syncSessionModelState(modelId);
+    const contextStats = this.session.agent.getContextStats();
+    const contextUsed = contextStats.usedTokens;
+    const contextMax = contextStats.maxTokens;
+    const contextPct = contextStats.percent;
+    const t = this.theme;
+    const contextColor = contextPct > 70 ? chalk.hex(t.error) : contextPct > 40 ? chalk.hex(t.warning) : chalk.hex(t.success);
+
+    const formatCtx = (n) => {
+      if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+      if (n >= 1000) return (n / 1000).toFixed(0) + 'K';
+      return n.toString();
+    };
+
+    // Get tool usage breakdown
+    const toolUsage = {};
+    if (result.stats?.toolExecutionsByName) {
+      Object.entries(result.stats.toolExecutionsByName).forEach(([tool, count]) => {
+        toolUsage[tool] = count;
+      });
+    }
+
+    // Build the summary card
+    const dividerLine = chalk.dim('━'.repeat(50));
+    
+    console.log('');
+    console.log(dividerLine);
+    console.log(chalk.hex(t.success)('  ✅ Task complete'));
+    console.log('');
+    
+    // Model and context info
+    console.log(`  ${chalk.hex(t.tool)('🤖')} ${chalk.white(modelShort)} • ${contextColor(`${formatCtx(contextUsed)}/${formatCtx(contextMax)} ctx (${contextPct}%)`)}`);
+    console.log(`  ${chalk.hex(t.tool)('⏱')} ${chalk.white(seconds + 's')} • ${chalk.white(result.iterations + ' iter')} • ${chalk.white(result.stats.toolExecutions + ' tool calls')}`);
+    
+    // Tools used breakdown
+    if (Object.keys(toolUsage).length > 0) {
+      console.log('');
+      console.log(`  ${chalk.hex(t.tool)('🔧 Tools used:')}`);
+      const toolParts = Object.entries(toolUsage)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map(([tool, cnt]) => `${tool} ×${cnt}`);
+      console.log(`    ${toolParts.join('  ')}`);
+    }
+    
+    // Performance metrics
+    if (result.performance) {
+      const avgIteration = result.iterations > 0 ? (duration / result.iterations / 1000).toFixed(1) + 's' : 'N/A';
+      const retries = result.performance.totalRetries || 0;
+      console.log('');
+      console.log(`  ${chalk.hex(t.accent)('📊 Performance:')}`);
+      console.log(`    ${chalk.hex(t.muted)('Avg iteration:')} ${chalk.white(avgIteration)} • ${chalk.hex(t.muted)('Retries:')} ${retries > 0 ? chalk.hex(t.warning)(retries) : chalk.hex(t.success)('0')}`);
+    }
+    
+    console.log(dividerLine);
   }
+}
+
+export async function runCLI(options = {}) {
+  const cli = new CLI({
+    workingDir: process.cwd(),
+    autoSave: true,
+    ...options,
+  });
+
+  // Set up signal handlers for graceful shutdown
+  const signalHandler = async (signal) => {
+    console.log(chalk.yellow(`\n⚠ Received ${signal}. Cleaning up...`));
+    await cli.gracefulShutdown();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', signalHandler);
+  process.on('SIGTERM', signalHandler);
+
+  await cli.start();
+}
+
+const __filename = fileURLToPath(import.meta.url);
+const argvPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
+
+// Resolve symlinks so npm link / global installs work correctly
+let resolvedFilename = __filename;
+let resolvedArgv = argvPath;
+try { resolvedFilename = fs.realpathSync(__filename); } catch {}
+try { resolvedArgv = fs.realpathSync(argvPath); } catch {}
+
+if (resolvedArgv && resolvedFilename === resolvedArgv) {
+  runCLI().catch((error) => {
+    console.error('Fatal error:', error.message);
+    process.exit(1);
+  });
 }
 
 export default CLI;

@@ -10,12 +10,19 @@
  * - Ctrl+K kill to end of line, Ctrl+U kill to start
  * - Ctrl+W delete word backward
  * - Ctrl+A select all
- * - Shift+Enter for newline, Enter to send
+ * - Ctrl+O for newline, Enter to send
  * - Ctrl+K (when line is empty) to exit/cancel
  * - Paste support for multi-line text
  */
 
 import chalk from 'chalk';
+import { resetTerminalInput } from './terminal.js';
+import fs from 'fs-extra';
+import path from 'path';
+import os from 'os';
+
+// History file path
+const HISTORY_FILE = path.join(os.homedir(), '.openagent', 'history.json');
 
 // ═══════════════════════════════════════════════════════════════════
 // 📋 In-process clipboard
@@ -32,8 +39,8 @@ export class MultilineInput {
     this.prompt = opts.prompt || '❯ ';
     this.placeholder = opts.placeholder || '';
     this.statusLine = opts.statusLine || '';
-    this.stdin = process.stdin;
-    this.stdout = process.stdout;
+    this.stdin = opts.stdin || process.stdin;
+    this.stdout = opts.stdout || process.stdout;
 
     // Text state
     this.lines = [''];
@@ -47,6 +54,11 @@ export class MultilineInput {
     this.undoStack = [];
     this.redoStack = [];
 
+    // Input history
+    this.history = [];         // Array of past inputs
+    this.historyIndex = -1;    // Current position in history
+    this.savedDraft = '';      // Save current text when browsing history
+
     // Rendering
     this._rendered = 0; // number of lines last rendered
     this._cursorRenderLine = 0; // cursor line within the rendered block
@@ -54,6 +66,38 @@ export class MultilineInput {
     this._resolve = null;
     this._handler = null;
     this._wasRaw = false;
+
+    // Load history from disk
+    this._loadHistory();
+  }
+
+  /**
+   * Load command history from disk
+   */
+  _loadHistory() {
+    try {
+      if (fs.existsSync(HISTORY_FILE)) {
+        const data = fs.readJSONSync(HISTORY_FILE);
+        if (Array.isArray(data)) {
+          this.history = data.slice(-500); // Keep last 500 entries
+        }
+      }
+    } catch {
+      // Silently ignore corrupt history files
+      this.history = [];
+    }
+  }
+
+  /**
+   * Save command history to disk
+   */
+  _saveHistory() {
+    try {
+      fs.ensureDirSync(path.dirname(HISTORY_FILE));
+      fs.writeJSONSync(HISTORY_FILE, this.history.slice(-500));
+    } catch {
+      // Silently ignore write failures
+    }
   }
 
   setText(text) {
@@ -100,6 +144,12 @@ export class MultilineInput {
       return;
     }
 
+    // Enhanced keyboard protocols may surface modified Enter directly.
+    if (data === '\x0f' || data === '\x1b\r' || data === '\x1b\n' || data === '\x1b[13;2u' || data === '\x1b[27;13;2~') {
+      this._newline();
+      return;
+    }
+
     // Paste: multi-char non-escape
     if (data.length > 1 && !data.startsWith('\x1b')) {
       const cleaned = data
@@ -121,15 +171,9 @@ export class MultilineInput {
       return;
     }
 
-    // Enter = submit
-    if (data === '\r') {
+    // Treat both CR and LF as send. Shift+Enter is not portable across terminals.
+    if (data === '\r' || data === '\n') {
       this._submit();
-      return;
-    }
-
-    // Shift+Enter (some terminals send \n)
-    if (data === '\n') {
-      this._newline();
       return;
     }
 
@@ -180,6 +224,27 @@ export class MultilineInput {
     }
     // Ctrl+U = kill to start of line
     if (data === '\x15') { this._killToStart(); return; }
+    // Ctrl+L = clear screen
+    if (data === '\x0c') {
+      this._clearRenderedBlock();
+      this.cleanup();
+      if (this._resolve) this._resolve(MultilineInput.CLEAR_SCREEN);
+      return;
+    }
+    // Ctrl+T = cycle theme
+    if (data === '\x14') {
+      this._clearRenderedBlock();
+      this.cleanup();
+      if (this._resolve) this._resolve(MultilineInput.CYCLE_THEME);
+      return;
+    }
+    // Ctrl+P = show session stats
+    if (data === '\x10') {
+      this._clearRenderedBlock();
+      this.cleanup();
+      if (this._resolve) this._resolve(MultilineInput.SHOW_STATS);
+      return;
+    }
 
     // Arrow keys & shift variants
     if (data === '\x1b[D') { this._left(false); return; }
@@ -268,7 +333,7 @@ export class MultilineInput {
     // Status bar at bottom
     const totalChars = this.lines.reduce((s, l) => s + l.length, 0) + Math.max(0, this.lines.length - 1);
     const status = chalk.dim(`Ln ${this.row + 1}, Col ${this.col + 1} │ ${this.lines.length} lines, ${totalChars} chars`);
-    const help = chalk.dim('↵ send · ⇧↵ newline · Ctrl+V paste · Ctrl+K exit');
+    const help = chalk.dim('↵ send · Ctrl+O newline · Ctrl+L screen · Ctrl+T theme · Ctrl+P stats · Ctrl+K exit');
     out.push(' '.repeat(promptW) + status);
     out.push(' '.repeat(promptW) + help);
 
@@ -656,6 +721,13 @@ export class MultilineInput {
       this.stdout.write(prefix + this.lines[i] + '\n');
     }
 
+    // Save to history if non-empty
+    if (result && result.trim()) {
+      this.history.push(result);
+      if (this.history.length > 500) this.history.shift();
+      this._saveHistory();
+    }
+
     this.cleanup();
     // Return the raw joined text (empty string is valid — means user submitted nothing)
     if (this._resolve) this._resolve(this.lines.join('\n'));
@@ -663,6 +735,11 @@ export class MultilineInput {
 
   // Cancel sentinel — returned when user explicitly exits
   static CANCEL = Symbol('CANCEL');
+  // Keyboard shortcut sentinels
+  static CLEAR_SCREEN = Symbol('CLEAR_SCREEN');
+  static CYCLE_THEME = Symbol('CYCLE_THEME');
+  static SHOW_STATS = Symbol('SHOW_STATS');
+  static CLEAR_INPUT = Symbol('CLEAR_INPUT');
 
   _cancel() {
     // Clear rendered area
@@ -681,6 +758,7 @@ export class MultilineInput {
 export async function multilinePrompt(opts = {}) {
   const input = new MultilineInput(opts);
   if (opts.initialText) input.setText(opts.initialText);
+  await resetTerminalInput(input.stdin);
   return input.start();
 }
 

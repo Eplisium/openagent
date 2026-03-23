@@ -376,6 +376,53 @@ export function normalizePositiveInt(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+// Pre-compiled regexes for token estimation (avoid recompilation on every call)
+const CODE_PATTERN_REGEX = /[{}\[\]()=><;]|(?:^|\s)(function|const|let|var|class|import|export|return|if|else|for|while|async|await|def |print |from |require\(|module\.)(?:\s|$)/gm;
+const NEWLINE_REGEX = /\n/g;
+const JSON_STRUCTURE_REGEX = /[{}[\]]/g;
+
+/**
+ * 🔢 Estimate token count from text with content-aware heuristics
+ * - Code content (braces, keywords): ~3.5 chars/token
+ * - Prose content: ~4 chars/token
+ * - Mixed: weighted average based on code density
+ * 
+ * Optimized: pre-compiled regexes, fast-path for short strings
+ */
+export function estimateTokens(text) {
+  if (!text || typeof text !== 'string') return 0;
+
+  const len = text.length;
+  if (len === 0) return 0;
+
+  // Fast path: for very short strings, use simple heuristic
+  if (len < 20) {
+    return Math.ceil(len / 4);
+  }
+
+  // Count code indicators using pre-compiled regex
+  const codeMatches = (text.match(CODE_PATTERN_REGEX) || []).length;
+
+  // Determine code density: code indicators per 100 chars
+  const codeDensity = (codeMatches / Math.max(len / 100, 1));
+
+  // Classify content
+  let charsPerToken;
+  if (codeDensity > 2) {
+    // Heavy code: ~3.2-3.5 chars/token
+    charsPerToken = 3.2 + Math.min(codeDensity * 0.05, 0.3);
+  } else if (codeDensity > 0.5) {
+    // Mixed code/prose: weighted average ~3.5-3.8
+    charsPerToken = 3.5 + (0.3 * (1 - codeDensity / 2));
+  } else {
+    // Prose: ~4 chars/token, but structured prose (JSON, markdown) gets slightly fewer
+    const hasJsonStructure = (text.match(JSON_STRUCTURE_REGEX) || []).length > len / 50;
+    charsPerToken = hasJsonStructure ? 3.8 : 4.0;
+  }
+
+  return Math.ceil(len / charsPerToken);
+}
+
 export default {
   colors,
   gradients,
@@ -405,4 +452,5 @@ export default {
   truncate,
   normalizeOptionalLimit,
   normalizePositiveInt,
+  estimateTokens,
 };

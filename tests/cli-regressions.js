@@ -5,7 +5,7 @@ import path from 'path';
 
 import { CLI } from '../src/cli.js';
 import { ModelBrowser } from '../src/ModelBrowser.js';
-import { MultilineInput } from '../src/cli/multilineInput.js';
+import { MultilineInput, multilinePrompt } from '../src/cli/multilineInput.js';
 import { promptWithTerminalReset, resetTerminalInput } from '../src/cli/terminal.js';
 import { Agent } from '../src/agent/Agent.js';
 import { AgentSession } from '../src/agent/AgentSession.js';
@@ -43,7 +43,7 @@ test('CLI syncs selected model context window', () => {
   assert.equal(cli.session.agent.model, 'demo/fast');
   assert.equal(cli.session.agent.maxContextTokens, 32000);
   assert.equal(synced.contextLength, 32000);
-  assert.match(cli.buildPromptStatusLine(), /ctx est/i);
+  assert.match(cli.buildPromptStatusLine(), /demo\/fast.*\d+%/i);
 });
 
 test('CLI createSession generates a fresh session identity', () => {
@@ -61,6 +61,75 @@ test('CLI createSession generates a fresh session identity', () => {
   assert.notEqual(first.sessionId, second.sessionId);
   assert.equal(second.activeWorkspace, null);
   assert.equal(cli.session.sessionId, second.sessionId);
+});
+
+test('CLI loadState restores history even when verbose is off', async () => {
+  const cli = new CLI({ autoSave: false });
+  cli.verbose = false;
+
+  const originalEnsureDir = fs.ensureDir;
+  const originalPathExists = fs.pathExists;
+  const originalReadJson = fs.readJson;
+
+  fs.ensureDir = async () => {};
+  fs.pathExists = async () => true;
+  fs.readJson = async () => ({
+    history: [
+      { type: 'agent', task: 'Restored task', timestamp: '2026-03-19T12:00:00.000Z' },
+    ],
+  });
+
+  try {
+    await cli.loadState();
+    assert.equal(cli.history.length, 1);
+    assert.equal(cli.history[0].task, 'Restored task');
+  } finally {
+    fs.ensureDir = originalEnsureDir;
+    fs.pathExists = originalPathExists;
+    fs.readJson = originalReadJson;
+  }
+});
+
+test('CLI auto-save runs at the exact interval and stays quiet while prompting', async () => {
+  const cli = new CLI({ autoSave: true, autoSaveInterval: 1000 });
+  cli.verbose = true;
+  cli.promptActive = true;
+  cli.lastSaveTime = Date.now() - cli.autoSaveInterval;
+
+  let saves = 0;
+  cli.session = {
+    save: async () => {
+      saves++;
+      return { success: true };
+    },
+  };
+
+  const originalSetInterval = global.setInterval;
+  const originalClearInterval = global.clearInterval;
+  const originalConsoleLog = console.log;
+
+  let intervalHandler = null;
+  const logs = [];
+  global.setInterval = (handler) => {
+    intervalHandler = handler;
+    return { unref() {} };
+  };
+  global.clearInterval = () => {};
+  console.log = (...args) => {
+    logs.push(args.join(' '));
+  };
+
+  try {
+    cli.startAutoSave();
+    await intervalHandler();
+    assert.equal(saves, 1);
+    assert.equal(logs.length, 0);
+  } finally {
+    console.log = originalConsoleLog;
+    global.setInterval = originalSetInterval;
+    global.clearInterval = originalClearInterval;
+    cli.stopAutoSave();
+  }
 });
 
 test('Agent compaction produces a real summary marker', async () => {
@@ -152,6 +221,40 @@ test('MultilineInput treats CRLF as submit on Windows terminals', () => {
   assert.equal(submitted, 1);
 });
 
+test('MultilineInput treats LF as submit on terminals without carriage return', () => {
+  const input = new MultilineInput();
+  input._active = true;
+
+  let submitted = 0;
+  input._submit = () => {
+    submitted++;
+  };
+  input._newline = () => {
+    throw new Error('LF should submit, not insert a newline');
+  };
+
+  input._onData('\n');
+
+  assert.equal(submitted, 1);
+});
+
+test('MultilineInput uses Ctrl+O as the portable newline shortcut', () => {
+  const input = new MultilineInput();
+  input._active = true;
+
+  let newlines = 0;
+  input._newline = () => {
+    newlines++;
+  };
+  input._submit = () => {
+    throw new Error('Ctrl+O should insert a newline');
+  };
+
+  input._onData('\x0f');
+
+  assert.equal(newlines, 1);
+});
+
 test('MultilineInput clears the full rendered block from cursor position', () => {
   const input = new MultilineInput();
   const writes = [];
@@ -197,7 +300,7 @@ test('resetTerminalInput drains pending stdin bytes and disables raw mode', asyn
       states.push('resume');
     },
     read() {
-      return buffered.shift();
+      return buffered.length > 0 ? buffered.shift() : null;
     },
   };
 
@@ -205,6 +308,26 @@ test('resetTerminalInput drains pending stdin bytes and disables raw mode', asyn
 
   assert.deepEqual(states, ['pause', 'raw:false', 'resume']);
   assert.equal(buffered.length, 0);
+});
+
+test('resetTerminalInput preserves buffered printable input after stray enter bytes', async () => {
+  const buffered = ['\r', 'next command', null];
+  const input = {
+    isTTY: true,
+    pause() {},
+    setRawMode() {},
+    resume() {},
+    read() {
+      return buffered.length > 0 ? buffered.shift() : null;
+    },
+    unshift(chunk) {
+      buffered.unshift(chunk);
+    },
+  };
+
+  await resetTerminalInput(input);
+
+  assert.equal(input.read(), 'next command');
 });
 
 test('promptWithTerminalReset uses a fresh prompt module after terminal reset', async () => {
@@ -249,9 +372,58 @@ test('promptWithTerminalReset uses a fresh prompt module after terminal reset', 
     'raw:false',
     'resume',
     'read',
+    'read',
     'prompt:input-ok',
     'prompt:output-ok',
     'questions:1',
+  ]);
+});
+
+test('multilinePrompt resets terminal state before starting the raw input widget', async () => {
+  const events = [];
+  const stdin = {
+    isTTY: true,
+    isRaw: false,
+    pause() {
+      events.push('pause');
+    },
+    setRawMode(value) {
+      events.push(`raw:${value}`);
+    },
+    resume() {
+      events.push('resume');
+    },
+    read() {
+      events.push('read');
+      return null;
+    },
+  };
+  const stdout = {
+    write() {
+      return true;
+    },
+  };
+
+  const originalStart = MultilineInput.prototype.start;
+  MultilineInput.prototype.start = function startStub() {
+    events.push('start');
+    return Promise.resolve('ok');
+  };
+
+  try {
+    const result = await multilinePrompt({ stdin, stdout });
+    assert.equal(result, 'ok');
+  } finally {
+    MultilineInput.prototype.start = originalStart;
+  }
+
+  assert.deepEqual(events, [
+    'pause',
+    'raw:false',
+    'resume',
+    'read',
+    'read',
+    'start',
   ]);
 });
 
@@ -298,3 +470,4 @@ if (failed > 0) {
 }
 
 console.log(`All ${tests.length} regression tests passed.`);
+process.exit(0);

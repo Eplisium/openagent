@@ -3,6 +3,7 @@
 import { OpenRouterClient } from '../OpenRouterClient.js';
 import { AgentError, ToolExecutionError, ContextOverflowError, AgentAbortError, AbortError, ToolErrorType } from '../errors.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
+import { parseXmlToolCalls, hasXmlToolCalls } from '../tools/xmlToolParser.js';
 import { CONFIG } from '../config.js';
 import { logger } from '../logger.js';
 import { ContextAllocator } from './contextAllocator.js';
@@ -64,6 +65,10 @@ export class Agent {
 
     // Working set: tracks files being actively edited for priority context allocation
     this.workingSet = new Set();
+    
+    // Token estimation cache: avoid re-estimating unchanged messages
+    this._tokenCache = new WeakMap();
+    this._tokenCacheVersion = 0;
     
     // Retry configuration
     this.maxRetries = options.maxRetries || 3;
@@ -221,6 +226,11 @@ When you have completed the task, provide a clear summary of what was done.`;
   }
 
   estimateMessageTokens(message = {}) {
+    // Check cache first — messages are immutable once pushed
+    if (message._tokenEstimate !== undefined) {
+      return message._tokenEstimate;
+    }
+
     let total = 0;
 
     if (message.content) {
@@ -248,6 +258,8 @@ When you have completed the task, provide a clear summary of what was done.`;
     // Add overhead per message (~4 tokens for role/metadata)
     total += 4;
 
+    // Cache on the message object itself
+    message._tokenEstimate = total;
     return total;
   }
 
@@ -746,10 +758,10 @@ Task: ${userInput}`;
       this.repeatedSingleToolCount = 0;
     }
 
-    // Add assistant message with tool calls
+    // Add assistant message with tool calls (use empty string, not null, for API compatibility)
     this.pushMessage({
       role: 'assistant',
-      content: responseContent || null,
+      content: responseContent || '',
       tool_calls: toolCalls.map(tc => ({
         id: tc.id,
         type: 'function',
@@ -904,6 +916,8 @@ Task: ${userInput}`;
         model: this.model,
         temperature: 0.3,
         max_tokens: 16384,
+        // Send tool definitions so the model can use native tool calling via streaming.
+        // If a model rejects streaming+tools, we catch the error and fall back to non-streaming.
         tools: this.tools.getToolDefinitions(),
         tool_choice: 'auto',
         // Fire as soon as a single tool call is fully accumulated
@@ -973,7 +987,18 @@ Task: ${userInput}`;
 
         const toolCalls = response.toolCalls || [];
         if (toolCalls.length === 0) {
-          finalResponse = response.content || fullContent;
+          const fallbackContent = response.content || fullContent;
+          // Check for XML tool calls in fallback content
+          if (fallbackContent && hasXmlToolCalls(fallbackContent)) {
+            const parsed = parseXmlToolCalls(fallbackContent);
+            if (parsed.toolCalls.length > 0) {
+              const fbToolResults = await this.executeToolCallsEnhanced(parsed.toolCalls);
+              this.reflectOnToolResults(fbToolResults, parsed.toolCalls);
+              await this.postToolIteration(parsed.toolCalls, fbToolResults, parsed.cleanContent, iterationStart, runHistory);
+              continue;
+            }
+          }
+          finalResponse = fallbackContent;
           this.pushMessage({ role: 'assistant', content: finalResponse });
           this.stopReason = 'completed';
           if (this.onResponse) this.onResponse(finalResponse);
@@ -991,13 +1016,28 @@ Task: ${userInput}`;
         }
 
         this.reflectOnToolResults(fallbackResults, toolCalls);
-        await this.postToolIteration(toolCalls, fallbackResults, response.content || fullContent, iterationStart, runHistory);
+        const fallbackClean = (response.content || fullContent);
+        const cleanedFallback = (fallbackClean && hasXmlToolCalls(fallbackClean))
+          ? parseXmlToolCalls(fallbackClean).cleanContent
+          : fallbackClean;
+        await this.postToolIteration(toolCalls, fallbackResults, cleanedFallback, iterationStart, runHistory);
         continue;
       }
 
       this.updateUsageStats(streamUsage);
 
       if (allToolCalls.length === 0) {
+        // Check if the model output tool calls as XML in the content
+        if (hasXmlToolCalls(fullContent)) {
+          const parsed = parseXmlToolCalls(fullContent);
+          if (parsed.toolCalls.length > 0) {
+            // Execute XML tool calls
+            const toolResults = await this.executeToolCallsEnhanced(parsed.toolCalls);
+            this.reflectOnToolResults(toolResults, parsed.toolCalls);
+            await this.postToolIteration(parsed.toolCalls, toolResults, parsed.cleanContent, iterationStart, runHistory);
+            continue;
+          }
+        }
         // No tool calls — final response
         finalResponse = fullContent;
         this.pushMessage({ role: 'assistant', content: fullContent });
@@ -1030,7 +1070,11 @@ Task: ${userInput}`;
       }
 
       this.reflectOnToolResults(toolResults, allToolCalls);
-      await this.postToolIteration(allToolCalls, toolResults, fullContent, iterationStart, runHistory);
+      // Strip any XML tool call tags from content when native tool calls are present
+      const cleanContent = (fullContent && hasXmlToolCalls(fullContent))
+        ? parseXmlToolCalls(fullContent).cleanContent
+        : fullContent;
+      await this.postToolIteration(allToolCalls, toolResults, cleanContent, iterationStart, runHistory);
     }
 
     if (!finalResponse) {
@@ -1195,6 +1239,16 @@ Task: ${userInput}`;
         const toolCalls = response.toolCalls || [];
         
         if (toolCalls.length === 0) {
+          // Check if the model output tool calls as XML in the content
+          if (response.content && hasXmlToolCalls(response.content)) {
+            const parsed = parseXmlToolCalls(response.content);
+            if (parsed.toolCalls.length > 0) {
+              const xmlToolResults = await this.executeToolCallsEnhanced(parsed.toolCalls);
+              this.reflectOnToolResults(xmlToolResults, parsed.toolCalls);
+              await this.postToolIteration(parsed.toolCalls, xmlToolResults, parsed.cleanContent, iterationStart, runHistory);
+              continue;
+            }
+          }
           // No tool calls - this is the final response
           finalResponse = response.content;
           this.pushMessage({ role: 'assistant', content: response.content });
@@ -1213,8 +1267,14 @@ Task: ${userInput}`;
         // Self-reflection: check for failed or empty results and inject guidance
         this.reflectOnToolResults(toolResults, toolCalls);
 
+        // Strip any XML tool call tags from content when native tool calls are present
+        let cleanContent = response.content || '';
+        if (cleanContent && hasXmlToolCalls(cleanContent)) {
+          cleanContent = parseXmlToolCalls(cleanContent).cleanContent;
+        }
+
         // Shared post-iteration processing (circuit breaker, stall, messages, history)
-        await this.postToolIteration(toolCalls, toolResults, response.content, iterationStart, runHistory);
+        await this.postToolIteration(toolCalls, toolResults, cleanContent, iterationStart, runHistory);
       }
       
       if (!finalResponse) {
@@ -1731,12 +1791,10 @@ Task: ${userInput}`;
       
       yield { type: 'iteration', iteration: this.iterationCount };
       
-      // Get streaming response
+      // Get streaming response (tools omitted — streaming+tools rejected by many models)
       const stream = this.client.chatStream(this.messages, {
         model: this.model,
         temperature: 0.3,
-        tools: this.tools.getToolDefinitions(),
-        tool_choice: 'auto',
       });
       
       let fullContent = '';
@@ -1760,6 +1818,17 @@ Task: ${userInput}`;
       }
       
       if (toolCalls.length === 0) {
+        // Check if the model output tool calls as XML in the content
+        if (hasXmlToolCalls(fullContent)) {
+          const parsed = parseXmlToolCalls(fullContent);
+          if (parsed.toolCalls.length > 0) {
+            yield { type: 'tools_start', count: parsed.toolCalls.length };
+            const xmlResults = await this.executeToolCallsEnhanced(parsed.toolCalls);
+            this.reflectOnToolResults(xmlResults, parsed.toolCalls);
+            await this.postToolIteration(parsed.toolCalls, xmlResults, parsed.cleanContent, Date.now(), []);
+            continue;
+          }
+        }
         // Final response
         this.pushMessage({ role: 'assistant', content: fullContent });
         this.stopReason = 'completed';
@@ -1902,11 +1971,21 @@ Task: ${userInput}`;
       model: options.model || this.model,
       temperature: options.temperature || 0.7,
     });
+
+    let finalContent = result.content;
+    if (finalContent && hasXmlToolCalls(finalContent)) {
+      finalContent = parseXmlToolCalls(finalContent).cleanContent;
+    }
+    if (typeof finalContent !== 'string') {
+      finalContent = finalContent == null ? '' : String(finalContent);
+    }
+
+    const sanitizedResult = { ...result, content: finalContent };
     
-    this.pushMessage({ role: 'assistant', content: result.content });
+    this.pushMessage({ role: 'assistant', content: finalContent });
     this.updateUsageStats(result.usage);
     
-    return result;
+    return sanitizedResult;
   }
 
   /**

@@ -1,11 +1,12 @@
 {
   "name": "openagent",
-  "version": "4.0.0",
-  "description": "🚀 OpenAgent v4.0 - Production-grade AI agent with 400+ models. Native fetch (zero axios), AbortController, request deduplication, real cost tracking, and 2026 performance optimizations. On par with Claude Code, Cursor, and Codex.",
+  "version": "4.1.0",
+  "description": "🚀 OpenAgent v4.1 - Production-grade AI agent with 400+ models. Native fetch (zero axios), AbortController, request deduplication, real cost tracking, MCP/A2A/AG-UI protocols, and 2026 performance optimizations. On par with Claude Code, Cursor, and Codex.",
   "main": "src/index.js",
   "type": "module",
   "bin": {
-    "openagent": "src/cli.js"
+    "openagent": "src/cli.js",
+    "oagent": "src/cli.js"
   },
   "scripts": {
     "start": "node src/index.js",
@@ -13,6 +14,7 @@
     "demo": "node examples/demo.js",
     "test": "node tests/test-suite.js",
     "test:regressions": "node tests/cli-regressions.js",
+    "test:unit": "vitest run",
     "streaming": "node examples/streaming-demo.js",
     "tools": "node examples/tool-calling-demo.js",
     "vision": "node examples/vision-demo.js",
@@ -52,7 +54,8 @@
     "inquirer": "^12.3.0",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
-    "ora": "^8.1.2"
+    "ora": "^8.1.2",
+    "undici": "^7.24.5"
   },
   "devDependencies": {
     "@types/node": "^22.13.5",

@@ -69,6 +69,16 @@ export class MemoryManager {
     return path.join(this.openAgentDir, 'memory');
   }
 
+  getProjectPaths() {
+    return {
+      agents: this.paths.projectAgents,
+      openagent: this.paths.projectOpenAgent,
+      memory: this.paths.projectMemory,
+      local: this.paths.projectLocal,
+      openAgentDir: this.openAgentDir,
+    };
+  }
+
   /**
    * Ensure memory directories exist
    */
@@ -447,6 +457,160 @@ This file is automatically maintained by OpenAgent. It contains learnings and in
   clearCache() {
     this._cache = null;
     this._cacheTime = 0;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // 🔍 MemMA Validator support methods
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Get the raw content string of the project MEMORY.md.
+   * Used by MemoryValidator during probe verification.
+   *
+   * @returns {Promise<string>} Raw markdown content (empty string if file missing)
+   */
+  async getMemoryContent() {
+    const memoryPath = this.paths.projectMemory;
+    if (!await fs.pathExists(memoryPath)) {
+      return '';
+    }
+    try {
+      return await fs.readFile(memoryPath, 'utf-8');
+    } catch (err) {
+      if (this.verbose) {
+        console.log(chalk.dim(`  Could not read MEMORY.md: ${err.message}`));
+      }
+      return '';
+    }
+  }
+
+  /**
+   * Apply a repair action to the project MEMORY.md.
+   * Supports: insert (append new content), merge (replace a target section), remove (delete target lines).
+   *
+   * @param {object} opts
+   * @param {'insert'|'merge'|'remove'} opts.action - The repair action
+   * @param {string} [opts.target]  - Exact text / heading to locate for merge/remove
+   * @param {string} [opts.content] - New content to insert or replace with
+   * @returns {Promise<{action: string, path: string}>}
+   */
+  async applyRepair({ action, target, content }) {
+    await this.ensureDirs();
+    const memoryPath = this.paths.projectMemory;
+
+    let existing = '';
+    if (await fs.pathExists(memoryPath)) {
+      existing = await fs.readFile(memoryPath, 'utf-8');
+    }
+
+    const timestamp = new Date().toISOString().split('T')[0];
+    let updated;
+
+    switch (action) {
+      case 'insert': {
+        // Append as a new dated section
+        const block = content.startsWith('#')
+          ? `\n${content.trim()}\n`
+          : `\n## ${timestamp} — Memory Repair\n\n${content.trim()}\n`;
+        updated = existing.trimEnd() + '\n' + block;
+        break;
+      }
+
+      case 'merge': {
+        if (target && existing.includes(target)) {
+          // Replace the target text with new content
+          updated = existing.replace(target, content || '');
+        } else {
+          // Target not found — fall back to insert
+          const block = content.startsWith('#')
+            ? `\n${content.trim()}\n`
+            : `\n## ${timestamp} — Memory Repair (Merge)\n\n${content.trim()}\n`;
+          updated = existing.trimEnd() + '\n' + block;
+        }
+        break;
+      }
+
+      case 'remove': {
+        if (target && existing.includes(target)) {
+          updated = existing.replace(target, '');
+        } else {
+          // Nothing to remove
+          updated = existing;
+        }
+        break;
+      }
+
+      default:
+        throw new Error(`applyRepair: unknown action "${action}"`);
+    }
+
+    await fs.writeFile(memoryPath, updated, 'utf-8');
+
+    // Invalidate cache so next load picks up the change
+    this._cache = null;
+
+    if (this.verbose) {
+      console.log(chalk.green(`✓ Applied repair (${action}) to MEMORY.md`));
+    }
+
+    return { action, path: memoryPath };
+  }
+
+  /**
+   * Get detailed stats about the project MEMORY.md.
+   * Used by MemoryValidator during quickCheck().
+   *
+   * @returns {Promise<{totalEntries: number, sections: string[], categories: string[], lastUpdated: string|null}>}
+   */
+  async getMemoryStats() {
+    const content = await this.getMemoryContent();
+
+    if (!content) {
+      return { totalEntries: 0, sections: [], categories: [], lastUpdated: null };
+    }
+
+    const lines = content.split('\n');
+
+    // Collect ## headings (dated entries use "## YYYY-MM-DD — Category" format)
+    const sectionRegex = /^#{2,3} (.+)$/;
+    const sections = [];
+    const categories = new Set();
+
+    // Date pattern like "2024-01-15" in a heading
+    const dateHeadingRegex = /^#{2,3} (\d{4}-\d{2}-\d{2})[^\n]*/;
+    let lastUpdated = null;
+
+    for (const line of lines) {
+      const sectionMatch = line.match(sectionRegex);
+      if (sectionMatch) {
+        sections.push(sectionMatch[1].trim());
+
+        // Extract category from "YYYY-MM-DD — Category" headings
+        const catPart = sectionMatch[1].replace(/^\d{4}-\d{2}-\d{2}\s*[—–-]\s*/, '').trim();
+        if (catPart && catPart !== sectionMatch[1]) {
+          // Only add if we actually stripped a date prefix
+          categories.add(catPart);
+        }
+      }
+
+      const dateMatch = line.match(dateHeadingRegex);
+      if (dateMatch) {
+        const d = dateMatch[1];
+        if (!lastUpdated || d > lastUpdated) {
+          lastUpdated = d;
+        }
+      }
+    }
+
+    // Count entries: ## headings that start with a date
+    const totalEntries = sections.filter(s => /^\d{4}-\d{2}-\d{2}/.test(s)).length;
+
+    return {
+      totalEntries,
+      sections,
+      categories: [...categories],
+      lastUpdated,
+    };
   }
 
   /**

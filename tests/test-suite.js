@@ -226,8 +226,10 @@ if (hasApiKey) {
   });
 
   runner.test('API: Stats tracking', async () => {
+    // Clear cache to ensure we make a real API call, not a cached response
+    client.clearCache();
     const before = client.getStats().requestCount;
-    await client.chat('Test', { model: TEST_MODEL });
+    await client.chat(`Stats test ${Date.now()}`, { model: TEST_MODEL });
     const after = client.getStats().requestCount;
     runner.assertEqual(after, before + 1, 'Should increment request count');
   });

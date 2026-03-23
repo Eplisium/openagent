@@ -54,7 +54,7 @@ export const CONFIG = {
   // Generation Parameters
   DEFAULT_PARAMS: {
     temperature: 0.7,
-    max_tokens: 8192,
+    max_tokens: 16384,
     top_p: 0.9,
     frequency_penalty: 0,
     presence_penalty: 0,
@@ -63,7 +63,7 @@ export const CONFIG = {
   // Agent-specific params (lower temp for more deterministic tool use)
   AGENT_PARAMS: {
     temperature: 0.3,
-    max_tokens: 8192,
+    max_tokens: 16384,
     top_p: 0.95,
   },
   
@@ -84,7 +84,7 @@ export const CONFIG = {
   
   // Tool Settings
   TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 300000,
-  MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS) || 30000,
+  MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS) || 80000,
 
   // Workspace Settings
   OPENAGENT_HOME: process.env.OPENAGENT_HOME || null,
@@ -104,7 +104,7 @@ export const CONFIG = {
   // ═══════════════════════════════════════════════════════════════
   FILE_READ_MAX_LINES: 500,
   FILE_READ_MAX_CHARS: 50000,
-  SEARCH_RESULTS_MAX_CHARS: 30000,
+  SEARCH_RESULTS_MAX_CHARS: 80000,
   SEARCH_MAX_MATCHES_PER_FILE: 3,
   DIFF_MAX_DIFFERENCES: 100,
 
@@ -131,9 +131,9 @@ export const CONFIG = {
   HISTORY_DISPLAY_LIMIT: 10,
   CONTEXT_WARNING_PERCENT: 60,
   CONTEXT_WARNING_UPPER_PERCENT: 70,
-  RETRY_MAX_TOKENS_INITIAL: 8192,
-  RETRY_MAX_TOKENS_SECOND: 4096,
-  RETRY_MAX_TOKENS_FINAL: 2048,
+  RETRY_MAX_TOKENS_INITIAL: 16384,
+  RETRY_MAX_TOKENS_SECOND: 8192,
+  RETRY_MAX_TOKENS_FINAL: 4096,
   AGENT_TOOL_TEMPERATURE: 0.3,
 
   // ═══════════════════════════════════════════════════════════════

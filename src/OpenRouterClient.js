@@ -976,13 +976,30 @@ export class OpenRouterClient {
    */
   processResponse(data, requestId, duration) {
     const choice = data.choices?.[0];
+    const rawContent = choice?.message?.content;
+    let toolCalls = choice?.message?.tool_calls || [];
+    let content = rawContent;
+
+    if ((!toolCalls || toolCalls.length === 0) && content && hasXmlToolCalls(content)) {
+      const parsed = parseXmlToolCalls(content);
+      if (parsed.toolCalls.length > 0) {
+        toolCalls = parsed.toolCalls.map(tc => ({
+          id: tc.id,
+          function: {
+            name: tc.name,
+            arguments: JSON.stringify(tc.arguments || {}),
+          },
+        }));
+        content = parsed.cleanContent || null;
+      }
+    }
     
     return {
       id: data.id,
       requestId,
-      content: choice?.message?.content,
+      content,
       role: choice?.message?.role,
-      toolCalls: choice?.message?.tool_calls,
+      toolCalls,
       finishReason: choice?.finish_reason,
       model: data.model,
       usage: data.usage,

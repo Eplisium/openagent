@@ -25,6 +25,9 @@ export const COMMAND_ALIASES = {
   'd': 'diff',
   'ex': 'export',
   'co': 'cost',
+  'ctx': 'context',
+  'ct': 'context',
+  'ss': 'session',
 };
 
 // ═══════════════════════════════════════════════════════════════════

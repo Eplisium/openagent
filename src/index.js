@@ -44,6 +44,7 @@ export * from './utils.js';
 // Agent system
 export { Agent } from './agent/Agent.js';
 export { AgentSession } from './agent/AgentSession.js';
+export { GitCheckpoint } from './agent/GitCheckpoint.js';
 export { MultiAgent, AGENT_ROLES } from './agent/MultiAgent.js';
 export { SubagentManager } from './agent/SubagentManager.js';
 export { SUBAGENT_SPECIALIZATIONS } from './agent/subagents/specializations.js';
@@ -64,6 +65,19 @@ export {
 export { MemoryManager } from './memory/MemoryManager.js';
 export { SkillManager, Skill } from './skills/SkillManager.js';
 export { HookManager, HookType } from './hooks/HookManager.js';
+
+// Protocols (A2A, AG-UI)
+export { A2AAgent, A2AClient, Task, TaskState, AgentCard } from './protocols/a2a.js';
+export { AGUIServer, AGUIEvent, EventType } from './protocols/agui.js';
+
+// Plugin System
+export { PluginManager } from './plugins/PluginManager.js';
+export { Plugin } from './plugins/Plugin.js';
+export { validateManifest } from './plugins/PluginManifest.js';
+
+// Tools (additional)
+export { createCheckpointTools } from './tools/checkpointTools.js';
+export { createPluginTools } from './tools/pluginTools.js';
 
 // CLI
 export { CLI } from './cli.js';

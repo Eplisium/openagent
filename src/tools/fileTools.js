@@ -5,18 +5,64 @@
 
 import fs from 'fs-extra';
 import path from 'path';
+import os from 'os';
 import { glob } from 'glob';
-import { createPathContext, resolveAgentPath } from '../paths.js';
+import { createPathContext, isProtectedInstallationPath, getInstallationDir } from '../paths.js';
 import { encodeImageToBase64, getImageMimeType, isVisionModel } from '../vision.js';
 import { CONFIG } from '../config.js';
+import { getCachedFile } from './fileCache.js';
 
-const PATH_PREFIX_NOTE = 'Supports absolute paths plus the special prefixes project:, workdir:, and workspace:.';
+const PATH_PREFIX_NOTE = 'Supports absolute paths plus the special prefixes project:, workdir:, workspace:, and openagent:.';
 
 
 
 export function createFileTools(options = {}) {
   const pathContext = createPathContext(options);
   const resolvePathForAgent = pathContext.resolvePath;
+  const getOpenAgentDir = pathContext.getOpenAgentDir;
+
+  async function buildMissingFileError(filePath, resolvedPath) {
+    let error = `File not found: ${resolvedPath}`;
+    const openAgentDir = getOpenAgentDir?.();
+    const requestedBaseName = path.basename(String(filePath || ''));
+
+    if (openAgentDir && requestedBaseName.toUpperCase() === 'MEMORY.MD') {
+      const projectMemoryPath = path.join(openAgentDir, 'memory', 'MEMORY.md');
+      if (projectMemoryPath !== resolvedPath && await fs.pathExists(projectMemoryPath)) {
+        error += `\nHint: project memory is usually stored at openagent:memory/MEMORY.md (${projectMemoryPath})`;
+      }
+    }
+
+    return error;
+  }
+
+  /**
+   * Validate that a resolved path is within allowed directories
+   */
+  function validatePath(resolvedPath) {
+    const baseDir = pathContext.getBaseDir();
+    const workspaceDir = pathContext.getWorkspaceDir();
+    const openAgentDir = getOpenAgentDir?.();
+    
+    const canonicalPath = path.resolve(resolvedPath);
+    const allowedDirs = [baseDir, workspaceDir, openAgentDir, os.homedir()].filter(Boolean).map(d => path.resolve(d));
+    
+    const isAllowed = allowedDirs.some(allowed => canonicalPath.startsWith(allowed));
+    if (!isAllowed && allowedDirs.length > 0) {
+      return { valid: false, error: `Path "${resolvedPath}" is outside allowed directories` };
+    }
+
+    // Block writes to OpenAgent's own installation directory (source code protection)
+    if (isProtectedInstallationPath(canonicalPath)) {
+      const installDir = getInstallationDir();
+      return {
+        valid: false,
+        error: `Path "${resolvedPath}" is inside the OpenAgent installation directory (${installDir}). You cannot write to OpenAgent's own source code. Use your project directory or the workspace instead.`
+      };
+    }
+
+    return { valid: true };
+  }
 
   const readFileTool = {
     name: 'read_file',
@@ -43,9 +89,15 @@ export function createFileTools(options = {}) {
     async execute({ path: filePath, startLine, endLine }) {
       try {
         const resolvedPath = resolvePathForAgent(filePath);
+        
+        // Validate path is within allowed directories (prevents path traversal)
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
 
         if (!await fs.pathExists(resolvedPath)) {
-          return { success: false, error: `File not found: ${resolvedPath}` };
+          return { success: false, error: await buildMissingFileError(filePath, resolvedPath) };
         }
 
         const stat = await fs.stat(resolvedPath);
@@ -53,7 +105,7 @@ export function createFileTools(options = {}) {
           return { success: false, error: `Path is a directory: ${resolvedPath}` };
         }
 
-        const content = await fs.readFile(resolvedPath, 'utf-8');
+        const { content } = await getCachedFile(resolvedPath);
         const lines = content.split('\n');
         const MAX_LINES = CONFIG.FILE_READ_MAX_LINES;
         const MAX_CHARS = CONFIG.FILE_READ_MAX_CHARS;
@@ -113,6 +165,13 @@ export function createFileTools(options = {}) {
     async execute({ path: filePath, content }) {
       try {
         const resolvedPath = resolvePathForAgent(filePath);
+        
+        // Validate path is within allowed directories
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
+        
         await fs.ensureDir(path.dirname(resolvedPath));
 
         const existed = await fs.pathExists(resolvedPath);
@@ -198,6 +257,13 @@ export function createFileTools(options = {}) {
     async execute({ path: filePath, find, replace, replaceAll = false, startLine, endLine, edits, useRegex = false, dryRun = false, undo = false, continueOnError = false }) {
       try {
         const resolvedPath = resolvePathForAgent(filePath);
+        
+        // Validate path is within allowed directories
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
+        
         const bakPath = resolvedPath + '.bak';
 
         // --- Undo mode: restore from .bak file ---
@@ -217,7 +283,7 @@ export function createFileTools(options = {}) {
         }
 
         if (!await fs.pathExists(resolvedPath)) {
-          return { success: false, error: `File not found: ${resolvedPath}` };
+          return { success: false, error: await buildMissingFileError(filePath, resolvedPath) };
         }
 
         let content = await fs.readFile(resolvedPath, 'utf-8');
@@ -469,6 +535,12 @@ export function createFileTools(options = {}) {
       try {
         const resolvedPath = resolvePathForAgent(dirPath);
 
+        // Validate path is within allowed directories
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
+
         if (!await fs.pathExists(resolvedPath)) {
           return { success: false, error: `Directory not found: ${resolvedPath}` };
         }
@@ -479,15 +551,20 @@ export function createFileTools(options = {}) {
         }
 
         const entries = [];
+        // Directories to skip (common noise that bloats results)
+        const SKIP_DIRS = new Set(['node_modules', '.git', '.openagent', 'dist', 'build', '.next', '.nuxt', '__pycache__', '.venv', 'venv', '.windop-backups']);
+        const MAX_ENTRIES = 500;
 
         if (recursive) {
           const pattern = path.join(resolvedPath, '**', '*').replace(/\\/g, '/');
           const files = await glob(pattern, {
             dot: includeHidden,
             maxDepth: maxDepth || undefined,
+            ignore: ['**/node_modules/**', '**/.git/**', '**/.openagent/**', '**/dist/**', '**/build/**', '**/.next/**', '**/__pycache__/**'],
           });
 
           for (const file of files) {
+            if (entries.length >= MAX_ENTRIES) break;
             try {
               const fileStat = await fs.stat(file);
               entries.push({
@@ -504,7 +581,9 @@ export function createFileTools(options = {}) {
           const items = await fs.readdir(resolvedPath);
 
           for (const item of items) {
+            if (entries.length >= MAX_ENTRIES) break;
             if (!includeHidden && item.startsWith('.')) continue;
+            if (SKIP_DIRS.has(item)) continue;
 
             try {
               const itemPath = path.join(resolvedPath, item);
@@ -525,6 +604,7 @@ export function createFileTools(options = {}) {
           return a.name.localeCompare(b.name);
         });
 
+        const skipped = entries.length >= MAX_ENTRIES ? ` (limited to ${MAX_ENTRIES} entries)` : '';
         return {
           success: true,
           path: resolvedPath,
@@ -534,6 +614,7 @@ export function createFileTools(options = {}) {
           total: entries.length,
           directories: entries.filter(e => e.type === 'directory').length,
           files: entries.filter(e => e.type === 'file').length,
+          note: skipped || undefined,
         };
       } catch (error) {
         return { success: false, error: error.message };
@@ -578,6 +659,12 @@ export function createFileTools(options = {}) {
     async execute({ path: searchPath, pattern, filePattern, caseSensitive = false, maxResults = 20, contextLines = 1 }) {
       try {
         const resolvedPath = resolvePathForAgent(searchPath);
+
+        // Validate path is within allowed directories
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
 
         if (!await fs.pathExists(resolvedPath)) {
           return { success: false, error: `Directory not found: ${resolvedPath}` };
@@ -693,6 +780,12 @@ export function createFileTools(options = {}) {
       try {
         const resolvedPath = resolvePathForAgent(filePath);
 
+        // Validate path is within allowed directories
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
+
         if (!await fs.pathExists(resolvedPath)) {
           return { success: false, error: `Path not found: ${resolvedPath}` };
         }
@@ -737,6 +830,12 @@ export function createFileTools(options = {}) {
       try {
         const resolvedPath = resolvePathForAgent(filePath);
         
+        // Validate path is within allowed directories
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
+        
         if (!await fs.pathExists(resolvedPath)) {
           return { success: false, error: `File not found: ${resolvedPath}` };
         }
@@ -768,6 +867,7 @@ export function createFileTools(options = {}) {
     name: 'delete_file',
     description: `Safely delete a file with confirmation. Requires confirm=true to actually delete. ${PATH_PREFIX_NOTE}`,
     category: 'file',
+    destructive: true,
     parameters: {
       type: 'object',
       properties: {
@@ -785,6 +885,12 @@ export function createFileTools(options = {}) {
     async execute({ path: filePath, confirm = false }) {
       try {
         const resolvedPath = resolvePathForAgent(filePath);
+
+        // Validate path is within allowed directories
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
 
         if (!await fs.pathExists(resolvedPath)) {
           return { success: false, error: `File not found: ${resolvedPath}` };
@@ -824,6 +930,7 @@ export function createFileTools(options = {}) {
     name: 'move_file',
     description: `Move or rename a file or directory. ${PATH_PREFIX_NOTE}`,
     category: 'file',
+    destructive: true,
     parameters: {
       type: 'object',
       properties: {
@@ -842,6 +949,16 @@ export function createFileTools(options = {}) {
       try {
         const resolvedSource = resolvePathForAgent(source);
         const resolvedDestination = resolvePathForAgent(destination);
+
+        // Validate paths are within allowed directories
+        const sourceValidation = validatePath(resolvedSource);
+        if (!sourceValidation.valid) {
+          return { success: false, error: sourceValidation.error };
+        }
+        const destValidation = validatePath(resolvedDestination);
+        if (!destValidation.valid) {
+          return { success: false, error: destValidation.error };
+        }
 
         if (!await fs.pathExists(resolvedSource)) {
           return { success: false, error: `Source not found: ${resolvedSource}` };
@@ -892,6 +1009,12 @@ export function createFileTools(options = {}) {
     async execute({ pattern, path: searchPath = '.', ignore = [] }) {
       try {
         const resolvedPath = resolvePathForAgent(searchPath);
+
+        // Validate path is within allowed directories
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
 
         if (!await fs.pathExists(resolvedPath)) {
           return { success: false, error: `Directory not found: ${resolvedPath}` };
@@ -966,6 +1089,16 @@ export function createFileTools(options = {}) {
       try {
         const resolvedFile1 = resolvePathForAgent(file1);
         const resolvedFile2 = resolvePathForAgent(file2);
+
+        // Validate paths are within allowed directories
+        const file1Validation = validatePath(resolvedFile1);
+        if (!file1Validation.valid) {
+          return { success: false, error: file1Validation.error };
+        }
+        const file2Validation = validatePath(resolvedFile2);
+        if (!file2Validation.valid) {
+          return { success: false, error: file2Validation.error };
+        }
 
         if (!await fs.pathExists(resolvedFile1)) {
           return { success: false, error: `File not found: ${resolvedFile1}` };
@@ -1071,6 +1204,12 @@ export function createFileTools(options = {}) {
       try {
         const resolvedPath = resolvePathForAgent(filePath);
 
+        // Validate path is within allowed directories
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
+
         if (!await fs.pathExists(resolvedPath)) {
           return { success: false, error: `File not found: ${resolvedPath}` };
         }
@@ -1169,6 +1308,13 @@ export function createFileTools(options = {}) {
     async execute({ path: filePath, pattern, replacement, flags = 'gi', dryRun = false, contextLines = 2 }) {
       try {
         const resolvedPath = resolvePathForAgent(filePath);
+        
+        // Validate path is within allowed directories
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
+        
         if (!await fs.pathExists(resolvedPath)) {
           return { success: false, error: `File not found: ${resolvedPath}` };
         }

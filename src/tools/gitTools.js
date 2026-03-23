@@ -27,10 +27,41 @@ function createPathContext(options = {}) {
   };
 }
 
+/**
+ * Sanitize git arguments to prevent command injection
+ */
+function sanitizeGitArgs(args) {
+  if (!args || typeof args !== 'string') {
+    throw new Error('Git arguments must be a non-empty string');
+  }
+  
+  // Reject arguments with shell metacharacters that could allow command injection
+  const dangerousPatterns = [
+    /;/,
+    /`/,
+    /\$\(/,
+    /\$:/,
+    />\s*\//,
+    /<\s*\//,
+    /\|\s*\w+$/,
+  ];
+  
+  for (const pattern of dangerousPatterns) {
+    if (pattern.test(args)) {
+      throw new Error(`Git arguments contain potentially dangerous pattern`);
+    }
+  }
+  
+  return args;
+}
+
 async function gitExec(args, cwd = '.', resolvePathForAgent = input => path.resolve(input)) {
+  // Validate and sanitize git arguments
+  const sanitizedArgs = sanitizeGitArgs(args);
+  
   const resolvedCwd = resolvePathForAgent(cwd);
   try {
-    const result = await execAsync(`git ${args}`, {
+    const result = await execAsync(`git ${sanitizedArgs}`, {
       cwd: resolvedCwd,
       maxBuffer: 5 * 1024 * 1024,
     });

@@ -24,6 +24,9 @@ export const DEFAULT_STATE = {
     autoSuggest: true,
     verboseErrors: true,
     renderMarkdown: true,
+    streaming: true,
+    showTokenUsage: true,
+    defaultModel: null,
   },
   stats: {
     totalTasks: 0,

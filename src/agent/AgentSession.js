@@ -23,7 +23,13 @@ import { SkillManager } from '../skills/SkillManager.js';
 import { HookManager } from '../hooks/HookManager.js';
 import { createMemoryTools } from '../tools/memoryTools.js';
 import { createSkillTools } from '../tools/skillTools.js';
-import chalk from 'chalk';
+import { createMcpTools } from '../tools/mcpTools.js';
+import { createA2ATools } from '../tools/a2aTools.js';
+import { createAGUITools } from '../tools/aguiTools.js';
+import { createGraphTools } from '../tools/graphTools.js';
+import { AutoGenBridge } from '../autogen/AutoGenBridge.js';
+import { WorkflowGraph, GraphState, END } from '../graph/index.js';
+import { FileCheckpointer as GraphFileCheckpointer } from '../graph/checkpointers/FileCheckpointer.js';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -69,6 +75,7 @@ export class AgentSession {
     const toolPathOptions = {
       getBaseDir: () => this.workingDir,
       getWorkspaceDir: () => this.activeWorkspace?.workspaceDir || null,
+      getOpenAgentDir: () => this.workspaceManager.openAgentDir,
     };
     
     // Create tool registry with all tools
@@ -108,6 +115,11 @@ export class AgentSession {
     const subagentTools = createSubagentTools(this.subagentManager);
     this.toolRegistry.registerAll(subagentTools);
 
+    // Register protocol tools (MCP, A2A, AG-UI)
+    this.toolRegistry.registerAll(createMcpTools({ baseDir: this.workingDir }));
+    this.toolRegistry.registerAll(createA2ATools());
+    this.toolRegistry.registerAll(createAGUITools());
+
     // Initialize memory manager
     this.memoryManager = new MemoryManager({
       workingDir: this.workingDir,
@@ -145,10 +157,158 @@ export class AgentSession {
       verbose: options.verbose !== false,
       streaming: options.streaming !== false,
       systemPrompt: options.systemPrompt || this.buildSystemPrompt(),
+      workspaceDir: this.activeWorkspace?.workspaceDir || this.workingDir,
     });
     
     // Set parent agent reference for subagents to inherit model
     this.subagentManager.parentAgent = this.agent;
+
+    // ─── Graph Workflow Engine ─────────────────────────────────────
+    // Registry of named workflow graphs that can be invoked by the agent
+    /** @type {Map<string, {graph: WorkflowGraph, compiled: CompiledGraph, stateSchema: object}>} */
+    this.workflowRegistry = new Map();
+    // Track active running graph executions by threadId
+    /** @type {Map<string, CompiledGraph>} */
+    this.activeGraphs = new Map();
+    // Graph checkpointer for persistence across sessions
+    this.graphCheckpointer = new GraphFileCheckpointer({
+      dir: path.join(this.workspaceManager.openAgentDir, 'graph-checkpoints'),
+    });
+
+    // Register graph management tools so the agent can run workflows
+    const graphTools = createGraphTools(this);
+    this.toolRegistry.registerAll(graphTools);
+
+    // ─── AutoGen Integration Layer ───────────────────────────────
+    this.autoGenBridge = new AutoGenBridge(this);
+    this.autoGenBridge.registerTools(this.toolRegistry);
+  }
+
+  // ─── Graph Workflow Methods ──────────────────────────────────────
+
+  /**
+   * Register a workflow graph by name so the agent can invoke it.
+   * @param {string} name - Unique workflow name (e.g., 'code-review', 'research')
+   * @param {WorkflowGraph} graph - The workflow graph builder instance
+   * @param {object} [options] - Compilation options
+   * @returns {{ graph, compiled, stateSchema }} The compiled graph ready for use
+   */
+  registerWorkflow(name, graph, options = {}) {
+    if (!(graph instanceof WorkflowGraph)) {
+      throw new TypeError('registerWorkflow requires a WorkflowGraph instance');
+    }
+    const compiled = graph.compile({
+      checkpointer: this.graphCheckpointer,
+      maxCycles: options.maxCycles || 50,
+      verbose: options.verbose !== false,
+    });
+
+    const entry = {
+      graph,
+      compiled,
+      stateSchema: graph.stateSchema,
+      registered: new Date().toISOString(),
+    };
+
+    this.workflowRegistry.set(name, entry);
+
+    // Listen for HITL pauses on this workflow
+    compiled.interruptManager.on('paused', ({ threadId, nodeName, state }) => {
+      // Track active graph so tools can find it
+      this.activeGraphs.set(threadId, compiled);
+    });
+
+    // Clean up active graphs when they complete
+    compiled.interruptManager.on('resumed', ({ threadId }) => {
+      // Still active after resume
+    });
+
+    return entry;
+  }
+
+  /**
+   * Get a registered workflow by name.
+   * @param {string} name
+   * @returns {{ graph, compiled, stateSchema } | null}
+   */
+  getWorkflow(name) {
+    return this.workflowRegistry.get(name) || null;
+  }
+
+  /**
+   * List all registered workflows.
+   * @returns {Array<{name: string, registered: string, nodeCount: number}>}
+   */
+  listWorkflows() {
+    const results = [];
+    for (const [name, entry] of this.workflowRegistry) {
+      results.push({
+        name,
+        registered: entry.registered,
+        nodeCount: entry.graph._nodes.size,
+      });
+    }
+    return results;
+  }
+
+  /**
+   * Run a registered workflow directly.
+   * @param {string} name - Workflow name
+   * @param {object} input - Initial state input
+   * @param {object} [options] - Runtime options (threadId, etc.)
+   * @returns {Promise<object>} Final graph state
+   */
+  async runWorkflow(name, input, options = {}) {
+    const entry = this.workflowRegistry.get(name);
+    if (!entry) {
+      throw new Error(`Workflow "${name}" not found. Available: ${[...this.workflowRegistry.keys()].join(', ')}`);
+    }
+
+    const threadId = options.threadId || `${name}_${Date.now()}`;
+    const config = {
+      threadId,
+      model: this.model,
+      workingDir: this.workingDir,
+      toolRegistry: this.toolRegistry,
+      parentAgent: this.agent,
+      abortController: options.abortController || new AbortController(),
+      agents: options.agents || {},
+    };
+
+    this.activeGraphs.set(threadId, entry.compiled);
+
+    try {
+      const result = await entry.compiled.invoke(input, config);
+      return result;
+    } finally {
+      this.activeGraphs.delete(threadId);
+    }
+  }
+
+  /**
+   * Resume a paused graph workflow.
+   * @param {string} threadId - The thread to resume
+   * @param {object|null} humanInput - Optional state update from human
+   * @returns {Promise<object>} Final graph state
+   */
+  async resumeWorkflow(threadId, humanInput = null) {
+    // Find the compiled graph for this thread
+    for (const [name, entry] of this.workflowRegistry) {
+      const state = await entry.compiled.getState(threadId);
+      if (state) {
+        this.activeGraphs.set(threadId, entry.compiled);
+        return entry.compiled.resume(threadId, humanInput);
+      }
+    }
+    throw new Error(`No active or paused workflow found for thread "${threadId}"`);
+  }
+
+  /**
+   * Get the active graph engine (for createGraphTools).
+   * Returns `this` since this AgentSession holds the registry and active graphs.
+   */
+  getGraphEngine() {
+    return this;
   }
 
   /**
@@ -158,10 +318,17 @@ export class AgentSession {
     memoryContext = memoryContext || '';
     skillContext = skillContext || '';
     const workspaceDir = this.activeWorkspace?.workspaceDir || path.join(this.workspaceManager.workspacesDir, '<created-on-run>');
+    const projectMemoryPath = this.memoryManager?.paths?.projectMemory || path.join(this.workspaceManager.openAgentDir, 'memory', 'MEMORY.md');
+    const platformName = process.platform;
+    const pathStyle = platformName === 'win32' ? 'Windows-style' : 'POSIX-style';
     const template = getAgentSystemPromptTemplate();
     return template
       .replace(/\{\{WORKING_DIR\}\}/g, this.workingDir)
       .replace(/\{\{WORKSPACE_DIR\}\}/g, workspaceDir)
+      .replace(/\{\{OPENAGENT_DIR\}\}/g, this.workspaceManager.openAgentDir)
+      .replace(/\{\{PROJECT_MEMORY_PATH\}\}/g, projectMemoryPath)
+      .replace(/\{\{PLATFORM_NAME\}\}/g, platformName)
+      .replace(/\{\{PATH_STYLE\}\}/g, pathStyle)
       .replace(/\{\{MEMORY_CONTEXT\}\}/g, memoryContext)
       .replace(/\{\{SKILL_CONTEXT\}\}/g, skillContext);
   }
@@ -171,14 +338,22 @@ export class AgentSession {
    */
   async buildSystemPromptAsync() {
     let memoryContext = '';
-    try { memoryContext = await this.memoryManager.getContext(); } catch (err) {}
+    try { 
+      memoryContext = await this.memoryManager.getContext(); 
+    } catch (err) {
+      // Log memory context loading errors but don't fail the whole prompt
+      console.warn('[AgentSession] Failed to load memory context:', err.message);
+    }
     let skillContext = '';
     try {
       const skillDesc = await this.skillManager.buildToolDescription();
       if (skillDesc) {
         skillContext = "\n## 🎯 Available Skills\n\n" + skillDesc + "\n\nUse the `use_skill` tool to activate a skill when relevant to the task.";
       }
-    } catch (err) {}
+    } catch (err) {
+      // Log skill context loading errors but don't fail the whole prompt
+      console.warn('[AgentSession] Failed to load skill context:', err.message);
+    }
     return this.buildSystemPrompt(memoryContext, skillContext);
   }
 
@@ -238,7 +413,6 @@ export class AgentSession {
     } catch (error) {
       // Run stop hooks on error
       await this.hookManager.runStop({ reason: 'error', error: error.message });
-      console.error(chalk.red(`\n❌ Error: ${error.message}`));
       throw error;
     }
   }
@@ -712,6 +886,12 @@ export class AgentSession {
       tools: this.toolRegistry.list().map(t => t.name),
       subagentStats: this.subagentManager.getStats(),
       paths: this.workspaceManager.getInfo(),
+      graphWorkflows: this.listWorkflows(),
+      activeGraphThreads: [...this.activeGraphs.keys()],
+      autoGen: {
+        groupChats: this.autoGenBridge?.groupChats?.size || 0,
+        teams: this.autoGenBridge?.teams?.size || 0,
+      },
     };
   }
 }

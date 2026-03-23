@@ -1,6 +1,31 @@
 import inquirer from 'inquirer';
 
-const TERMINAL_RESET_DELAY_MS = 10;
+const TERMINAL_RESET_DELAY_MS = 20;
+
+function drainBufferedTerminators(input) {
+  if (typeof input?.read !== 'function') {
+    return;
+  }
+
+  while (true) {
+    const chunk = input.read();
+    if (chunk === null) {
+      return;
+    }
+
+    const text = typeof chunk === 'string'
+      ? chunk
+      : Buffer.isBuffer(chunk)
+        ? chunk.toString('utf8')
+        : String(chunk);
+    const preserved = text.replace(/^[\r\n]+/, '');
+
+    if (preserved.length > 0) {
+      input.unshift?.(preserved);
+      return;
+    }
+  }
+}
 
 /**
  * Reset stdin after raw-mode widgets before launching other interactive prompts.
@@ -23,13 +48,10 @@ export async function resetTerminalInput(input = process.stdin) {
     input.resume?.();
   } catch {}
 
-  if (typeof input.read === 'function') {
-    while (input.read() !== null) {
-      // Drain buffered input, including stray CR/LF from the previous raw-mode prompt.
-    }
-  }
+  drainBufferedTerminators(input);
 
   await new Promise((resolve) => setTimeout(resolve, TERMINAL_RESET_DELAY_MS));
+  drainBufferedTerminators(input);
 }
 
 export async function promptWithTerminalReset(questions, {

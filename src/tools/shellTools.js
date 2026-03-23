@@ -16,6 +16,77 @@ const defaultProcessManager = new ProcessManager();
 const execAsync = promisify(execCb);
 const PATH_PREFIX_NOTE = 'Supports project:, workdir:, and workspace: prefixes.';
 
+/**
+ * Sanitize command to prevent shell injection
+ * 
+ * Only blocks TRULY dangerous patterns — allows normal PowerShell syntax.
+ * This is a Windows-first implementation that understands PowerShell semantics.
+ */
+function sanitizeCommand(command) {
+  if (!command || typeof command !== 'string') {
+    throw new Error('Command must be a non-empty string');
+  }
+  
+  // Normalize for checking
+  const lower = command.toLowerCase().trim();
+  
+  // ═══════════════════════════════════════════════════════════════
+  // 🚫 HARD BLOCKS — Truly dangerous, never allow
+  // ═══════════════════════════════════════════════════════════════
+  
+  // Destructive operations on root filesystem
+  if (/rm\s+-rf\s+[\/\\]\s*$/i.test(lower)) return block(command, 'Recursive delete on root');
+  if (/rm\s+-r\s+[\/\\]\s*$/i.test(lower)) return block(command, 'Recursive delete on root');
+  
+  // Format drive (with force flags)
+  if (/format\s+[a-z]:\s*\/[yq]/i.test(lower)) return block(command, 'Format drive with force');
+  
+  // System shutdown/reboot (with force flags)
+  if (/\bshutdown\s+\/[sf]\b/i.test(lower)) return block(command, 'Force shutdown');
+  if (/restart-computer\s+-force/i.test(lower)) return block(command, 'Force restart');
+  
+  // Fork bombs
+  if (/:\(\)\s*\{/.test(lower)) return block(command, 'Fork bomb');
+  if (/:\(\)\|:/.test(lower)) return block(command, 'Fork bomb');
+  
+  // Infinite loops that consume resources
+  if (/while\s*\(\s*true\s*\)\s*\{.*write/i.test(lower)) return block(command, 'Infinite write loop');
+  if (/while\s*\(\s*1\s*\)\s*\{.*write/i.test(lower)) return block(command, 'Infinite write loop');
+  
+  // Download and execute (malware pattern) — but allow Invoke-WebRequest/Invoke-RestMethod for data
+  if (/iex\s*\(\s*(new-object\s+net\.webclient|irm|curl.*\|\s*iex)/i.test(lower)) {
+    return block(command, 'Download and execute');
+  }
+  if (/Invoke-Expression\s*\(\s*(New-Object\s+Net\.WebClient|irm|curl)/i.test(lower)) {
+    return block(command, 'Download and execute');
+  }
+  
+  // Pipe to shell from network
+  if (/\|\s*(bash|sh)\s*$/i.test(lower)) return block(command, 'Pipe to shell');
+  if (/\|\s*iex\s*$/i.test(lower)) return block(command, 'Pipe to Invoke-Expression');
+  
+  // Mass file deletion
+  if (/remove-item\s+.*-recurse\s+-force/i.test(lower)) return block(command, 'Mass delete with force');
+  if (/rm\s+-rf\s+\*/i.test(lower)) return block(command, 'Delete all files');
+  
+  // Registry destruction
+  if (/remove-item\s+.*HKLM:\\SYSTEM/i.test(lower)) return block(command, 'Delete system registry');
+  if (/remove-item\s+.*HKLM:\\SOFTWARE/i.test(lower)) return block(command, 'Delete software registry');
+  
+  // Process killing sprees
+  if (/stop-process\s+-name\s+\*/i.test(lower)) return block(command, 'Kill all processes');
+  if (/taskkill\s+\/f\s+\/im\s+\*/i.test(lower)) return block(command, 'Kill all processes');
+  
+  // All clear — command is safe
+  return command;
+}
+
+/**
+ * Block a command with a reason
+ */
+function block(command, reason) {
+  throw new Error(`🛡️ Blocked: ${reason}. Command: ${command.slice(0, 100)}${command.length > 100 ? '...' : ''}`);
+}
 
 /**
  * Detect if a command needs PowerShell
@@ -79,12 +150,15 @@ export function createShellTools(options = {}) {
     },
     async execute({ command, cwd = '.', timeout = CONFIG.EXEC_DEFAULT_TIMEOUT_MS, env = {} }) {
       try {
+        // Validate and sanitize command
+        const sanitizedCommand = sanitizeCommand(command);
+        
         const resolvedCwd = resolvePathForAgent(cwd);
 
-        const isPowerShell = detectPowerShell(command);
+        const isPowerShell = detectPowerShell(sanitizedCommand);
         const shell = isPowerShell ? 'powershell' : undefined;
 
-        const result = await execAsync(command, {
+        const result = await execAsync(sanitizedCommand, {
           cwd: resolvedCwd,
           timeout,
           env: buildToolEnv(env),
@@ -142,8 +216,11 @@ export function createShellTools(options = {}) {
     },
     async execute({ command, cwd = '.', label }) {
       try {
+        // Validate and sanitize command
+        const sanitizedCommand = sanitizeCommand(command);
+        
         const resolvedCwd = resolvePathForAgent(cwd);
-        const proc = spawn(command, [], {
+        const proc = spawn(sanitizedCommand, [], {
           cwd: resolvedCwd,
           shell: true,
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -156,13 +233,15 @@ export function createShellTools(options = {}) {
         processManager.add(procLabel, {
           pid,
           proc,
-          command,
+          command: sanitizedCommand,
           cwd: resolvedCwd,
           startTime: Date.now(),
           label: procLabel,
         });
 
         let output = '';
+        
+        // Handle stdout
         proc.stdout.on('data', data => {
           output += data.toString();
           if (output.length > CONFIG.BG_PROCESS_OUTPUT_LIMIT) output = output.slice(-CONFIG.BG_PROCESS_OUTPUT_TRIM);
@@ -171,6 +250,8 @@ export function createShellTools(options = {}) {
             p.output = output;
           }
         });
+        
+        // Handle stderr
         proc.stderr.on('data', data => {
           output += data.toString();
           if (output.length > CONFIG.BG_PROCESS_OUTPUT_LIMIT) output = output.slice(-CONFIG.BG_PROCESS_OUTPUT_TRIM);
@@ -179,12 +260,31 @@ export function createShellTools(options = {}) {
             p.output = output;
           }
         });
+        
+        // Handle process errors
+        proc.on('error', err => {
+          const p = processManager.get(procLabel);
+          if (p) {
+            p.error = err.message;
+            p.output = (p.output || '') + `\n[ERROR] ${err.message}`;
+          }
+        });
+        
+        // Handle process exit
+        proc.on('exit', (code, signal) => {
+          const p = processManager.get(procLabel);
+          if (p) {
+            p.exitCode = code;
+            p.signal = signal;
+            p.running = false;
+          }
+        });
 
         return {
           success: true,
           pid,
           label: procLabel,
-          command,
+          command: sanitizedCommand,
           cwd: resolvedCwd,
           message: `Process started with PID ${pid}`,
         };

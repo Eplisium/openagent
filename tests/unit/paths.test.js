@@ -12,6 +12,7 @@ import {
   OPENAGENT_WORKSPACE_PREFIX,
   OPENAGENT_PROJECT_PREFIX,
   OPENAGENT_WORKDIR_PREFIX,
+  OPENAGENT_HOME_PREFIX,
 } from '../../src/paths.js';
 import path from 'path';
 
@@ -46,10 +47,24 @@ describe('resolveAgentPath', () => {
     expect(result).toBe(path.resolve(baseDir, 'src/index.js'));
   });
 
+  it('should resolve openagent: prefix', () => {
+    const result = resolveAgentPath(`${OPENAGENT_HOME_PREFIX}memory/MEMORY.md`, {
+      baseDir,
+      openAgentDir: '/home/user/project/.openagent',
+    });
+    expect(result).toBe(path.resolve('/home/user/project/.openagent', 'memory/MEMORY.md'));
+  });
+
   it('should throw for workspace: when no workspaceDir set', () => {
     expect(() => {
       resolveAgentPath('workspace:notes.md', { baseDir });
     }).toThrow('No task workspace');
+  });
+
+  it('should throw for openagent: when no openAgentDir set', () => {
+    expect(() => {
+      resolveAgentPath(`${OPENAGENT_HOME_PREFIX}memory/MEMORY.md`, { baseDir });
+    }).toThrow('No OpenAgent home directory');
   });
 
   it('should handle . as current directory', () => {
@@ -81,14 +96,17 @@ describe('createPathContext', () => {
     const ctx = createPathContext({
       baseDir: '/project',
       workspaceDir: '/workspace',
+      openAgentDir: '/project/.openagent',
     });
 
     expect(typeof ctx.resolvePath).toBe('function');
     expect(typeof ctx.getBaseDir).toBe('function');
     expect(typeof ctx.getWorkspaceDir).toBe('function');
+    expect(typeof ctx.getOpenAgentDir).toBe('function');
 
     expect(ctx.getBaseDir()).toBe(path.resolve('/project'));
     expect(ctx.getWorkspaceDir()).toBe(path.resolve('/workspace'));
+    expect(ctx.getOpenAgentDir()).toBe(path.resolve('/project/.openagent'));
   });
 
   it('should support function-based getters', () => {

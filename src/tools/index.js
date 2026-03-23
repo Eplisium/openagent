@@ -11,6 +11,10 @@ export { createWebTools, webTools, webSearchTool, readWebpageTool, fetchUrlTool 
 export { createGitTools, gitTools, gitStatusTool, gitLogTool, gitDiffTool, gitAddTool, gitCommitTool, gitPushTool, gitPullTool, gitBranchTool, gitInfoTool } from './gitTools.js';
 export { createSubagentTools } from './subagentTools.js';
 export { createTaskTools } from './taskTools.js';
+export { createMcpTools } from './mcpTools.js';
+export { createA2ATools } from './a2aTools.js';
+export { createAGUITools } from './aguiTools.js';
+export { createGraphTools } from './graphTools.js';
 
 // Local imports for factory functions
 import { ToolRegistry as _ToolRegistry } from './ToolRegistry.js';
@@ -18,6 +22,10 @@ import { createFileTools as _createFileTools } from './fileTools.js';
 import { createShellTools as _createShellTools } from './shellTools.js';
 import { createGitTools as _createGitTools } from './gitTools.js';
 import { webTools as _webTools } from './webTools.js';
+import { createMcpTools as _createMcpTools } from './mcpTools.js';
+import { createA2ATools as _createA2ATools } from './a2aTools.js';
+import { createAGUITools as _createAGUITools } from './aguiTools.js';
+import { createGraphTools as _createGraphTools } from './graphTools.js';
 
 /**
  * Create a fully-configured tool registry
@@ -33,6 +41,9 @@ export function createDefaultRegistry(options = {}) {
     ...shellTools,
     ..._webTools,
     ...gitTools,
+    ..._createMcpTools(options),
+    ..._createA2ATools(options),
+    ..._createAGUITools(options),
   ]);
   
   if (options.permissions) {
