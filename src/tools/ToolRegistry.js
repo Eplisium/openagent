@@ -72,6 +72,10 @@ export class ToolRegistry {
       timeout: tool.timeout || this.defaultTimeout,
     });
     
+    // Invalidate cached definitions
+    this._cachedFunctionDefs = null;
+    this._cachedToolDefs = null;
+    
     // Initialize usage count
     if (!this.stats.toolUsageCount[tool.name]) {
       this.stats.toolUsageCount[tool.name] = 0;
@@ -96,9 +100,10 @@ export class ToolRegistry {
   }
 
   /**
-   * Get all tools as OpenRouter function definitions
+   * Get all tools as OpenRouter function definitions — cached until tools change
    */
   getFunctionDefinitions() {
+    if (this._cachedFunctionDefs) return this._cachedFunctionDefs;
     const defs = [];
     for (const [name, tool] of this.tools) {
       if (tool.enabled !== false) {
@@ -112,13 +117,15 @@ export class ToolRegistry {
         });
       }
     }
+    this._cachedFunctionDefs = defs;
     return defs;
   }
 
   /**
-   * Get tool definitions in simplified format
+   * Get tool definitions in simplified format — cached until tools change
    */
   getToolDefinitions() {
+    if (this._cachedToolDefs) return this._cachedToolDefs;
     const defs = [];
     for (const [name, tool] of this.tools) {
       if (tool.enabled !== false) {
@@ -129,6 +136,7 @@ export class ToolRegistry {
         });
       }
     }
+    this._cachedToolDefs = defs;
     return defs;
   }
 
@@ -241,15 +249,21 @@ export class ToolRegistry {
   }
   
   /**
-   * Execute tool with timeout
+   * Execute tool with timeout — uses AbortController when tool supports it
    */
   async executeWithTimeout(tool, args, timeout) {
-    return Promise.race([
-      tool.execute(args),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error(`Tool execution timeout (${timeout}ms)`)), timeout)
-      ),
-    ]);
+    let timer = null;
+    try {
+      const result = await Promise.race([
+        tool.execute(args),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Tool execution timeout (${timeout}ms)`)), timeout);
+        }),
+      ]);
+      return result;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
   }
   
   /**

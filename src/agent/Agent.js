@@ -185,6 +185,39 @@ When you have completed the task, provide a clear summary of what was done.`;
       : `iteration ${this.iterationCount}`;
   }
 
+  /**
+   * Prepare messages for LLM: compact if needed, allocate context budget,
+   * emit warnings. Returns the optimized message array.
+   * Shared by both streaming and non-streaming paths to eliminate duplication.
+   */
+  async prepareMessagesForLLM() {
+    await this.maybeCompactContext();
+
+    const allocResult = this.contextAllocator.allocate(
+      this.messages,
+      (msg) => this.estimateMessageTokens(msg),
+      this.workingSet
+    );
+    if (allocResult.compressed) {
+      if (this.shouldEmitVerboseLogs()) {
+        logger.debug('Context allocator active', allocResult.stats);
+      }
+      this.emitStatus('context_allocate',
+        `Context optimized: ${allocResult.stats.dropped} messages deferred (budget ${allocResult.stats.usedPercent}%)`);
+    }
+
+    // Proactive context warning at 60% usage
+    const ctxStats = this.getContextStats();
+    if (ctxStats.percent > 60 && ctxStats.percent <= 70) {
+      const warnMsg = `Context usage at ${ctxStats.percent}% (~${this.formatCompactNumber(ctxStats.usedTokens)} tokens). Consider wrapping up soon.`;
+      if (!this.emitStatus('context_warning', warnMsg) && this.shouldEmitVerboseLogs()) {
+        logger.warn(warnMsg);
+      }
+    }
+
+    return allocResult.messages;
+  }
+
   recordToolRound(toolCalls) {
     const signature = JSON.stringify(
       toolCalls.map(toolCall => ({
@@ -235,15 +268,19 @@ When you have completed the task, provide a clear summary of what was done.`;
 
     if (message.content) {
       if (typeof message.content === 'string') {
-        total += estimateTokens(message.content);
+        // Fast path: use content length as proxy for very short strings (avoids regex)
+        if (message.content.length < 50) {
+          total += Math.ceil(message.content.length / 3.5);
+        } else {
+          total += estimateTokens(message.content);
+        }
       } else if (Array.isArray(message.content)) {
         // Multimodal content (text + images)
         for (const part of message.content) {
           if (part.type === 'text' && part.text) {
             total += estimateTokens(part.text);
           } else if (part.type === 'image_url') {
-            // Images cost ~85 tokens for low-res, ~765 for high-res
-            total += 85;
+            total += CONFIG.IMAGE_TOKEN_COST || 85;
           }
         }
       } else {
@@ -256,7 +293,7 @@ When you have completed the task, provide a clear summary of what was done.`;
     }
 
     // Add overhead per message (~4 tokens for role/metadata)
-    total += 4;
+    total += CONFIG.MESSAGE_OVERHEAD_TOKENS || 4;
 
     // Cache on the message object itself
     message._tokenEstimate = total;
@@ -264,12 +301,14 @@ When you have completed the task, provide a clear summary of what was done.`;
   }
 
   recalculateEstimatedTokens() {
-    this.cachedEstimatedTokens = this.messages.reduce(
-      (sum, message) => sum + this.estimateMessageTokens(message),
-      0
-    );
-    this.contextStats.estimatedTokens = this.cachedEstimatedTokens;
-    return this.cachedEstimatedTokens;
+    // Use for-loop instead of reduce — avoids function call overhead per message
+    let sum = 0;
+    for (let i = 0; i < this.messages.length; i++) {
+      sum += this.estimateMessageTokens(this.messages[i]);
+    }
+    this.cachedEstimatedTokens = sum;
+    this.contextStats.estimatedTokens = sum;
+    return sum;
   }
 
   setMessages(messages = []) {
@@ -328,16 +367,18 @@ When you have completed the task, provide a clear summary of what was done.`;
       ? Math.min(100, Math.round((usedTokens / safeMax) * 100))
       : 0;
 
-    return {
-      usedTokens,
-      maxTokens: safeMax,
-      percent,
-      compactThreshold: this.compactThreshold,
-      compactions: this.contextStats.compactions,
-      lastPromptTokens: this.contextStats.lastPromptTokens,
-      lastCompletionTokens: this.contextStats.lastCompletionTokens,
-      lastTotalTokens: this.contextStats.lastTotalTokens,
-    };
+    // Reuse a single stats object to reduce GC pressure
+    this._ctxStatsCache = this._ctxStatsCache || {};
+    const stats = this._ctxStatsCache;
+    stats.usedTokens = usedTokens;
+    stats.maxTokens = safeMax;
+    stats.percent = percent;
+    stats.compactThreshold = this.compactThreshold;
+    stats.compactions = this.contextStats.compactions;
+    stats.lastPromptTokens = this.contextStats.lastPromptTokens;
+    stats.lastCompletionTokens = this.contextStats.lastCompletionTokens;
+    stats.lastTotalTokens = this.contextStats.lastTotalTokens;
+    return stats;
   }
 
   formatCompactNumber(value) {
@@ -360,88 +401,81 @@ When you have completed the task, provide a clear summary of what was done.`;
    * Produces a structured summary preserving ~80% of useful information in ~20% of tokens.
    * Format: TASKS, FILES, DECISIONS, ERRORS, CODE_CHANGES, CURRENT_STATE
    */
-  buildCompactionSummary(olderMessages = []) {
-    const priorUserMessages = olderMessages
-      .filter(message => message.role === 'user' && message.content)
-      .slice(-5);
-    const recentHistory = this.history.slice(-8);
-    const toolResults = olderMessages.filter(m => m.role === 'tool' && m.content);
+  // Pre-compiled regexes for compaction (avoid recompilation)
+  static _filePathRegex = /(?:^|\s)([A-Za-z]:\\[^\s"]+|\/[^\s"]+|\.\/[^\s"]+|[a-zA-Z_][\w./\\-]*\.[a-zA-Z]{2,})/g;
+  static _decisionRegex = /(?:decided|chose|going with|will use|switching to|changed to|fixed by|resolved by|solution:|approach:)/i;
+  static _decisionSentenceRegex = /(?:decided|chose|going with|will use|switching to|changed to|fixed by|resolved by|solution|approach)/i;
+  static _errorExtractRegex = /"error"\s*:\s*"([^"]{3,100})/;
+  static _writeTools = new Set(['write_file', 'edit_file', 'search_and_replace']);
 
-    // Extract structured knowledge from messages
+  buildCompactionSummary(olderMessages = []) {
+    const priorUserMessages = [];
     const filesMentioned = new Set();
     const decisions = [];
     const errors = [];
     const codeChanges = [];
     const toolsUsed = {};
+    const recentHistory = this.history.slice(-8);
 
-    // Scan all messages for file paths
-    const filePathRegex = /(?:^|\s)([A-Za-z]:\\[^\s"]+|\/[^\s"]+|\.\/[^\s"]+|[a-zA-Z_][\w./\\-]*\.[a-zA-Z]{2,})/g;
-    for (const msg of olderMessages) {
-      const text = msg.content || JSON.stringify(msg.content || '');
+    // ── Single-pass extraction from messages ──
+    for (let i = 0; i < olderMessages.length; i++) {
+      const msg = olderMessages[i];
+      const content = msg.content || '';
+      const text = typeof content === 'string' ? content : JSON.stringify(content || '');
+
+      // Collect user messages (keep last 5)
+      if (msg.role === 'user' && content) {
+        priorUserMessages.push(msg);
+        if (priorUserMessages.length > 5) priorUserMessages.shift();
+      }
+
+      // Scan for file paths
+      Agent._filePathRegex.lastIndex = 0;
       let match;
-      while ((match = filePathRegex.exec(text)) !== null) {
+      while ((match = Agent._filePathRegex.exec(text)) !== null) {
         const p = match[1];
         if (p.length > 3 && p.length < 200 && !p.startsWith('http')) {
           filesMentioned.add(p);
         }
       }
-    }
 
-    // Scan tool results for errors
-    for (const tr of toolResults) {
-      const content = tr.content || '';
-      if (content.includes('"success":false') || content.includes('"error"')) {
-        const errorMatch = content.match(/"error"\s*:\s*"([^"]{3,100})/);
-        if (errorMatch) {
-          errors.push(errorMatch[1]);
+      // Scan tool results for errors
+      if (msg.role === 'tool' && content) {
+        if (text.includes('"success":false') || text.includes('"error"')) {
+          const errorMatch = text.match(Agent._errorExtractRegex);
+          if (errorMatch) errors.push(errorMatch[1]);
         }
-      }
-    }
-
-    // Scan tool results for code changes (write_file, edit_file success)
-    for (const tr of toolResults) {
-      const content = tr.content || '';
-      if (content.includes('"success":true')) {
-        // Check if the preceding assistant message had a tool call for write/edit
-        const callIdx = olderMessages.indexOf(tr);
-        if (callIdx > 0) {
-          const prevAssistant = olderMessages[callIdx - 1];
+        // Scan for code changes (write_file, edit_file success)
+        if (text.includes('"success":true') && i > 0) {
+          const prevAssistant = olderMessages[i - 1];
           if (prevAssistant?.role === 'assistant' && prevAssistant.tool_calls) {
             for (const tc of prevAssistant.tool_calls) {
               const name = tc.function?.name || '';
-              if (['write_file', 'edit_file', 'search_and_replace'].includes(name)) {
+              if (Agent._writeTools.has(name)) {
                 let args = {};
                 try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
-                const desc = args.path
-                  ? `${name}: ${args.path}`
-                  : `${name} (no path in args)`;
-                codeChanges.push(desc);
+                codeChanges.push(args.path ? `${name}: ${args.path}` : `${name} (no path in args)`);
               }
             }
           }
         }
       }
-    }
 
-    // Track tool usage
-    for (const entry of recentHistory) {
-      for (const tool of entry.toolCalls) {
-        toolsUsed[tool] = (toolsUsed[tool] || 0) + 1;
+      // Extract decisions from assistant messages
+      if (msg.role === 'assistant' && typeof content === 'string' && Agent._decisionRegex.test(content)) {
+        const sentences = content.split(/[.!?\n]/).filter(s => s.trim().length > 10 && s.trim().length < 200);
+        for (const s of sentences) {
+          if (Agent._decisionSentenceRegex.test(s)) {
+            decisions.push(s.trim().substring(0, 150));
+          }
+        }
       }
     }
 
-    // Extract decisions from assistant messages with content
-    for (const msg of olderMessages) {
-      if (msg.role === 'assistant' && msg.content && typeof msg.content === 'string') {
-        const content = msg.content;
-        if (content.match(/(?:decided|chose|going with|will use|switching to|changed to|fixed by|resolved by|solution:|approach:)/i)) {
-          const sentences = content.split(/[.!?\n]/).filter(s => s.trim().length > 10 && s.trim().length < 200);
-          for (const s of sentences) {
-            if (s.match(/(?:decided|chose|going with|will use|switching to|changed to|fixed by|resolved by|solution|approach)/i)) {
-              decisions.push(s.trim().substring(0, 150));
-            }
-          }
-        }
+    // Track tool usage from history
+    for (const entry of recentHistory) {
+      for (const tool of entry.toolCalls) {
+        toolsUsed[tool] = (toolsUsed[tool] || 0) + 1;
       }
     }
 
@@ -772,9 +806,10 @@ Task: ${userInput}`;
       })),
     });
 
-    // Add tool results with large-result caching
+    // Add tool results with large-result caching — serialize once, reuse
     for (const result of toolResults) {
-      let content = JSON.stringify(result.result);
+      // Reuse pre-serialized content if available (from executeToolCallsEnhanced)
+      let content = result._serializedContent || JSON.stringify(result.result);
 
       if (content.length > this.maxToolResultChars) {
         const original = content;
@@ -881,29 +916,8 @@ Task: ${userInput}`;
       if (this.shouldEmitVerboseLogs()) logger.debug(this.formatIterationLabel());
       if (this.onIterationStart) this.onIterationStart(this.iterationCount);
 
-      await this.maybeCompactContext();
-
-      // Hierarchical context allocation: optimize message list if over budget
-      const allocResult = this.contextAllocator.allocate(
-        this.messages,
-        (msg) => this.estimateMessageTokens(msg),
-        this.workingSet
-      );
-      if (allocResult.compressed) {
-        if (this.shouldEmitVerboseLogs()) {
-          logger.debug('Context allocator active', allocResult.stats);
-        }
-        this.emitStatus('context_allocate',
-          `Context optimized: ${allocResult.stats.dropped} messages deferred (budget ${allocResult.stats.usedPercent}%)`);
-      }
-      const messagesForLLM = allocResult.messages;
-
-      // Proactive context warning
-      const ctxStats = this.getContextStats();
-      if (ctxStats.percent > 60 && ctxStats.percent <= 70) {
-        const warnMsg = `Context usage at ${ctxStats.percent}% (~${this.formatCompactNumber(ctxStats.usedTokens)} tokens). Consider wrapping up soon.`;
-        if (!this.emitStatus('context_warning', warnMsg) && this.shouldEmitVerboseLogs()) logger.warn(warnMsg);
-      }
+      // Prepare messages: compact + allocate + warnings (shared logic)
+      const messagesForLLM = await this.prepareMessagesForLLM();
 
       // ── Streaming iteration ──
       let fullContent = '';
@@ -1394,14 +1408,16 @@ Task: ${userInput}`;
     
     // Expanded heuristic: all read-only tools can run in parallel
     const readOnlyTools = new Set([
-      'read_file', 'list_directory', 'search_in_files', 'get_file_info',
+      'read_file', 'list_directory', 'search_files', 'search_in_file', 'get_file_info',
       'find_files', 'diff_files', 'preview_edit', 'read_image',
-      'git_status', 'git_log', 'git_diff', 'git_info',
+      'git_status', 'git_log', 'git_diff', 'git_info', 'git_branch',
       'web_search', 'read_webpage', 'fetch_url',
       'system_info', 'process_status',
-      'get_memory', 'list_skills',
-      'get_task_status', 'get_progress_report',
-      'subagent_status', 'get_subagent_messages', 'get_shared_context',
+      'get_memory', 'list_skills', 'list_memories',
+      'get_task_status', 'get_progress_report', 'list_tasks',
+      'subagent_status', 'get_subagent_messages', 'get_shared_context', 'list_subagents',
+      'list_workflows', 'get_workflow_state',
+      'list_mcp_tools', 'list_a2a_agents',
     ]);
     for (const toolCall of toolCalls) {
       if (readOnlyTools.has(toolCall.name)) {
@@ -1480,10 +1496,34 @@ Task: ${userInput}`;
       }
     }
 
-    // Remaining non-file-write dependent tools run sequentially
-    for (const toolCall of sequentialTools) {
-      const result = await this.executeSingleToolCall(toolCall);
-      results.push(result);
+    // Execute sequential tools in parallel where safe (different file targets)
+    const sequentialFileTools = [];
+    const otherSequential = [];
+    const fileToolNames = new Set(['exec', 'process', 'process_action']);
+    for (const tc of sequentialTools) {
+      if (fileToolNames.has(tc.name) && tc.arguments?.cwd) {
+        sequentialFileTools.push(tc);
+      } else {
+        otherSequential.push(tc);
+      }
+    }
+    // Shell tools with different cwd can run in parallel
+    if (sequentialFileTools.length > 1) {
+      const shellResults = await Promise.allSettled(
+        sequentialFileTools.map(tc => this.executeSingleToolCall(tc))
+      );
+      for (let i = 0; i < shellResults.length; i++) {
+        results.push(shellResults[i].status === 'fulfilled' ? shellResults[i].value : {
+          toolCallId: sequentialFileTools[i].id, toolName: sequentialFileTools[i].name,
+          args: sequentialFileTools[i].arguments, result: { success: false, error: shellResults[i].reason?.message || 'Failed' },
+        });
+      }
+    } else if (sequentialFileTools.length === 1) {
+      results.push(await this.executeSingleToolCall(sequentialFileTools[0]));
+    }
+    // Remaining truly sequential tools
+    for (const toolCall of otherSequential) {
+      results.push(await this.executeSingleToolCall(toolCall));
     }
 
     // Track consecutive failures by error category for circuit breaker
@@ -1603,11 +1643,14 @@ Task: ${userInput}`;
           }
         }
 
+        // Pre-serialize result for postToolIteration (avoids double JSON.stringify)
+        const serialized = JSON.stringify(result);
         return {
           toolCallId: toolCall.id,
           toolName,
           args,
           result,
+          _serializedContent: serialized,
         };
         
       } catch (error) {
@@ -1633,11 +1676,13 @@ Task: ${userInput}`;
       this.onToolEnd(toolName, { success: false, error: lastError.message });
     }
     
+    const failResult = { success: false, error: lastError.message };
     return {
       toolCallId: toolCall.id,
       toolName,
       args,
-      result: { success: false, error: lastError.message },
+      result: failResult,
+      _serializedContent: JSON.stringify(failResult),
     };
   }
 
@@ -1790,6 +1835,9 @@ Task: ${userInput}`;
       this.iterationCount++;
       
       yield { type: 'iteration', iteration: this.iterationCount };
+      
+      // Check context size and compact if needed (was missing — could blow past limits)
+      await this.maybeCompactContext();
       
       // Get streaming response (tools omitted — streaming+tools rejected by many models)
       const stream = this.client.chatStream(this.messages, {

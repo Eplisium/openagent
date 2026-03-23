@@ -43,7 +43,7 @@ export const CONFIG = {
   
   // Request Settings
   MAX_RETRIES: parseInt(process.env.MAX_RETRIES) || 3,
-  TIMEOUT_MS: parseInt(process.env.TIMEOUT_MS) || 300000, // 5 minutes
+  TIMEOUT_MS: parseInt(process.env.TIMEOUT_MS) || 120000, // 2 minutes (reduced from 5min — most responses come in <30s)
   STREAMING_ENABLED: process.env.STREAMING_ENABLED !== 'false',
   
   // Cost Control
@@ -83,15 +83,15 @@ export const CONFIG = {
   AGENT_MAX_STALL_ITERATIONS: normalizePositiveInt(process.env.AGENT_MAX_STALL_ITERATIONS, 8),
   
   // Tool Settings
-  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 300000,
+  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 60000, // 60s (reduced from 300s — most tools finish in <10s)
   MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS) || 80000,
 
   // Workspace Settings
   OPENAGENT_HOME: process.env.OPENAGENT_HOME || null,
   
   // Performance
-  MIN_REQUEST_INTERVAL_MS: parseInt(process.env.MIN_REQUEST_INTERVAL_MS) || 100,
-  CACHE_TTL_MS: parseInt(process.env.CACHE_TTL_MS) || 5 * 60 * 1000, // 5 minutes
+  MIN_REQUEST_INTERVAL_MS: parseInt(process.env.MIN_REQUEST_INTERVAL_MS) || 50, // Reduced from 100ms
+  CACHE_TTL_MS: parseInt(process.env.CACHE_TTL_MS) || 10 * 60 * 1000, // 10 minutes (increased — cache hits save full API roundtrip)
   
   // Logging
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
@@ -113,8 +113,8 @@ export const CONFIG = {
   // ═══════════════════════════════════════════════════════════════
   EXEC_MAX_BUFFER_BYTES: 10 * 1024 * 1024, // 10MB
   EXEC_DEFAULT_TIMEOUT_MS: 30000,
-  BG_PROCESS_OUTPUT_LIMIT: 50000,
-  BG_PROCESS_OUTPUT_TRIM: 25000,
+  BG_PROCESS_OUTPUT_LIMIT: 30000, // Reduced from 50K — less memory per background process
+  BG_PROCESS_OUTPUT_TRIM: 15000, // Reduced from 25K
 
   // ═══════════════════════════════════════════════════════════════
   // 🤖 Agent Behavior
@@ -159,9 +159,9 @@ export const CONFIG = {
   // ═══════════════════════════════════════════════════════════════
   // 🔌 OpenRouter Client
   // ═══════════════════════════════════════════════════════════════
-  CLIENT_CACHE_MAX_SIZE: 200,
-  CLIENT_REQUEST_HISTORY_MAX: 200,
-  CLIENT_REQUEST_HISTORY_TRIM: 100,
+  CLIENT_CACHE_MAX_SIZE: 500, // Increased from 200 — more cache hits for repeated queries
+  CLIENT_REQUEST_HISTORY_MAX: 100, // Reduced from 200 — less memory, history isn't that useful
+  CLIENT_REQUEST_HISTORY_TRIM: 50, // Reduced from 100
   CLIENT_RATE_LIMIT_DEFAULT_WAIT_MS: 1000,
   CLIENT_RATE_LIMIT_MAX_WAIT_MS: 10000,
 };

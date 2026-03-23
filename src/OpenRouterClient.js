@@ -38,10 +38,34 @@ function contentHash(str) {
 }
 
 /**
- * Generate a more robust cache key including request-specific params
+ * Generate a cache key from request params.
+ * Optimized: uses message count + last message hash + model as key components
+ * instead of full JSON.stringify of entire message array.
  */
 function generateCacheKey(obj) {
-  // Include additional entropy sources: timestamp bucket (minute-level) + full serialization
+  if (!obj) return 'empty';
+  const messages = obj.messages;
+  if (Array.isArray(messages) && messages.length > 0) {
+    // Fast key: message count + last 2 messages content hash + model + tool count + temperature
+    // Including last 2 messages reduces collision rate for multi-turn conversations
+    const lastMsg = messages[messages.length - 1];
+    const lastContent = typeof lastMsg?.content === 'string' ? lastMsg.content : JSON.stringify(lastMsg?.content || '');
+    const secondLastMsg = messages.length > 1 ? messages[messages.length - 2] : null;
+    const secondContent = secondLastMsg
+      ? (typeof secondLastMsg?.content === 'string' ? secondLastMsg.content : JSON.stringify(secondLastMsg?.content || ''))
+      : '';
+    const model = obj.model || '';
+    const toolCount = obj.tools?.length || 0;
+    const temp = obj.temperature ?? '';
+    // Include system prompt hash to distinguish different agent configurations
+    const systemContent = messages[0]?.role === 'system'
+      ? (typeof messages[0].content === 'string' ? messages[0].content.substring(0, 300) : JSON.stringify(messages[0].content || '').substring(0, 300))
+      : '';
+    const toolNames = Array.isArray(obj.tools) ? obj.tools.map(t => t?.function?.name || t?.name || '').sort().join(',') : '';
+    const keyParts = `${messages.length}:${contentHash(systemContent)}:${contentHash(lastContent)}:${contentHash(secondContent)}:${model}:${toolCount}:${temp}:${contentHash(toolNames)}`;
+    return contentHash(keyParts);
+  }
+  // Fallback for non-message payloads
   const serialized = JSON.stringify(obj, Object.keys(obj).sort());
   return contentHash(serialized);
 }
@@ -68,10 +92,11 @@ export class OpenRouterClient {
     this.totalOutputTokens = 0;
     this.requestHistory = [];
     
-    // Response cache for identical requests (content-hashed keys)
+    // Response cache for identical requests (content-hashed keys) — LRU eviction
     this.cache = new Map();
     this.cacheTTL = options.cacheTTL || CONFIG.CACHE_TTL_MS;
     this.cacheEnabled = options.cacheEnabled !== false;
+    this.cacheMaxSize = options.cacheMaxSize || CONFIG.CLIENT_CACHE_MAX_SIZE;
     
     // Request deduplication — coalesce identical in-flight requests
     this.inFlightRequests = new Map(); // cacheKey -> Promise
@@ -94,6 +119,10 @@ export class OpenRouterClient {
     // Periodic cleanup timer for expired cache entries
     this.cacheCleanupInterval = null;
     this.startCacheCleanup();
+    
+    // Response time tracking for adaptive timeouts
+    this._recentResponseTimes = [];
+    this._maxResponseTimeSamples = 20;
   }
   
   /**
@@ -119,7 +148,7 @@ export class OpenRouterClient {
   }
   
   /**
-   * Evict expired entries from cache
+   * Evict expired entries and enforce max cache size (LRU)
    */
   evictExpiredCacheEntries() {
     if (!this.cacheEnabled || this.cache.size === 0) return;
@@ -127,6 +156,7 @@ export class OpenRouterClient {
     const now = Date.now();
     let evicted = 0;
     
+    // Evict expired entries
     for (const [key, cached] of this.cache) {
       if (now - cached.timestamp >= this.cacheTTL) {
         this.cache.delete(key);
@@ -134,8 +164,15 @@ export class OpenRouterClient {
       }
     }
     
+    // Enforce max size — evict oldest entries (Map preserves insertion order, LRU entries are re-inserted)
+    while (this.cache.size > this.cacheMaxSize) {
+      const oldestKey = this.cache.keys().next().value;
+      this.cache.delete(oldestKey);
+      evicted++;
+    }
+    
     if (evicted > 0) {
-      logger.debug(`Evicted ${evicted} expired cache entries`);
+      logger.debug(`Cache cleanup: evicted ${evicted} entries, ${this.cache.size} remaining`);
     }
   }
   
@@ -174,12 +211,15 @@ export class OpenRouterClient {
   }
   
   /**
-   * Get from cache if valid
+   * Get from cache if valid — LRU touch on hit
    */
   getFromCache(key) {
     if (!this.cacheEnabled) return null;
     const cached = this.cache.get(key);
     if (cached && Date.now() - cached.timestamp < this.cacheTTL) {
+      // LRU: re-insert to move to end of Map iteration order
+      this.cache.delete(key);
+      this.cache.set(key, cached);
       return { ...cached.data, _cached: true };
     }
     if (cached) this.cache.delete(key);
@@ -199,8 +239,8 @@ export class OpenRouterClient {
     
     this.cache.set(key, { data, timestamp: Date.now() });
     
-    // Evict oldest if over limit
-    if (this.cache.size > 200) {
+    // Evict oldest if over limit (use configured max)
+    if (this.cache.size > this.cacheMaxSize) {
       const oldestKey = this.cache.keys().next().value;
       this.cache.delete(oldestKey);
     }
@@ -365,9 +405,13 @@ export class OpenRouterClient {
       let usage = null;
       let lastFinishReason = null;
       const toolCallAccumulator = new Map();
-      // Pre-compile regex for better performance
-      const dataPrefixRegex = /^data:\s*/;
+      // Pre-compiled constants for performance
+      const DATA_PREFIX = 'data: ';
+      const DATA_PREFIX_LEN = 6;
       const doneMarker = '[DONE]';
+      // Pre-allocate content chunks array to reduce string concatenation
+      const contentChunks = [];
+      let contentLength = 0;
       
       try {
         while (true) {
@@ -382,14 +426,15 @@ export class OpenRouterClient {
             const trimmed = line.trim();
             if (!trimmed || trimmed.startsWith(':')) continue;
             
-            if (dataPrefixRegex.test(trimmed)) {
-              const data = trimmed.replace(dataPrefixRegex, '').trim();
+            if (trimmed.startsWith(DATA_PREFIX)) {
+              const data = trimmed.substring(DATA_PREFIX_LEN).trim();
               
               if (data === doneMarker) {
                 // Emit accumulated tool calls
                 if (toolCallAccumulator.size > 0) {
                   yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(toolCallAccumulator), requestId };
                 }
+                fullContent = contentChunks.length > 0 ? contentChunks.join('') : fullContent;
                 yield { type: 'done', content: fullContent, usage, requestId, finishReason: lastFinishReason };
                 return;
               }
@@ -412,8 +457,14 @@ export class OpenRouterClient {
                 const delta = parsed.choices?.[0]?.delta;
                 if (delta) {
                   if (delta.content) {
-                    fullContent += delta.content;
-                    yield { type: 'content', content: delta.content, fullContent, requestId };
+                    contentChunks.push(delta.content);
+                    contentLength += delta.content.length;
+                    // Provide fullContent periodically (every ~200 chars) to amortize join cost
+                    // while still giving consumers the cumulative content they need
+                    const periodicFull = (contentLength % 200 < delta.content.length)
+                      ? contentChunks.join('')
+                      : null;
+                    yield { type: 'content', content: delta.content, fullContent: periodicFull, requestId };
                   }
                   
                   // Accumulate tool call fragments
@@ -455,6 +506,7 @@ export class OpenRouterClient {
         }
         
         // Stream ended without [DONE]
+        fullContent = contentChunks.length > 0 ? contentChunks.join('') : fullContent;
         if (fullContent || toolCallAccumulator.size > 0) {
           if (toolCallAccumulator.size > 0) {
             const remaining = new Map();

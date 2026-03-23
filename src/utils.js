@@ -381,6 +381,16 @@ const CODE_PATTERN_REGEX = /[{}\[\]()=><;]|(?:^|\s)(function|const|let|var|class
 const NEWLINE_REGEX = /\n/g;
 const JSON_STRUCTURE_REGEX = /[{}[\]]/g;
 
+// Token estimation LRU cache — avoids re-estimating identical strings
+const _tokenCache = new Map();
+const TOKEN_CACHE_MAX = 2048;
+function _tokenCacheKey(text) {
+  // Fast key: length + first 32 chars + last 32 chars (covers most collisions cheaply)
+  const len = text.length;
+  if (len <= 64) return text;
+  return text.slice(0, 32) + '\x00' + text.slice(-32) + '\x00' + len;
+}
+
 /**
  * 🔢 Estimate token count from text with content-aware heuristics
  * - Code content (braces, keywords): ~3.5 chars/token
@@ -399,6 +409,11 @@ export function estimateTokens(text) {
   if (len < 20) {
     return Math.ceil(len / 4);
   }
+
+  // Check LRU cache
+  const cacheKey = _tokenCacheKey(text);
+  const cached = _tokenCache.get(cacheKey);
+  if (cached !== undefined) return cached;
 
   // Count code indicators using pre-compiled regex
   const codeMatches = (text.match(CODE_PATTERN_REGEX) || []).length;
@@ -420,7 +435,23 @@ export function estimateTokens(text) {
     charsPerToken = hasJsonStructure ? 3.8 : 4.0;
   }
 
-  return Math.ceil(len / charsPerToken);
+  const result = Math.ceil(len / charsPerToken);
+
+  // Store in cache, evict oldest if full
+  if (_tokenCache.size >= TOKEN_CACHE_MAX) {
+    const firstKey = _tokenCache.keys().next().value;
+    _tokenCache.delete(firstKey);
+  }
+  _tokenCache.set(cacheKey, result);
+
+  return result;
+}
+
+/**
+ * 🧹 Clear the token estimation cache (call after large context changes)
+ */
+export function clearTokenCache() {
+  _tokenCache.clear();
 }
 
 export default {
@@ -453,4 +484,5 @@ export default {
   normalizeOptionalLimit,
   normalizePositiveInt,
   estimateTokens,
+  clearTokenCache,
 };

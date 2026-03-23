@@ -45,7 +45,9 @@ export class ContextAllocator {
    * @returns {{ messages: Array, compressed: boolean, stats: Object }}
    */
   allocate(messages, estimateTokens, workingSetFiles = new Set()) {
-    const totalTokens = messages.reduce((sum, m) => sum + estimateTokens(m), 0);
+    // Pre-compute token estimates once with index tracking to avoid O(n²) lookups
+    const indexed = messages.map((m, i) => ({ msg: m, idx: i, tokens: estimateTokens(m) }));
+    const totalTokens = indexed.reduce((sum, e) => sum + e.tokens, 0);
 
     // If under budget, return everything as-is
     if (totalTokens <= this.maxTokens) {
@@ -60,59 +62,52 @@ export class ContextAllocator {
       };
     }
 
-    // Categorize messages
-    const categorized = this.categorizeMessages(messages);
-    const workingSet = this.identifyWorkingSet(messages, workingSetFiles);
+    // Categorize messages (returns indices into original array)
+    const categorized = this.categorizeMessagesIndexed(indexed);
+    const workingSetIndices = this.identifyWorkingSetIndexed(indexed, workingSetFiles);
     const budget = this.getBudget();
 
-    // Build optimized message list using priority tiers
-    const result = [];
+    // Build optimized message list using priority tiers — track by index for O(n) sort
+    const includedSet = new Set();
     let usedTokens = 0;
 
     // Tier 1: System messages (always kept)
-    for (const msg of categorized.system) {
-      const tokens = estimateTokens(msg);
-      result.push(msg);
-      usedTokens += tokens;
+    for (const entry of categorized.system) {
+      includedSet.add(entry.idx);
+      usedTokens += entry.tokens;
     }
 
     // Tier 0 (highest): Recent messages (last 6 exchanges)
-    for (const msg of categorized.recent) {
-      const tokens = estimateTokens(msg);
-      result.push(msg);
-      usedTokens += tokens;
+    for (const entry of categorized.recent) {
+      includedSet.add(entry.idx);
+      usedTokens += entry.tokens;
     }
 
     // Tier 0: Working set messages (messages referencing active files)
-    for (const msg of workingSet) {
-      if (!result.includes(msg)) {
-        const tokens = estimateTokens(msg);
-        result.push(msg);
-        usedTokens += tokens;
+    for (const idx of workingSetIndices) {
+      if (!includedSet.has(idx)) {
+        includedSet.add(idx);
+        usedTokens += indexed[idx].tokens;
       }
     }
 
     // Tier 2: Older messages — try to fit as many as budget allows
-    const remainingBudget = this.maxTokens - usedTokens;
     let olderUsed = 0;
-    for (const msg of categorized.older) {
-      if (!result.includes(msg)) {
-        const tokens = estimateTokens(msg);
-        if (olderUsed + tokens <= budget.older) {
-          result.push(msg);
-          olderUsed += tokens;
-          usedTokens += tokens;
+    for (const entry of categorized.older) {
+      if (!includedSet.has(entry.idx)) {
+        if (olderUsed + entry.tokens <= budget.older) {
+          includedSet.add(entry.idx);
+          olderUsed += entry.tokens;
+          usedTokens += entry.tokens;
         }
-        // Messages that don't fit are dropped (they should be in the compaction summary)
       }
     }
 
-    // Sort result to maintain message order (original index order)
-    result.sort((a, b) => {
-      const aIdx = messages.indexOf(a);
-      const bIdx = messages.indexOf(b);
-      return aIdx - bIdx;
-    });
+    // O(n) filter + sort by original index (integers, fast comparison)
+    const result = indexed
+      .filter(e => includedSet.has(e.idx))
+      .sort((a, b) => a.idx - b.idx)
+      .map(e => e.msg);
 
     return {
       messages: result,
@@ -125,7 +120,7 @@ export class ContextAllocator {
         categories: {
           system: categorized.system.length,
           recent: categorized.recent.length,
-          workingSet: workingSet.length,
+          workingSet: workingSetIndices.length,
           older: categorized.older.length,
         },
       },
@@ -145,7 +140,6 @@ export class ContextAllocator {
 
     const workingMessages = [];
     const filePatterns = [...recentFiles].map(f => {
-      // Normalize and escape for regex — match the basename and full path
       const basename = f.replace(/\\/g, '/').split('/').pop();
       return { path: f, basename, regex: new RegExp(this.escapeRegex(basename), 'i') };
     });
@@ -163,6 +157,34 @@ export class ContextAllocator {
     }
 
     return workingMessages;
+  }
+
+  /**
+   * Index-based variant: returns Set of original indices instead of message refs.
+   * Avoids O(n²) indexOf calls during sort.
+   */
+  identifyWorkingSetIndexed(indexed, recentFiles) {
+    if (!recentFiles || recentFiles.size === 0) return new Set();
+
+    const result = new Set();
+    const filePatterns = [...recentFiles].map(f => {
+      const basename = f.replace(/\\/g, '/').split('/').pop();
+      return { path: f, basename, regex: new RegExp(this.escapeRegex(basename), 'i') };
+    });
+
+    for (const { msg, idx } of indexed) {
+      const text = this.messageToText(msg);
+      if (!text) continue;
+
+      for (const { path, regex } of filePatterns) {
+        if (text.includes(path) || regex.test(text)) {
+          result.add(idx);
+          break;
+        }
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -186,7 +208,6 @@ export class ContextAllocator {
       }
     }
 
-    // Identify exchange boundaries going backward
     const exchangeStarts = [];
     for (let i = nonSystem.length - 1; i >= 0; i--) {
       const msg = nonSystem[i];
@@ -195,7 +216,39 @@ export class ContextAllocator {
       }
     }
 
-    // Take the last 6 exchange starts
+    const recentStarts = exchangeStarts.slice(-6);
+    const keepFromIndex = recentStarts.length > 0 ? recentStarts[0] : nonSystem.length;
+
+    const recent = nonSystem.slice(keepFromIndex);
+    const older = nonSystem.slice(0, keepFromIndex);
+
+    return { system, recent, older };
+  }
+
+  /**
+   * Index-based variant: operates on pre-indexed entries, returns categorized
+   * arrays of {idx, tokens} instead of message refs. Avoids indexOf later.
+   */
+  categorizeMessagesIndexed(indexed) {
+    const system = [];
+    const nonSystem = [];
+
+    for (const entry of indexed) {
+      if (entry.msg.role === 'system') {
+        system.push(entry);
+      } else {
+        nonSystem.push(entry);
+      }
+    }
+
+    const exchangeStarts = [];
+    for (let i = nonSystem.length - 1; i >= 0; i--) {
+      const entry = nonSystem[i];
+      if (entry.msg.role === 'user' || (entry.msg.role === 'assistant' && entry.msg.tool_calls)) {
+        exchangeStarts.unshift(i);
+      }
+    }
+
     const recentStarts = exchangeStarts.slice(-6);
     const keepFromIndex = recentStarts.length > 0 ? recentStarts[0] : nonSystem.length;
 
