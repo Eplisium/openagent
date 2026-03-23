@@ -3,7 +3,7 @@
  * Supports: canonical, inline, Anthropic invoke, function_calls, tool_use formats
  */
 
-const TOOL_CALL_BLOCK_RE = /<tool_call>/gi;
+const TOOL_CALL_BLOCK_RE = /<tool_call>([\s\S]*?)<\/tool_call>/gi;
 const INVOKE_BLOCK_RE = /<invoke\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/invoke>/gi;
 const FUNC_NAME_RE = /<function_name>([\s\S]*?)<\/function_name>/i;
 const INLINE_FUNC_RE = /<function(?:_name)?=([^>\s]+)>/i;
@@ -42,7 +42,7 @@ export function parseXmlToolCalls(content) {
     for (const pm of block.matchAll(INLINE_PARAM_RE)) args[pm[1]] = coerceValue(pm[2]);
     toolCalls.push({ id: 'xml_' + Date.now() + '_' + toolCalls.length, name, arguments: args });
   }
-  cleanContent = cleanContent.replace(/<tool_call>/gi, '').trim();
+  cleanContent = cleanContent.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim();
 
   for (const m of content.matchAll(INVOKE_BLOCK_RE)) {
     const name = m[1].trim();

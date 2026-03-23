@@ -111,37 +111,75 @@ export class Agent {
   }
 
   /**
-   * Enhanced system prompt with better instructions
+   * Coding-focused system prompt following Explore-Plan-Code-Verify workflow.
+   * Designed for maximum agentic coding quality based on research-backed best practices.
    */
   defaultSystemPrompt() {
-    return `You are an advanced AI assistant with access to powerful tools for coding, file management, shell execution, web research, and git operations.
- 
-## How You Work
-1. **Understand** the user's request carefully
-2. **Plan** your approach if the task is complex
-3. **Act** using available tools to accomplish the task
-4. **Verify** your work by checking results
-5. **Iterate** until the task is complete
- 
-## ✏️ CRITICAL: File Editing Rules
-The #1 cause of failures is using wrong text in edit_file. Follow these rules ALWAYS:
+    return `You are an expert AI coding assistant. You write production-quality code and think like a senior engineer.
 
-1. **ALWAYS read_file before editing** — no exceptions
-2. **Copy find text VERBATIM** from the read_file output — exact whitespace, indentation, everything
-3. **If edit_file fails with "not found"**: Re-read the file, get exact text, retry. NEVER retry with the same text.
-4. **Use line-based editing** (startLine/endLine) when you know line numbers — it avoids the "not found" problem entirely
-5. **Use search_and_replace** for bulk renames/refactoring — regex-based, supports dryRun preview
-6. **Use write_file** for large rewrites (>30% of file) instead of many small edits
-7. **Batch edits with continueOnError: true** so one failure doesn't block others
- 
-## Guidelines
-- Be concise but thorough
-- If a tool fails, try a DIFFERENT approach (don't retry the same thing)
-- Batch independent read operations for speed
-- Always verify file operations succeeded
-- For code tasks, write clean, well-documented code
- 
-When you have completed the task, provide a clear summary of what was done.`;
+## Core Workflow: Explore → Plan → Code → Verify
+
+Always follow this sequence — skipping steps causes bugs:
+
+1. **Explore** (before touching code):
+   - List the project directory structure with list_directory
+   - Read the key files relevant to the task
+   - Search for existing patterns with search_in_files
+   - Check git status and recent commits for context
+   - Understand the tech stack, conventions, and architecture
+
+2. **Plan** (for any non-trivial task):
+   - Outline your approach in 2-5 steps
+   - Identify which files need changes
+   - Consider edge cases, error handling, and backward compatibility
+   - For complex tasks, use the planning phase to generate a structured plan
+
+3. **Code** (precise, minimal changes):
+   - Make the smallest change that solves the problem
+   - Follow existing code style, naming, and patterns exactly
+   - Use line-based editing (startLine/endLine) when you know line numbers
+   - Batch related edits with edits:[] array
+
+4. **Verify** (non-negotiable):
+   - Run tests after every change: exec { command: "npm test" } or equivalent
+   - Check that the file compiles/parses: exec { command: "node --check file.js" }
+   - Compare before/after behavior
+   - For new features, write or suggest tests
+   - Verify imports resolve and dependencies exist
+
+## File Editing Rules (CRITICAL)
+
+1. ALWAYS read_file before editing — no exceptions
+2. Copy find text VERBATIM from read_file output — exact whitespace, indentation
+3. If edit_file fails: Re-read the file, get exact text, retry. NEVER retry with same text.
+4. Use line-based editing (startLine/endLine) — avoids "text not found" entirely
+5. Use write_file for large rewrites (>30% of file)
+6. Batch edits with edits:[] array and continueOnError: true
+
+## Anti-Patterns (DO NOT)
+
+- Do NOT retry the same failed approach — try a fundamentally different strategy
+- Do NOT generate code from memory — always read the file first
+- Do NOT assume file contents — verify with read_file
+- Do NOT ignore error messages — they contain the solution
+- Do NOT skip verification — always check your work compiles and runs
+- Do NOT make many small edits when you can read+rewrite the file
+
+## Best Practices
+
+- Batch independent read operations for parallel speed
+- Use search_in_files to find relevant code across the codebase
+- Check git status before making commits
+- Write clean, well-documented code with clear variable names
+- Use list_directory to understand project structure before diving in
+- If a tool fails, try alternative approaches — don't retry the same thing
+- For refactoring: make one logical change at a time, verify, then continue
+
+## Skills
+If available skills match this task, use the use_skill tool to load specialized instructions.
+Skills provide domain-specific workflows for: code-review, debug, refactor, testing.
+
+When you have completed the task, provide a clear summary of what was done and what was verified.`;
   }
   /**
    * Abort the current execution
@@ -625,6 +663,59 @@ When you have completed the task, provide a clear summary of what was done.`;
     }
   }
   
+  /**
+   * Discover project structure and inject it as a system message.
+   * Called once at the start of run() to give the agent immediate codebase context.
+   * This saves 2-3 tool call iterations the agent would spend discovering the tree.
+   */
+  async discoverProjectStructure() {
+    if (!this.workspaceDir) return;
+
+    try {
+      const entries = await fs.readdir(this.workspaceDir, { withFileTypes: true });
+      const lines = [];
+      const skipDirs = new Set(['node_modules', '.git', '.openagent', 'dist', 'build', '__pycache__', '.next', '.turbo', 'coverage']);
+      const skipFiles = new Set(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', '.DS_Store']);
+
+      // Top-level entries
+      const dirs = entries.filter(e => e.isDirectory() && !skipDirs.has(e.name) && !e.name.startsWith('.'));
+      const files = entries.filter(e => e.isFile() && !skipFiles.has(e.name) && !e.name.startsWith('.'));
+
+      // Show top-level structure
+      for (const d of dirs.sort()) {
+        lines.push(`  ${d.name}/`);
+        // Show one level deep for key directories
+        try {
+          const sub = await fs.readdir(path.join(this.workspaceDir, d.name), { withFileTypes: true });
+          const subFiles = sub.filter(e => e.isFile() && !e.name.startsWith('.')).slice(0, 12);
+          const subDirs = sub.filter(e => e.isDirectory() && !skipDirs.has(e.name) && !e.name.startsWith('.')).slice(0, 5);
+          for (const sd of subDirs.sort()) lines.push(`    ${sd.name}/`);
+          for (const sf of subFiles.sort()) lines.push(`    ${sf.name}`);
+          if (sub.length > 17) lines.push(`    ... (${sub.length} total entries)`);
+        } catch { /* skip unreadable dirs */ }
+      }
+      for (const f of files.sort()) {
+        lines.push(`  ${f.name}`);
+      }
+
+      if (lines.length > 0) {
+        const treeMsg = `[System] Project structure of ${this.workspaceDir}:
+${lines.join('\n')}
+
+Use list_directory for deeper exploration of specific directories.`;
+        this.pushMessage({ role: 'system', content: treeMsg });
+        if (this.shouldEmitVerboseLogs()) {
+          logger.debug('Injected project structure context', { entries: lines.length });
+        }
+      }
+    } catch (err) {
+      // Non-fatal — agent can discover structure with tools
+      if (this.shouldEmitVerboseLogs()) {
+        logger.debug('Project structure discovery skipped', { error: err.message });
+      }
+    }
+  }
+
   /**
    * Determine if a task is complex enough to warrant planning
    */
@@ -1138,6 +1229,12 @@ Task: ${userInput}`;
       this.pushMessage({ role: 'user', content: userInput });
     }
 
+    // Project structure discovery: inject codebase context on first run
+    // This saves 2-3 tool call iterations the agent would spend listing directories
+    if (this.iterationCount === 0 && this.workspaceDir) {
+      await this.discoverProjectStructure();
+    }
+
     // Planning phase: generate execution plan for complex tasks
     if (userInput && this.isComplexTask(userInput)) {
       const planMessage = await this.plan(userInput, this.messages);
@@ -1214,34 +1311,9 @@ Task: ${userInput}`;
           this.onIterationStart(this.iterationCount);
         }
         
-        // Check context size BEFORE calling LLM
-        await this.maybeCompactContext();
+        // Prepare messages: compact + allocate + warnings (shared logic)
+        const messagesForLLM = await this.prepareMessagesForLLM();
 
-        // Hierarchical context allocation: optimize message list if over budget
-        const allocResult = this.contextAllocator.allocate(
-          this.messages,
-          (msg) => this.estimateMessageTokens(msg),
-          this.workingSet
-        );
-        if (allocResult.compressed) {
-          if (this.shouldEmitVerboseLogs()) {
-            logger.debug('Context allocator active', allocResult.stats);
-          }
-          this.emitStatus('context_allocate',
-            `Context optimized: ${allocResult.stats.dropped} messages deferred (budget ${allocResult.stats.usedPercent}%)`);
-        }
-        // Use optimized messages for LLM call; full list stays in this.messages
-        const messagesForLLM = allocResult.messages;
-
-        // Proactive context warning at 60% usage
-        const ctxStats = this.getContextStats();
-        if (ctxStats.percent > 60 && ctxStats.percent <= 70) {
-          const warnMsg = `Context usage at ${ctxStats.percent}% (~${this.formatCompactNumber(ctxStats.usedTokens)} tokens). Consider wrapping up soon.`;
-          if (!this.emitStatus('context_warning', warnMsg) && this.shouldEmitVerboseLogs()) {
-            logger.warn(warnMsg);
-          }
-        }
-        
         // Get LLM response with tools (with retry logic)
         const response = await this.getLLMResponseWithRetry(0, messagesForLLM);
         
@@ -1836,11 +1908,11 @@ Task: ${userInput}`;
       
       yield { type: 'iteration', iteration: this.iterationCount };
       
-      // Check context size and compact if needed (was missing — could blow past limits)
-      await this.maybeCompactContext();
+      // Prepare messages: compact + allocate + warnings (shared logic)
+      const messagesForLLM = await this.prepareMessagesForLLM();
       
       // Get streaming response (tools omitted — streaming+tools rejected by many models)
-      const stream = this.client.chatStream(this.messages, {
+      const stream = this.client.chatStream(messagesForLLM, {
         model: this.model,
         temperature: 0.3,
       });
@@ -1849,6 +1921,7 @@ Task: ${userInput}`;
       let toolCalls = [];
       
       for await (const chunk of stream) {
+        this.checkAborted();
         if (chunk.type === 'content') {
           fullContent += chunk.content;
           yield { type: 'content', content: chunk.content };

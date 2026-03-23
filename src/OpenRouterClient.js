@@ -18,6 +18,7 @@
 import { CONFIG, PLUGINS } from './config.js';
 import { logger } from './logger.js';
 import { OpenRouterError, RateLimitError, AuthenticationError, AbortError } from './errors.js';
+import { parseXmlToolCalls, hasXmlToolCalls } from './tools/xmlToolParser.js';
 import { Agent as UndiciAgent } from 'undici';
 
 // Shared HTTP connection pool for keep-alive reuse across all client instances
