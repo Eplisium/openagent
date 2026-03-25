@@ -3041,6 +3041,14 @@ const __filename = fileURLToPath(import.meta.url);
 const argvPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
 
 // Resolve symlinks so npm link / global installs work correctly
+let resolvedFilename = __filename;
+let resolvedArgv = argvPath;
+try {
+  if (fs.existsSync(__filename)) resolvedFilename = fs.realpathSync(__filename);
+} catch {}
+try {
+  if (argvPath && fs.existsSync(argvPath)) resolvedArgv = fs.realpathSync(argvPath);
+} catch {}
 // Check for --ui flag or 'ui' command
 const args = process.argv.slice(2);
 const useUI = args.includes('--ui') || args.includes('ui');
