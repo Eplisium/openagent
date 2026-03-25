@@ -1,154 +1,124 @@
 #!/usr/bin/env node
 /**
  * 🎨 OpenAgent Ink CLI Entry Point
- * Renders the Ink-based React UI for interactive terminal interface
+ * Smart loader that uses bundled UI when available
+ * Falls back to dev mode with tsx/esbuild if needed
  */
 
-import React from 'react';
-import { render } from 'ink';
-import App from './ui/App.jsx';
-import { CONFIG } from './config.js';
-import { loadState, saveState } from './cli/state.js';
-import { getTheme } from './cli/themes.js';
+import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
+import path from 'path';
+import fs from 'fs';
 
-// Error boundary for graceful error handling
-class ErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props);
-    this.state = { hasError: false, error: null };
-  }
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const require = createRequire(import.meta.url);
 
-  static getDerivedStateFromError(error) {
-    return { hasError: true, error };
-  }
+// Paths
+const projectRoot = path.resolve(__dirname, '..');
+const bundledPath = path.join(projectRoot, 'dist', 'cli-ink.mjs');
+const srcPath = path.join(__dirname, 'ui', 'App.jsx');
 
-  componentDidCatch(error, errorInfo) {
-    console.error('OpenAgent UI Error:', error);
-    console.error('Error Info:', errorInfo);
-  }
-
-  render() {
-    if (this.state.hasError) {
-      return React.createElement('div', { 
-        style: { 
-          color: 'red', 
-          padding: '10px',
-          fontFamily: 'monospace'
-        } 
-      }, 
-        '⚠️  OpenAgent UI encountered an error.\n',
-        'Error: ', this.state.error?.message || 'Unknown error',
-        '\n\nFalling back to traditional CLI...'
-      );
-    }
-    return this.props.children;
-  }
-}
-
-// Main function to start the Ink UI
-export async function startInkUI(options = {}) {
+/**
+ * Check if a file exists
+ */
+function fileExists(p) {
   try {
-    // Load configuration and state
-    const state = await loadState();
-    const theme = await getTheme();
-    
-    const config = {
-      ...CONFIG,
-      ...state,
-      theme: theme || 'dark',
-      defaultModel: options.model || state.defaultModel || 'gpt-4',
-      ...options
-    };
-    
-    // Create root element
-    const root = React.createElement(ErrorBoundary, {},
-      React.createElement(App, { config })
-    );
-    
-    // Render the application
-    const { unmount } = render(root, { 
-      exitOnCtrlC: false, // We handle Ctrl+C ourselves
-      patchConsole: false // Don't patch console
-    });
-    
-    // Handle graceful shutdown
-    const cleanup = async () => {
-      try {
-        // Save any state changes
-        await saveState({
-          lastTheme: config.theme,
-          lastModel: config.defaultModel
-        });
-        unmount();
-      } catch (error) {
-        console.error('Error during cleanup:', error);
-      }
-    };
-    
-    // Handle process signals
-    process.on('SIGINT', cleanup);
-    process.on('SIGTERM', cleanup);
-    
-    return { unmount, cleanup };
-    
-  } catch (error) {
-    console.error('Failed to start Ink UI:', error);
-    throw error;
+    fs.accessSync(p, fs.constants.R_OK);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-// CLI runner when executed directly
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const args = process.argv.slice(2);
-  
-  // Parse simple command line arguments
-  const options = {};
-  for (let i = 0; i < args.length; i++) {
-    switch (args[i]) {
-      case '--model':
-      case '-m':
-        options.model = args[++i];
-        break;
-      case '--theme':
-      case '-t':
-        options.theme = args[++i];
-        break;
-      case '--no-splash':
-        options.showSplash = false;
-        break;
-      case '--help':
-      case '-h':
-        console.log(`
-OpenAgent Ink UI
+/**
+ * Build the UI bundle if needed
+ */
+async function buildUI() {
+  console.log('🔨 Building UI bundle...');
+  const { execSync } = await import('child_process');
+  try {
+    execSync('npm run build', { 
+      cwd: projectRoot, 
+      stdio: 'inherit',
+      env: { ...process.env, NODE_ENV: 'production' }
+    });
+    console.log('✅ UI bundle built successfully!');
+    return true;
+  } catch (error) {
+    console.error('❌ Failed to build UI:', error.message);
+    return false;
+  }
+}
 
-Usage: openagent [options]
-
-Options:
-  --model, -m <model>    Set default model (e.g., gpt-4, claude-3-opus)
-  --theme, -t <theme>    Set theme (dark, light, high-contrast)
-  --no-splash            Disable splash screen
-  --help, -h             Show this help message
-
-Keyboard Shortcuts:
-  Ctrl+Q                Quit
-  Ctrl+P                Command palette
-  Ctrl+N                New chat
-  Ctrl+S                Save session
-  Ctrl+K                Clear chat
-  Ctrl+B                Toggle sidebar
-  Ctrl+T                Cycle themes
-  Ctrl+/                Show help
-  Esc                   Close modals
-`);
-        process.exit(0);
-        break;
+/**
+ * Main entry point - starts the Ink UI
+ */
+export async function startInkUI(options = {}) {
+  // Check if bundled version exists
+  if (fileExists(bundledPath)) {
+    try {
+      // Dynamic import of bundled version
+      const module = await import(bundledPath);
+      if (module.default && typeof module.default === 'function') {
+        return await module.default(options);
+      }
+      // Some bundles export startInkUI directly
+      if (module.startInkUI && typeof module.startInkUI === 'function') {
+        return await module.startInkUI(options);
+      }
+      return module;
+    } catch (error) {
+      console.error('⚠️  Bundled UI failed to load, attempting rebuild...');
+      const built = await buildUI();
+      if (built && fileExists(bundledPath)) {
+        // Retry with newly built bundle
+        const module = await import(bundledPath);
+        if (module.default && typeof module.default === 'function') {
+          return await module.default(options);
+        }
+        return module;
+      }
     }
   }
-  
-  startInkUI(options).catch(error => {
+
+  // No bundled version and build failed - try development mode
+  if (fileExists(srcPath)) {
+    console.log('📦 No bundled UI found. Trying development mode...');
+    console.log('   Tip: Run "npm run build" or "npm run dev:ui" for development');
+    
+    // Try using tsx for dev mode (handles JSX natively)
+    try {
+      const { execSync } = await import('child_process');
+      execSync('npx tsx src/cli-ink.js', { 
+        cwd: projectRoot,
+        stdio: 'inherit',
+        env: { ...process.env }
+      });
+      return;
+    } catch (tsxError) {
+      // tsx not available, continue to error
+    }
+  }
+
+  // Last resort: provide helpful error message
+  console.error('');
+  console.error('❌ Cannot start UI:');
+  console.error('   - No bundled version found at: dist/cli-ink.mjs');
+  console.error('   - Source JSX files cannot run directly in Node.js');
+  console.error('');
+  console.error('To fix this, run one of:');
+  console.error('   npm run build     # Build the UI bundle');
+  console.error('   npm run dev:ui    # Run in development mode with tsx');
+  console.error('   npm start         # Use traditional CLI instead');
+  console.error('');
+  process.exit(1);
+}
+
+// If run directly (not imported)
+if (process.argv[1] && fileURLToPath(process.argv[1]) === __filename) {
+  startInkUI().catch(error => {
     console.error('Fatal error:', error);
     process.exit(1);
   });
 }
-
-export default startInkUI;
