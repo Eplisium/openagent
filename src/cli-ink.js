@@ -85,6 +85,11 @@ async function buildUI() {
 // ═══════════════════════════════════════════════════════════════
 
 export async function startInkUI(options = {}) {
+  if (inkUIStarted) {
+    console.log('⚠️ Ink UI already started, skipping duplicate call.');
+    return;
+  }
+  inkUIStarted = true;
   // Check if bundled version exists
   if (fileExists(bundledPath)) {
     try {
