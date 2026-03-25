@@ -6,7 +6,7 @@
  */
 
 import { createRequire } from 'module';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import path from 'path';
 import fs from 'fs';
 
@@ -115,10 +115,35 @@ export async function startInkUI(options = {}) {
   process.exit(1);
 }
 
-// If run directly (not imported)
-if (process.argv[1] && fileURLToPath(process.argv[1]) === __filename) {
-  startInkUI().catch(error => {
-    console.error('Fatal error:', error);
-    process.exit(1);
-  });
+// If run directly (not imported) - with Windows path fix
+if (process.argv[1]) {
+  try {
+    // Try to convert process.argv[1] to a file URL if it's not already
+    let.argvPath = process.argv[1];
+    if (!argvPath.startsWith('file://')) {
+      // On Windows, convert path to file URL properly
+      try {
+        argvPath = pathToFileURL(argvPath).href;
+      } catch (e) {
+        // If conversion fails, try direct path comparison
+        const resolvedArgv = path.resolve(process.argv[1]);
+        const resolvedFilename = path.resolve(__filename);
+        if (resolvedArgv === resolvedFilename) {
+          startInkUI().catch(error => {
+            console.error('Fatal error:', error);
+            process.exit(1);
+          });
+        }
+        return;
+      }
+    }
+    if (fileURLToPath(argvPath) === __filename) {
+      startInkUI().catch(error => {
+        console.error('Fatal error:', error);
+        process.exit(1);
+      });
+    }
+  } catch (error) {
+    // Ignore URL conversion errors when imported as a module
+  }
 }
