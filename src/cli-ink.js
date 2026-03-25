@@ -8,12 +8,9 @@
 import { fileURLToPath, pathToFileURL } from 'url';
 import path from 'path';
 import fs from 'fs';
-import React from 'react';
-import { render } from 'ink';
-import App from './ui/App.jsx';
 
 // Determine if we are the bundle or the source
-const IS_BUNDLE = import.meta.url.startsWith('file://') && 
+const IS_BUNDLE = import.meta.url.startsWith('file://') &&
                   import.meta.url.includes('/dist/cli-ink.mjs');
 
 let __filename = '';
@@ -47,10 +44,44 @@ function fileExists(p) {
 }
 
 /**
+ * Find the bundle path
+ */
+function getBundlePath() {
+  const possiblePaths = [
+    path.join(projectRoot, 'dist', 'cli-ink.mjs'),
+    path.join(__dirname, '..', 'dist', 'cli-ink.mjs'),
+    path.join(process.cwd(), 'dist', 'cli-ink.mjs'),
+  ];
+  
+  for (const p of possiblePaths) {
+    if (fileExists(p)) return p;
+  }
+  return null;
+}
+
+/**
+ * Load the bundled UI module
+ */
+async function loadBundleUI() {
+  const bundlePath = getBundlePath();
+  if (!bundlePath) {
+    throw new Error('Bundle not found. Run "npm run build" first.');
+  }
+  const bundleUrl = pathToFileURL(bundlePath).href;
+  const module = await import(bundleUrl);
+  return module;
+}
+
+/**
  * Main UI launcher function
  * Renders the Ink/React App component
  */
 async function launchUI(options = {}) {
+  // Dynamic imports - only loaded when UI is actually started
+  const React = (await import('react')).default;
+  const { render } = await import('ink');
+  const App = (await import('./ui/App.jsx')).default;
+  
   const config = options.config || options;
   
   console.log('');
@@ -67,6 +98,22 @@ async function launchUI(options = {}) {
  * Exported function called from cli.js
  */
 export async function startInkUI(options = {}) {
+  // If we are not bundled, try to load the bundle first
+  if (!IS_BUNDLE) {
+    const bundlePath = getBundlePath();
+    if (bundlePath) {
+      try {
+        const bundle = await loadBundleUI();
+        if (bundle && typeof bundle.startInkUI === 'function') {
+          return await bundle.startInkUI(options);
+        }
+      } catch (e) {
+        // Bundle failed, fall back to direct loading
+        console.warn('Bundle load failed, attempting direct load:', e.message);
+      }
+    }
+  }
+  
   try {
     await launchUI(options);
   } catch (error) {
