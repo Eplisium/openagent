@@ -1,25 +1,18 @@
 /**
- * 🎯 Skill Manager v5.0
- * Filesystem-based skill system with progressive disclosure
+ * 🎯 Skill Manager v6.0
+ * Filesystem-based skill system with progressive disclosure and enhanced parsing
  * 
- * Inspired by Claude Code's Agent Skills:
- * - 3-level progressive disclosure (metadata → instructions → resources)
- * - Pure LLM routing (no classifiers)
- * - Filesystem-based discovery
- * - Skills ≠ Tools: Skills prepare the agent, tools execute
- * 
- * Skill Directory Structure:
- * .openagent/skills/<name>/
- * ├── SKILL.md          # Required: metadata + instructions
- * ├── REFERENCE.md      # Optional: detailed reference
- * └── scripts/          # Optional: executable scripts
- *     └── *.sh, *.py, *.js
+ * Enhanced Features:
+ * - Uses EnhancedSkillParser for advanced YAML frontmatter
+ * - Supports hooks, compatibility, dependencies
+ * - Backward compatible with existing code
  */
 
 import fs from 'fs-extra';
 import path from 'path';
 import os from 'os';
 import chalk from 'chalk';
+import { EnhancedSkillParser } from './EnhancedSkillParser.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // 📋 Constants
@@ -31,7 +24,7 @@ const MAX_SKILL_CONTENT_SIZE = 50000; // chars
 const METADATA_TOKEN_BUDGET = 100; // ~100 tokens per skill for metadata
 
 // ═══════════════════════════════════════════════════════════════════
-// 🎯 Skill Class
+// 🎯 Skill Class (backward compatible, now uses EnhancedSkillParser)
 // ═══════════════════════════════════════════════════════════════════
 
 export class Skill {
@@ -47,6 +40,11 @@ export class Skill {
     this.scripts = options.scripts || [];
     this.dirPath = options.dirPath || '';
     this.source = options.source || 'project'; // 'project' | 'global'
+    // Enhanced properties
+    this.hooks = options.hooks || {};
+    this.compatibility = options.compatibility || {};
+    this.dependencies = options.dependencies || [];
+    this.keywords = options.keywords || [];
   }
 
   /**
@@ -77,7 +75,7 @@ export class Skill {
    */
   matchesTrigger(query) {
     const lowerQuery = query.toLowerCase();
-    return this.triggers.some(trigger => 
+    return this.triggers.some(trigger =>
       lowerQuery.includes(trigger.toLowerCase())
     );
   }
@@ -112,83 +110,26 @@ export class SkillManager {
     this.projectSkillsDir = options.projectSkillsDir || path.join(this.openAgentDir, SKILLS_DIR);
     this.verbose = options.verbose !== false;
     
+    // Use enhanced parser
+    this.parser = new EnhancedSkillParser(options);
+    
     // Skills cache
     this.skills = new Map();
     this._loaded = false;
   }
 
   /**
-   * Parse YAML frontmatter from SKILL.md content
+   * Parse YAML frontmatter from SKILL.md content (backward compatible)
    * @param {string} content - Full file content
    * @returns {{ frontmatter: object, body: string }}
    */
   parseFrontmatter(content) {
-    const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/;
-    const match = content.match(frontmatterRegex);
-
-    if (!match) {
-      return { frontmatter: {}, body: content };
-    }
-
-    // Simple YAML parser (handles key: value pairs)
-    const frontmatter = {};
-    const yamlLines = match[1].split('\n');
-    let currentKey = null;
-    let currentValue = '';
-    let inMultiline = false;
-
-    for (const line of yamlLines) {
-      if (inMultiline) {
-        if (line.match(/^[a-zA-Z_]/)) {
-          // New key, save previous
-          if (currentKey) {
-            frontmatter[currentKey] = currentValue.trim();
-          }
-          inMultiline = false;
-        } else {
-          currentValue += ' ' + line.trim();
-          continue;
-        }
-      }
-
-      const kvMatch = line.match(/^(\w+):\s*(.*)$/);
-      if (kvMatch) {
-        if (currentKey) {
-          frontmatter[currentKey] = currentValue.trim();
-        }
-        currentKey = kvMatch[1];
-        currentValue = kvMatch[2];
-
-        // Handle multiline (>) syntax
-        if (currentValue === '>') {
-          inMultiline = true;
-          currentValue = '';
-        }
-
-        // Handle arrays [item1, item2]
-        if (currentValue.startsWith('[') && currentValue.endsWith(']')) {
-          frontmatter[currentKey] = currentValue
-            .slice(1, -1)
-            .split(',')
-            .map(s => s.trim().replace(/^["']|["']$/g, ''));
-          currentKey = null;
-          currentValue = '';
-        }
-      } else if (line.trim() && currentKey) {
-        currentValue += ' ' + line.trim();
-      }
-    }
-
-    // Save last key
-    if (currentKey) {
-      frontmatter[currentKey] = currentValue.trim();
-    }
-
-    return { frontmatter, body: match[2].trim() };
+    // Delegate to enhanced parser
+    return this.parser.parseFrontmatter(content);
   }
 
   /**
-   * Load a single skill from a directory
+   * Load a single skill from a directory (now using enhanced parser)
    * @param {string} skillDir - Path to skill directory
    * @param {string} source - 'project' or 'global'
    * @returns {Promise<Skill | null>}
@@ -201,57 +142,30 @@ export class SkillManager {
     }
 
     try {
-      const content = await fs.readFile(skillFile, 'utf-8');
+      // Use enhanced parser to load skill
+      const enhancedSkill = await this.parser.loadEnhancedSkill(skillDir, source);
       
-      if (content.length > MAX_SKILL_CONTENT_SIZE) {
-        if (this.verbose) {
-          console.log(chalk.yellow(`⚠ Skill too large: ${skillDir}`));
-        }
+      if (!enhancedSkill) {
         return null;
       }
-
-      const { frontmatter, body } = this.parseFrontmatter(content);
-
-      // Find reference files
-      const references = [];
-      const refFiles = ['REFERENCE.md', 'GUIDE.md', 'EXAMPLES.md', 'API.md'];
-      for (const ref of refFiles) {
-        const refPath = path.join(skillDir, ref);
-        if (await fs.pathExists(refPath)) {
-          references.push({
-            name: ref,
-            path: refPath,
-          });
-        }
-      }
-
-      // Find scripts
-      const scripts = [];
-      const scriptsDir = path.join(skillDir, 'scripts');
-      if (await fs.pathExists(scriptsDir)) {
-        const files = await fs.readdir(scriptsDir);
-        for (const file of files) {
-          scripts.push({
-            name: file,
-            path: path.join(scriptsDir, file),
-          });
-        }
-      }
-
-      const skillName = frontmatter.name || path.basename(skillDir);
-
+      
+      // Convert enhanced skill to backward compatible Skill object
       return new Skill({
-        name: skillName,
-        description: frontmatter.description || '',
-        version: frontmatter.version || '1.0.0',
-        author: frontmatter.author || '',
-        tags: Array.isArray(frontmatter.tags) ? frontmatter.tags : [],
-        triggers: Array.isArray(frontmatter.triggers) ? frontmatter.triggers : [],
-        instructions: body,
-        references,
-        scripts,
-        dirPath: skillDir,
-        source,
+        name: enhancedSkill.name,
+        description: enhancedSkill.description,
+        version: enhancedSkill.version,
+        author: enhancedSkill.author,
+        tags: enhancedSkill.tags,
+        triggers: enhancedSkill.triggers,
+        instructions: enhancedSkill.instructions,
+        references: enhancedSkill.references,
+        scripts: enhancedSkill.scripts,
+        dirPath: enhancedSkill.dirPath,
+        source: enhancedSkill.source,
+        hooks: enhancedSkill.hooks,
+        compatibility: enhancedSkill.compatibility,
+        dependencies: enhancedSkill.dependencies,
+        keywords: enhancedSkill.keywords,
       });
     } catch (err) {
       if (this.verbose) {
@@ -484,32 +398,26 @@ To use a skill, call it by name. The skill's instructions will be loaded into co
     const tags = options.tags || [];
     const triggers = options.triggers || [name];
 
-    const skillContent = `---
-name: ${name}
-description: ${description}
-version: 1.0.0
-author: ${os.userInfo().username}
-tags: [${tags.join(', ')}]
-triggers: [${triggers.join(', ')}]
----
-
-# ${name.charAt(0).toUpperCase() + name.slice(1)} Skill
-
-## Overview
-${description}
-
-## Instructions
-<!-- Add your skill instructions here -->
-
-## Steps
-1. Step one
-2. Step two
-3. Step three
-
-## Output Format
-<!-- Describe the expected output format -->
-`;
-
+    // Generate using enhanced parser
+    const templateData = {
+      name,
+      description,
+      author: os.userInfo().username,
+      version: '1.0.0',
+      tags,
+      triggers,
+      keywords: [],
+      hooks: {},
+      compatibility: {
+        os: ['linux', 'macos', 'windows'],
+        node: '>=18'
+      },
+      dependencies: [],
+      instructions: options.instructions || `# ${name}\n\n## Overview\n${description}\n\n## Instructions\n<!-- Add your skill instructions here -->`,
+      examples: [],
+    };
+    
+    const skillContent = this.parser.generateSkillContent(templateData);
     await fs.writeFile(path.join(skillDir, SKILL_FILE), skillContent, 'utf-8');
 
     // Create reference template

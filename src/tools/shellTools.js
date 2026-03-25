@@ -1,15 +1,18 @@
 /**
  * 🖥️ Shell Execution Tools
  * Execute commands, manage processes, and interact with the system
+ * Cross-platform compatible using cross-spawn
  */
 
-import { exec as execCb, spawn } from 'child_process';
+import { exec as execCb } from 'child_process';
+import crossSpawn from 'cross-spawn';
 import { promisify } from 'util';
 import path from 'path';
 import os from 'os';
 import { buildOpenAgentEnv, createPathContext, resolveAgentPath } from '../paths.js';
 import { CONFIG } from '../config.js';
 import { ProcessManager } from './ProcessManager.js';
+import { Platform } from '../utils/platform.js';
 
 const defaultProcessManager = new ProcessManager();
 
@@ -18,7 +21,7 @@ const PATH_PREFIX_NOTE = 'Supports project:, workdir:, and workspace: prefixes.'
 
 /**
  * Sanitize command to prevent shell injection
- * 
+ *
  * Only blocks TRULY dangerous patterns — allows normal PowerShell syntax.
  * This is a Windows-first implementation that understands PowerShell semantics.
  */
@@ -92,6 +95,11 @@ function block(command, reason) {
  * Detect if a command needs PowerShell
  */
 export function detectPowerShell(command) {
+  // On non-Windows, PowerShell detection doesn't apply
+  if (!Platform.isWindows) {
+    return false;
+  }
+  
   const psPatterns = [
     /^Get-/i, /^Set-/i, /^New-/i, /^Remove-/i, /^Invoke-/i,
     /^Start-/i, /^Stop-/i, /^Test-/i, /^Write-/i, /^Read-/i,
@@ -107,6 +115,44 @@ export function detectPowerShell(command) {
   ];
 
   return psPatterns.some(pattern => pattern.test(command));
+}
+
+/**
+ * Escape a path for safe shell usage on the current platform
+ * @param {string} filePath - The path to escape
+ * @returns {string}
+ */
+export function escapeShellPath(filePath) {
+  if (!filePath) return '';
+  
+  if (Platform.isWindows) {
+    // Windows: wrap in double quotes if contains spaces
+    if (filePath.includes(' ') || filePath.includes('(') || filePath.includes(')')) {
+      return `"${filePath}"`;
+    }
+    return filePath;
+  } else {
+    // Unix: escape special characters and wrap in single quotes
+    return `'${filePath.replace(/'/g, "'\''")}'`;
+  }
+}
+
+/**
+ * Get the appropriate shell for executing commands
+ * @returns {{ shell: string, args: string[] }}
+ */
+export function getExecutionShell() {
+  if (Platform.isWindows) {
+    // On Windows, try PowerShell first, fallback to cmd.exe
+    const shell = Platform.getShell();
+    if (shell === 'powershell') {
+      return { shell: 'powershell.exe', args: ['-NoProfile', '-Command'] };
+    }
+    return { shell: 'cmd.exe', args: ['/c'] };
+  } else {
+    // On Unix, use the default shell
+    return { shell: process.env.SHELL || '/bin/sh', args: ['-c'] };
+  }
 }
 
 export function createShellTools(options = {}) {
@@ -155,35 +201,70 @@ export function createShellTools(options = {}) {
         
         const resolvedCwd = resolvePathForAgent(cwd);
 
-        const isPowerShell = detectPowerShell(sanitizedCommand);
-        const shell = isPowerShell ? 'powershell' : undefined;
+        // Get platform-appropriate shell configuration
+        const { shell, args } = getExecutionShell();
+        const isPowerShell = Platform.isWindows && shell.includes('powershell');
+        
+        // Create abort controller for timeout
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => {
+          abortController.abort();
+        }, timeout);
+        
+        try {
+          const result = await execAsync(sanitizedCommand, {
+            cwd: resolvedCwd,
+            timeout,
+            env: buildToolEnv(env),
+            maxBuffer: CONFIG.EXEC_MAX_BUFFER_BYTES,
+            encoding: 'utf-8',
+            shell,
+          });
+          
+          clearTimeout(timeoutId);
 
-        const result = await execAsync(sanitizedCommand, {
-          cwd: resolvedCwd,
-          timeout,
-          env: buildToolEnv(env),
-          maxBuffer: CONFIG.EXEC_MAX_BUFFER_BYTES,
-          encoding: 'utf-8',
-          shell,
-        });
-
-        return {
-          success: true,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          command,
-          cwd: resolvedCwd,
-          exitCode: 0,
-          shell: isPowerShell ? 'powershell' : 'cmd',
-        };
+          return {
+            success: true,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            command,
+            cwd: resolvedCwd,
+            exitCode: 0,
+            shell: isPowerShell ? 'powershell' : Platform.isWindows ? 'cmd' : 'unix',
+          };
+        } catch (error) {
+          clearTimeout(timeoutId);
+          
+          // Check if it was a timeout
+          if (error.killed || error.code === 'ETIMEDOUT') {
+            return {
+              success: false,
+              stdout: error.stdout || '',
+              stderr: error.stderr || '',
+              error: `Command timed out after ${timeout}ms`,
+              command,
+              exitCode: 124, // Standard timeout exit code
+              timedOut: true,
+            };
+          }
+          
+          return {
+            success: false,
+            stdout: error.stdout || '',
+            stderr: error.stderr || '',
+            error: error.message,
+            command,
+            exitCode: error.code || 1,
+          };
+        }
       } catch (error) {
         return {
           success: false,
-          stdout: error.stdout || '',
-          stderr: error.stderr || '',
+          stdout: '',
+          stderr: '',
           error: error.message,
           command,
-          exitCode: error.code || 1,
+          exitCode: 1,
         };
       }
     },
@@ -220,11 +301,16 @@ export function createShellTools(options = {}) {
         const sanitizedCommand = sanitizeCommand(command);
         
         const resolvedCwd = resolvePathForAgent(cwd);
-        const proc = spawn(sanitizedCommand, [], {
+        
+        // Use cross-spawn for cross-platform process spawning
+        // cross-spawn handles Windows cmd.exe quirks automatically
+        const proc = crossSpawn(sanitizedCommand, [], {
           cwd: resolvedCwd,
           shell: true,
           stdio: ['ignore', 'pipe', 'pipe'],
           env: buildToolEnv(),
+          // Windows-specific options
+          windowsVerbatimArguments: Platform.isWindows,
         });
 
         const pid = proc.pid;
@@ -355,7 +441,14 @@ export function createShellTools(options = {}) {
           const p = processManager.get(label);
           if (!p) return { success: false, error: `Process "${label}" not found` };
           try {
-            p.proc.kill();
+            // Use platform-appropriate kill signal
+            if (Platform.isWindows) {
+              // On Windows, taskkill is more reliable
+              p.proc.kill('SIGTERM');
+            } else {
+              // On Unix, use SIGTERM followed by SIGKILL if needed
+              p.proc.kill('SIGTERM');
+            }
             processManager.remove(label);
             return { success: true, message: `Process "${label}" killed` };
           } catch (error) {
@@ -397,6 +490,10 @@ export function createShellTools(options = {}) {
           arch: os.arch(),
           hostname: os.hostname(),
           uptime: Math.round(os.uptime() / 3600) + 'h',
+          isWindows: Platform.isWindows,
+          isMac: Platform.isMac,
+          isLinux: Platform.isLinux,
+          isWSL: Platform.isWSL,
         };
       }
 
@@ -429,6 +526,7 @@ export function createShellTools(options = {}) {
           path: process.env.PATH?.split(path.delimiter).slice(0, 5).join(', ') + '...',
           openagentWorkingDir: pathContext.getBaseDir(),
           openagentWorkspaceDir: pathContext.getWorkspaceDir(),
+          platform: Platform.getPlatformInfo(),
         };
       }
 

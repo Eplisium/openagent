@@ -1,0 +1,139 @@
+# OpenAgent User Manual
+
+## 🚀 Getting Started
+
+### Quick Launch
+```bash
+# From anywhere (with alias)
+openagent
+
+# Or directly
+cd /a0/usr/workdir/openagent && node src/cli.js
+
+# Quick command
+openagent "What is the weather today?"
+```
+
+### First-Time Setup
+1. The app will automatically detect your API key from `.env`
+2. Select your preferred AI model (346+ options available)
+3. Start chatting!
+
+## 💡 Key Features
+
+### Model Selection
+- **Interactive Browser**: Use arrow keys to navigate models
+- **Filters**: Sort by price, context size, company
+- **Search**: Type to filter models by name
+- **Favorites**: Pin your most-used models
+
+### Tool Capabilities
+| Tool | Description |
+|------|-------------|
+| **File Operations** | Read, write, edit files in your project |
+| **Shell Commands** | Execute terminal commands with output capture |
+| **Web Search** | Search the web and fetch documentation |
+| **Git Integration** | Commit, push, pull, diff, status |
+| **Multi-Agent** | Create specialized subagents for complex tasks |
+| **Memory** | Long-term storage of important information |
+| **Vision** | Analyze images and screenshots |
+
+### Example Workflows
+
+#### Code Development
+```bash
+openagent "Add user authentication to this Node.js app"
+openagent "Fix the bug in line 42 of main.py"
+openagent "Refactor this function to be more efficient"
+```
+
+#### Research & Analysis
+```bash
+openagent "Research the latest AI models and summarize findings"
+openagent "Analyze this codebase for security vulnerabilities"
+openagent "Create a technical specification for a new feature"
+```
+
+#### System Administration
+```bash
+openagent "Optimize this server's performance"
+openagent "Set up automated backups for my database"
+openagent "Monitor system resources and alert on issues"
+```
+
+## ⚙️ Configuration
+
+### Environment Variables (.env)
+```bash
+# Required
+OPENROUTER_API_KEY=your_key_here
+
+# Optional
+DEFAULT_MODEL=openrouter/anthropic/claude-sonnet-4-6
+MAX_COST_PER_REQUEST_USD=0.50
+TIMEOUT_MS=300000
+```
+
+### Advanced Settings
+- **Cost Control**: Set budget limits and alerts
+- **Timeouts**: Adjust for long-running tasks
+- **Logging**: Configure log levels and output
+
+## 🔄 Maintenance
+
+### Weekly Maintenance
+```bash
+cd /a0/usr/workdir/openagent
+./maintenance.sh
+```
+
+### Manual Updates
+```bash
+git pull origin main
+npm update
+npm run test:unit
+```
+
+### Backup & Restore
+```bash
+# Backup
+tar -czf openagent-backup.tar.gz /a0/usr/workdir/openagent ~/.openagent
+
+# Restore
+tar -xzf openagent-backup.tar.gz -C /
+```
+
+## 🆘 Troubleshooting
+
+### Common Issues
+1. **Model not loading**: Check internet connection and API key
+2. **Slow responses**: Try a different model or check system resources
+3. **Permission errors**: Ensure proper file permissions
+
+### Debug Commands
+```bash
+# Test API connection
+openagent --test-api
+
+# Check version
+openagent --version
+
+# List all models
+openagent --models
+```
+
+### Log Files
+- **Application logs**: `~/.openagent/logs/openagent.log`
+- **Error logs**: `~/.openagent/logs/error.log`
+- **Access logs**: `~/.openagent/logs/access.log`
+
+## 📚 Additional Resources
+
+- **GitHub**: https://github.com/Eplisium/openagent
+- **OpenRouter**: https://openrouter.ai
+- **Documentation**: `/a0/usr/workdir/openagent/README.md`
+- **API Reference**: `/a0/usr/workdir/openagent/openapi.json`
+
+---
+
+**Version**: 4.1.0 | **Platform**: Linux (Kali/Debian) | **Last Updated**: 2026-03-25

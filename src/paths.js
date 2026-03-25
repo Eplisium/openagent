@@ -1,3 +1,4 @@
+import os from 'os';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -257,4 +258,241 @@ export function isProtectedInstallationPath(resolvedPath) {
   }
 
   return false;
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// 🌐 Cross-Platform Utilities
+// ═══════════════════════════════════════════════════════════════
+
+import { Platform } from './utils/platform.js';
+import process from 'process';
+
+/**
+ * Get the user's home directory in a cross-platform way
+ * @returns {string}
+ */
+export function getHomeDirectory() {
+  // Use os.homedir() which is cross-platform
+  return os.homedir();
+}
+
+/**
+ * Get the system temp directory in a cross-platform way
+ * @returns {string}
+ */
+export function getTempDirectory() {
+  return os.tmpdir();
+}
+
+/**
+ * Normalize a path for the current platform
+ * Converts forward slashes and backslashes appropriately
+ * @param {string} inputPath
+ * @returns {string}
+ */
+export function normalizePath(inputPath) {
+  if (!inputPath) return inputPath;
+
+  // Convert to string and trim
+  let normalized = String(inputPath).trim();
+
+  if (Platform.isWindows) {
+    // Convert forward slashes to backslashes for Windows
+    normalized = normalized.replace(/\//g, '\\');
+    // Ensure drive letter is uppercase (e.g., c:\ -> C:\)
+    normalized = normalized.replace(/^([a-zA-Z]):/, (_, drive) => drive.toUpperCase() + ':');
+  } else {
+    // Convert backslashes to forward slashes for Unix
+    normalized = normalized.replace(/\\/g, '/');
+  }
+
+  // Resolve relative path segments (., ..) but keep the root
+  // We'll use path.normalize which handles this cross-platform
+  normalized = path.normalize(normalized);
+
+  return normalized;
+}
+
+/**
+ * Check if a path is absolute
+ * @param {string} inputPath
+ * @returns {boolean}
+ */
+export function isAbsolutePath(inputPath) {
+  if (!inputPath) return false;
+
+  // Use Node's path.isAbsolute which is cross-platform
+  return path.isAbsolute(inputPath);
+}
+
+/**
+ * Join multiple path segments cross-platform
+ * @param  {...string} segments
+ * @returns {string}
+ */
+export function joinPaths(...segments) {
+  // Use Node's path.join which handles platform separators
+  return path.join(...segments);
+}
+
+/**
+ * Get the appropriate configuration directory for the current platform
+ * @param {string} appName - The application name (e.g., 'openagent')
+ * @returns {string}
+ */
+export function getConfigDirectory(appName = 'openagent') {
+  const home = getHomeDirectory();
+
+  if (Platform.isWindows) {
+    // Windows: %USERPROFILE%\.openagent or %APPDATA%\openagent
+    const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    return path.join(appData, appName);
+  } else if (Platform.isMac) {
+    // macOS: ~/Library/Application Support/openagent or ~/.openagent
+    return path.join(home, 'Library', 'Application Support', appName);
+  } else {
+    // Linux/Unix: $XDG_CONFIG_HOME/openagent or ~/.openagent
+    const xdgConfigHome = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
+    return path.join(xdgConfigHome, appName);
+  }
+}
+
+/**
+ * Get the legacy home directory ( ~/.openagent )
+ * @returns {string}
+ */
+export function getLegacyHomeDirectory() {
+  return path.join(getHomeDirectory(), '.openagent');
+}
+
+/**
+ * Get the appropriate data directory for the current platform
+ * @param {string} appName - The application name (e.g., 'openagent')
+ * @returns {string}
+ */
+export function getDataDirectory(appName = 'openagent') {
+  const home = getHomeDirectory();
+
+  if (Platform.isWindows) {
+    // Windows: %USERPROFILE%\.openagent\data or %APPDATA%\openagent\data
+    const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    return path.join(appData, appName, 'data');
+  } else if (Platform.isMac) {
+    // macOS: ~/Library/Application Support/openagent/data
+    return path.join(home, 'Library', 'Application Support', appName, 'data');
+  } else {
+    // Linux/Unix: $XDG_DATA_HOME/openagent/data or ~/.local/share/openagent/data
+    const xdgDataHome = process.env.XDG_DATA_HOME || path.join(home, '.local', 'share');
+    return path.join(xdgDataHome, appName);
+  }
+}
+
+/**
+ * Check if a file is executable on the current platform
+ * @param {string} filePath
+ * @returns {boolean}
+ */
+export async function isExecutable(filePath) {
+  try {
+    const fs = await import('fs/promises');
+    const stats = await fs.stat(filePath);
+
+    if (Platform.isWindows) {
+      // On Windows, check file extension (.exe, .bat, .cmd, .ps1)
+      const ext = path.extname(filePath).toLowerCase();
+      return ['.exe', '.bat', '.cmd', '.ps1'].includes(ext);
+    } else {
+      // On Unix, check executable bit for owner, group, or other
+      const mode = stats.mode;
+      // Check if any execute bit is set (owner, group, or other)
+      return (mode & 0o111) !== 0;
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Make a file executable on Unix (no-op on Windows)
+ * @param {string} filePath
+ * @returns {Promise<void>}
+ */
+export async function makeExecutable(filePath) {
+  if (Platform.isWindows) {
+    // On Windows, just ensure the file has an executable extension
+    return;
+  }
+
+  const fs = await import('fs/promises');
+  // Add execute permission for owner, group, and other
+  await fs.chmod(filePath, 0o755);
+}
+
+/**
+ * Get the appropriate line ending for the current platform
+ * @returns {'\r\n' | '\n'}
+ */
+export function getLineEnding() {
+  return Platform.getEOL();
+}
+
+/**
+ * Get the path separator for the current platform
+ * @returns {';' | ':'}
+ */
+export function getPathSeparator() {
+  return path.delimiter; // Node's path.delimiter is already platform-specific
+}
+
+/**
+ * Resolve a path with cross-platform home directory expansion
+ * Supports ~ on Unix and %USERPROFILE% on Windows
+ * @param {string} inputPath
+ * @returns {string}
+ */
+export function expandHome(inputPath) {
+  if (!inputPath) return inputPath;
+
+  let expanded = inputPath;
+
+  if (Platform.isWindows) {
+    // Expand %USERPROFILE% and %HOME% on Windows
+    expanded = expanded.replace(/%USERPROFILE%/gi, getHomeDirectory());
+    expanded = expanded.replace(/%HOME%/gi, getHomeDirectory());
+  } else {
+    // Expand ~ on Unix-like systems
+    if (expanded.startsWith('~')) {
+      const home = getHomeDirectory();
+      expanded = expanded.replace(/^~/, home);
+    }
+  }
+
+  return normalizePath(expanded);
+}
+
+/**
+ * Get a cross-platform safe command for executing a file
+ * @param {string} filePath - Path to the executable
+ * @param {string[]} args - Arguments to pass
+ * @returns {string} The command string safe for the current shell
+ */
+export function getSafeCommand(filePath, args = []) {
+  const normalizedPath = normalizePath(filePath);
+
+  // Escape spaces and special characters for the shell
+  const escapeArg = (arg) => {
+    if (Platform.isWindows) {
+      // Windows: wrap in quotes if contains spaces
+      return arg.includes(' ') ? `"${arg}"` : arg;
+    } else {
+      // Unix: use single quotes and escape existing single quotes
+      return `'${arg.replace(/'/g, "'''")}'`;
+    }
+  };
+
+  const escapedPath = escapeArg(normalizedPath);
+  const escapedArgs = args.map(escapeArg);
+
+  return [escapedPath, ...escapedArgs].join(' ');
 }

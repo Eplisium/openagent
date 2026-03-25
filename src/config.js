@@ -1,7 +1,7 @@
 /**
  * 🎛️ OpenRouter Configuration v4.0
  * Centralized configuration for all API interactions
- * 
+ *
  * Enhanced with:
  * - Dynamic model selection from OpenRouter API
  * - No hardcoded models - everything comes from API
@@ -14,14 +14,15 @@
 
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import path from 'path';
+import os from 'os';
 import { normalizeOptionalLimit, normalizePositiveInt } from './utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const __dirname = path.dirname(__filename);
 
 // Load environment variables
-dotenv.config({ path: join(__dirname, '../.env') });
+dotenv.config({ path: path.join(__dirname, '../.env') });
 
 /**
  * ⚙️ Default Configuration
@@ -191,5 +192,116 @@ export const UI = {
   },
   SPINNER_STYLE: 'dots',
 };
+
+// ═══════════════════════════════════════════════════════════════
+// 🌐 Cross-Platform Configuration Paths
+// ═══════════════════════════════════════════════════════════════
+
+import { Platform } from './utils/platform.js';
+
+/**
+ * Get the OpenAgent configuration directory for the current platform
+ * - Windows: %USERPROFILE%\\.openagent\\ or %APPDATA%\\openagent\\
+ * - macOS: ~/.openagent/ or ~/Library/Application Support/openagent/
+ * - Linux: ~/.openagent/ or $XDG_CONFIG_HOME/openagent/
+ * @param {Object} options - Configuration options
+ * @returns {string}
+ */
+export function getConfigDir(options = {}) {
+  const home = os.homedir();
+  
+  // Allow override via OPENAGENT_HOME environment variable
+  if (process.env.OPENAGENT_HOME && !options.ignoreEnv) {
+    return path.resolve(process.env.OPENAGENT_HOME);
+  }
+  
+  // Legacy: use ~/.openagent/ for backward compatibility
+  const useLegacy = options.legacy !== false;
+  
+  if (Platform.isWindows) {
+    // Windows: prefer %USERPROFILE%\\.openagent\\ (legacy)
+    // Fallback to %APPDATA%\\openagent\\ (XDG-like)
+    if (useLegacy) {
+      return path.join(home, '.openagent');
+    }
+    const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    return path.join(appData, 'openagent');
+  } else if (Platform.isMac) {
+    // macOS: prefer ~/.openagent/ (legacy)
+    // Fallback to ~/Library/Application Support/openagent/
+    if (useLegacy) {
+      return path.join(home, '.openagent');
+    }
+    return path.join(home, 'Library', 'Application Support', 'openagent');
+  } else {
+    // Linux: prefer ~/.openagent/ (legacy)
+    // Fallback to $XDG_CONFIG_HOME/openagent/
+    if (useLegacy) {
+      return path.join(home, '.openagent');
+    }
+    const xdgConfigHome = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
+    return path.join(xdgConfigHome, 'openagent');
+  }
+}
+
+/**
+ * Get the data directory for OpenAgent
+ * @param {Object} options - Configuration options
+ * @returns {string}
+ */
+export function getDataDir(options = {}) {
+  const configDir = getConfigDir(options);
+  return path.join(configDir, 'data');
+}
+
+/**
+ * Get the cache directory for OpenAgent
+ * @param {Object} options - Configuration options
+ * @returns {string}
+ */
+export function getCacheDir(options = {}) {
+  if (Platform.isWindows) {
+    const temp = process.env.TEMP || process.env.TMP || 'C:\\Temp';
+    return path.join(temp, 'openagent-cache');
+  }
+  
+  // Unix: use /tmp or /var/tmp
+  const tmpDir = process.env.TMPDIR || '/tmp';
+  return path.join(tmpDir, 'openagent-cache');
+}
+
+/**
+ * Get the sessions directory for OpenAgent
+ * @param {Object} options - Configuration options
+ * @returns {string}
+ */
+export function getSessionsDir(options = {}) {
+  const configDir = getConfigDir(options);
+  return path.join(configDir, 'sessions');
+}
+
+/**
+ * Ensure all configuration directories exist
+ * @returns {Promise<void>}
+ */
+export async function ensureConfigDirs() {
+  const fs = await import('fs/promises');
+  const dirs = [
+    getConfigDir(),
+    getDataDir(),
+    getCacheDir(),
+    getSessionsDir(),
+  ];
+  
+  for (const dir of dirs) {
+    try {
+      await fs.mkdir(dir, { recursive: true });
+    } catch (error) {
+      if (error.code !== 'EEXIST') {
+        throw error;
+      }
+    }
+  }
+}
 
 export default { CONFIG, PLUGINS, UI };
