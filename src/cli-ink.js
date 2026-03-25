@@ -116,34 +116,39 @@ export async function startInkUI(options = {}) {
 }
 
 // If run directly (not imported) - with Windows path fix
-if (process.argv[1]) {
-  try {
-    // Try to convert process.argv[1] to a file URL if it's not already
-    let.argvPath = process.argv[1];
-    if (!argvPath.startsWith('file://')) {
-      // On Windows, convert path to file URL properly
-      try {
-        argvPath = pathToFileURL(argvPath).href;
-      } catch (e) {
-        // If conversion fails, try direct path comparison
-        const resolvedArgv = path.resolve(process.argv[1]);
-        const resolvedFilename = path.resolve(__filename);
-        if (resolvedArgv === resolvedFilename) {
-          startInkUI().catch(error => {
-            console.error('Fatal error:', error);
-            process.exit(1);
-          });
+// Wrapped in an async function to avoid top-level return
+async function main() {
+  if (process.argv[1]) {
+    try {
+      // Try to convert process.argv[1] to a file URL if it's not already
+      let argvPath = process.argv[1];
+      if (!argvPath.startsWith('file://')) {
+        // On Windows, convert path to file URL properly
+        try {
+          argvPath = pathToFileURL(argvPath).href;
+        } catch (e) {
+          // If conversion fails, try direct path comparison
+          const resolvedArgv = path.resolve(process.argv[1]);
+          const resolvedFilename = path.resolve(__filename);
+          if (resolvedArgv === resolvedFilename) {
+            await startInkUI();
+          }
+          return; // Exit function, not module
         }
-        return;
       }
+      if (fileURLToPath(argvPath) === __filename) {
+        await startInkUI();
+      }
+    } catch (error) {
+      // Ignore URL conversion errors when imported as a module
     }
-    if (fileURLToPath(argvPath) === __filename) {
-      startInkUI().catch(error => {
-        console.error('Fatal error:', error);
-        process.exit(1);
-      });
-    }
-  } catch (error) {
-    // Ignore URL conversion errors when imported as a module
   }
+}
+
+// Run main if this file is executed directly
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => {
+    console.error('Fatal error:', error);
+    process.exit(1);
+  });
 }
