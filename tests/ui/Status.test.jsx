@@ -101,7 +101,7 @@ describe('Status Component', () => {
     const { lastFrame } = render(<Status {...defaultProps} />);
     const frame = lastFrame();
     expect(frame).toContain('10');
-    expect(frame).toContain('messages');
+    expect(frame).toContain('msgs');
   });
 
   it('should use default values when props are not provided', () => {

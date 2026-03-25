@@ -79,7 +79,7 @@ describe('Platform Detection', () => {
     // Note: Platform.getShell() uses process.platform at runtime, so we can test with current platform
     const shell = Platform.getShell();
     expect(shell).toBeDefined();
-    expect(['powershell', 'bash', 'zsh', 'cmd']).toContain(shell);
+    expect(['powershell', 'pwsh', 'bash', 'zsh', 'fish', 'cmd']).toContain(shell);
   });
 
   it('should get correct executable extension', () => {

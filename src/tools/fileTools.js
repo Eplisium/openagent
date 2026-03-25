@@ -10,6 +10,7 @@ import { glob } from 'glob';
 import { createPathContext, isProtectedInstallationPath, getInstallationDir } from '../paths.js';
 import { encodeImageToBase64, getImageMimeType, isVisionModel } from '../vision.js';
 import { CONFIG } from '../config.js';
+import { Platform } from '../utils/platform.js';
 import { getCachedFile } from './fileCache.js';
 
 const PATH_PREFIX_NOTE = 'Supports absolute paths plus the special prefixes project:, workdir:, workspace:, and openagent:.';
@@ -106,7 +107,7 @@ export function createFileTools(options = {}) {
         }
 
         const { content } = await getCachedFile(resolvedPath);
-        const lines = content.split('\n');
+        const lines = Platform.splitLines(content);
         const MAX_LINES = CONFIG.FILE_READ_MAX_LINES;
         const MAX_CHARS = CONFIG.FILE_READ_MAX_CHARS;
 
@@ -184,7 +185,7 @@ export function createFileTools(options = {}) {
           path: resolvedPath,
           action: existed ? 'overwritten' : 'created',
           size: stat.size,
-          lines: content.split('\n').length,
+          lines: Platform.splitLines(content).length,
         };
       } catch (error) {
         return { success: false, error: error.message };
@@ -308,9 +309,9 @@ export function createFileTools(options = {}) {
               // Provide helpful context: show the first 200 chars of what was searched
               const searchedPreview = editFind.length > 200 ? editFind.substring(0, 200) + '...' : editFind;
               // Try to find the closest matching line for debugging
-              const searchLines = editFind.split('\n');
+              const searchLines = Platform.splitLines(editFind);
               const firstLine = searchLines[0].trim();
-              const contentLines = content.split('\n');
+              const contentLines = Platform.splitLines(content);
               const similarLines = contentLines
                 .map((line, i) => ({ line: i + 1, text: line.trim(), similarity: firstLine.length > 0 && line.includes(firstLine.substring(0, Math.min(20, firstLine.length))) ? 1 : 0 }))
                 .filter(l => l.similarity > 0)
@@ -337,8 +338,8 @@ export function createFileTools(options = {}) {
          * Collect line-level changes between original and new content.
          */
         function collectChanges(original, updated) {
-          const origLines = original.split('\n');
-          const newLines = updated.split('\n');
+          const origLines = Platform.splitLines(original);
+          const newLines = Platform.splitLines(updated);
           const changes = [];
           const maxLen = Math.max(origLines.length, newLines.length);
           for (let i = 0; i < maxLen; i++) {
@@ -356,7 +357,7 @@ export function createFileTools(options = {}) {
           if (replace === undefined) {
             return { success: false, error: 'Line-based editing requires the "replace" parameter' };
           }
-          const lines = content.split('\n');
+          const lines = Platform.splitLines(content);
           const startIdx = Math.max(0, startLine - 1);
           const endIdx = Math.min(lines.length, endLine);
           if (startIdx >= lines.length) {
@@ -365,9 +366,9 @@ export function createFileTools(options = {}) {
           if (endIdx <= startIdx) {
             return { success: false, error: `endLine (${endLine}) must be greater than startLine (${startLine})` };
           }
-          const newLines = replace.split('\n');
+          const newLines = Platform.splitLines(replace);
           const resultLines = [...lines.slice(0, startIdx), ...newLines, ...lines.slice(endIdx)];
-          content = resultLines.join('\n');
+          content = resultLines.join(Platform.getEOL());
 
           if (dryRun) {
             const changes = collectChanges(originalContent, content);
@@ -693,7 +694,7 @@ export function createFileTools(options = {}) {
 
           try {
             const content = await fs.readFile(file, 'utf-8');
-            const lines = content.split('\n');
+            const lines = Platform.splitLines(content);
             const matches = [];
 
             for (let i = 0; i < lines.length; i++) {
@@ -1117,8 +1118,8 @@ export function createFileTools(options = {}) {
         const content1 = await fs.readFile(resolvedFile1, 'utf-8');
         const content2 = await fs.readFile(resolvedFile2, 'utf-8');
 
-        const lines1 = content1.split('\n');
-        const lines2 = content2.split('\n');
+        const lines1 = Platform.splitLines(content1);
+        const lines2 = Platform.splitLines(content2);
         const maxLines = Math.max(lines1.length, lines2.length);
 
         const differences = [];
@@ -1237,8 +1238,8 @@ export function createFileTools(options = {}) {
         }
 
         // Build unified diff
-        const origLines = originalContent.split('\n');
-        const newLines = newContent.split('\n');
+        const origLines = Platform.splitLines(originalContent);
+        const newLines = Platform.splitLines(newContent);
         const diffLines = [];
         let changeCount = 0;
 
@@ -1345,7 +1346,7 @@ export function createFileTools(options = {}) {
         if (dryRun) {
           // Build preview of changes
           const origLines = content.split('\n');
-          const newLines = newContent.split('\n');
+          const newLines = Platform.splitLines(newContent);
           const changes = [];
           const maxLen = Math.max(origLines.length, newLines.length);
           for (let i = 0; i < maxLen; i++) {

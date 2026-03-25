@@ -4,7 +4,7 @@
  * Cross-platform compatible using cross-spawn
  */
 
-import { exec as execCb } from 'child_process';
+import { exec as execCb, execSync } from 'child_process';
 import crossSpawn from 'cross-spawn';
 import { promisify } from 'util';
 import path from 'path';
@@ -37,18 +37,18 @@ function sanitizeCommand(command) {
   // 🚫 HARD BLOCKS — Truly dangerous, never allow
   // ═══════════════════════════════════════════════════════════════
   
-  // Destructive operations on root filesystem
+  // Destructive operations on root filesystem (Unix)
   if (/rm\s+-rf\s+[\/\\]\s*$/i.test(lower)) return block(command, 'Recursive delete on root');
   if (/rm\s+-r\s+[\/\\]\s*$/i.test(lower)) return block(command, 'Recursive delete on root');
   
-  // Format drive (with force flags)
+  // Format drive (with force flags) — Windows
   if (/format\s+[a-z]:\s*\/[yq]/i.test(lower)) return block(command, 'Format drive with force');
   
   // System shutdown/reboot (with force flags)
   if (/\bshutdown\s+\/[sf]\b/i.test(lower)) return block(command, 'Force shutdown');
   if (/restart-computer\s+-force/i.test(lower)) return block(command, 'Force restart');
   
-  // Fork bombs
+  // Fork bombs — Unix
   if (/:\(\)\s*\{/.test(lower)) return block(command, 'Fork bomb');
   if (/:\(\)\|:/.test(lower)) return block(command, 'Fork bomb');
   
@@ -72,7 +72,7 @@ function sanitizeCommand(command) {
   if (/remove-item\s+.*-recurse\s+-force/i.test(lower)) return block(command, 'Mass delete with force');
   if (/rm\s+-rf\s+\*/i.test(lower)) return block(command, 'Delete all files');
   
-  // Registry destruction
+  // Registry destruction — Windows
   if (/remove-item\s+.*HKLM:\\SYSTEM/i.test(lower)) return block(command, 'Delete system registry');
   if (/remove-item\s+.*HKLM:\\SOFTWARE/i.test(lower)) return block(command, 'Delete software registry');
   
@@ -93,9 +93,9 @@ function block(command, reason) {
 
 /**
  * Detect if a command needs PowerShell
+ * Works on Windows only; on other platforms returns false
  */
 export function detectPowerShell(command) {
-  // On non-Windows, PowerShell detection doesn't apply
   if (!Platform.isWindows) {
     return false;
   }
@@ -126,32 +126,52 @@ export function escapeShellPath(filePath) {
   if (!filePath) return '';
   
   if (Platform.isWindows) {
-    // Windows: wrap in double quotes if contains spaces
-    if (filePath.includes(' ') || filePath.includes('(') || filePath.includes(')')) {
-      return `"${filePath}"`;
+    // Windows: wrap in double quotes if contains spaces or special chars
+    // Special chars on Windows: & | < > ^ ( ) % ! and spaces
+    const needsQuoting = /\s[&|<>^()%!]/.test(filePath) || filePath.includes(' ');
+    if (needsQuoting) {
+      // Use double quotes and escape inner double quotes with backslash
+      const escaped = filePath.replace(/"/g, '\\"');
+      return `"${escaped}"`;
     }
     return filePath;
   } else {
-    // Unix: escape special characters and wrap in single quotes
+    // Unix: single-quote and escape embedded single quotes
+    // Single quotes prevent all shell interpretation except for embedded single quotes
     return `'${filePath.replace(/'/g, "'\''")}'`;
   }
 }
 
 /**
  * Get the appropriate shell for executing commands
- * @returns {{ shell: string, args: string[] }}
+ * @returns {{ shell: string, args: string[], type: string }}
  */
 export function getExecutionShell() {
   if (Platform.isWindows) {
-    // On Windows, try PowerShell first, fallback to cmd.exe
-    const shell = Platform.getShell();
-    if (shell === 'powershell') {
-      return { shell: 'powershell.exe', args: ['-NoProfile', '-Command'] };
+    const shell = Platform.getShell(); // Returns 'pwsh', 'powershell', or 'cmd'
+    if (shell === 'pwsh') {
+      return { shell: 'pwsh.exe', args: ['-NoProfile', '-Command'], type: 'pwsh' };
     }
-    return { shell: 'cmd.exe', args: ['/c'] };
+    if (shell === 'powershell') {
+      return { shell: 'powershell.exe', args: ['-NoProfile', '-Command'], type: 'powershell' };
+    }
+    return { shell: 'cmd.exe', args: ['/c'], type: 'cmd' };
   } else {
-    // On Unix, use the default shell
-    return { shell: process.env.SHELL || '/bin/sh', args: ['-c'] };
+    // On Unix, use the default shell or fall back to /bin/sh
+    const shell = process.env.SHELL || '/bin/sh';
+    return { shell, args: ['-c'], type: shell.split('/').pop() };
+  }
+}
+
+/**
+ * Kill a process tree on Windows using taskkill (more reliable than SIGTERM)
+ * @param {number} pid
+ */
+function killProcessTreeWindows(pid) {
+  try {
+    execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', timeout: 5000 });
+  } catch {
+    // Process may have already exited
   }
 }
 
@@ -202,8 +222,7 @@ export function createShellTools(options = {}) {
         const resolvedCwd = resolvePathForAgent(cwd);
 
         // Get platform-appropriate shell configuration
-        const { shell, args } = getExecutionShell();
-        const isPowerShell = Platform.isWindows && shell.includes('powershell');
+        const { shell, type: shellType } = getExecutionShell();
         
         // Create abort controller for timeout
         const abortController = new AbortController();
@@ -225,12 +244,12 @@ export function createShellTools(options = {}) {
 
           return {
             success: true,
-            stdout: result.stdout,
-            stderr: result.stderr,
+            stdout: Platform.normalizeLineEndings(result.stdout || ''),
+            stderr: Platform.normalizeLineEndings(result.stderr || ''),
             command,
             cwd: resolvedCwd,
             exitCode: 0,
-            shell: isPowerShell ? 'powershell' : Platform.isWindows ? 'cmd' : 'unix',
+            shell: shellType,
           };
         } catch (error) {
           clearTimeout(timeoutId);
@@ -239,8 +258,8 @@ export function createShellTools(options = {}) {
           if (error.killed || error.code === 'ETIMEDOUT') {
             return {
               success: false,
-              stdout: error.stdout || '',
-              stderr: error.stderr || '',
+              stdout: Platform.normalizeLineEndings(error.stdout || ''),
+              stderr: Platform.normalizeLineEndings(error.stderr || ''),
               error: `Command timed out after ${timeout}ms`,
               command,
               exitCode: 124, // Standard timeout exit code
@@ -250,8 +269,8 @@ export function createShellTools(options = {}) {
           
           return {
             success: false,
-            stdout: error.stdout || '',
-            stderr: error.stderr || '',
+            stdout: Platform.normalizeLineEndings(error.stdout || ''),
+            stderr: Platform.normalizeLineEndings(error.stderr || ''),
             error: error.message,
             command,
             exitCode: error.code || 1,
@@ -301,12 +320,13 @@ export function createShellTools(options = {}) {
         const sanitizedCommand = sanitizeCommand(command);
         
         const resolvedCwd = resolvePathForAgent(cwd);
+        const { shell } = getExecutionShell();
         
         // Use cross-spawn for cross-platform process spawning
         // cross-spawn handles Windows cmd.exe quirks automatically
-        const proc = crossSpawn(sanitizedCommand, [], {
+        const proc = crossSpawn(shell, Platform.isWindows ? ['/c', sanitizedCommand] : ['-c', sanitizedCommand], {
           cwd: resolvedCwd,
-          shell: true,
+          shell: false, // We're passing shell explicitly
           stdio: ['ignore', 'pipe', 'pipe'],
           env: buildToolEnv(),
           // Windows-specific options
@@ -433,7 +453,7 @@ export function createShellTools(options = {}) {
           return {
             success: true,
             label: p.label,
-            output: p.output || 'No output captured',
+            output: Platform.normalizeLineEndings(p.output || 'No output captured'),
           };
         }
 
@@ -441,13 +461,22 @@ export function createShellTools(options = {}) {
           const p = processManager.get(label);
           if (!p) return { success: false, error: `Process "${label}" not found` };
           try {
-            // Use platform-appropriate kill signal
             if (Platform.isWindows) {
-              // On Windows, taskkill is more reliable
-              p.proc.kill('SIGTERM');
+              // On Windows, use taskkill for reliable process tree termination
+              killProcessTreeWindows(p.pid);
             } else {
-              // On Unix, use SIGTERM followed by SIGKILL if needed
+              // On Unix, try SIGTERM first — the process may handle it gracefully
               p.proc.kill('SIGTERM');
+              // Schedule SIGKILL after 3 seconds if process still alive
+              const forceTimeout = setTimeout(() => {
+                try {
+                  if (!p.proc.killed) {
+                    p.proc.kill('SIGKILL');
+                  }
+                } catch {}
+              }, 3000);
+              // Clean up timer if process exits naturally
+              p.proc.on('exit', () => clearTimeout(forceTimeout));
             }
             processManager.remove(label);
             return { success: true, message: `Process "${label}" killed` };

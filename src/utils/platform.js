@@ -6,6 +6,10 @@
 import os from 'os';
 import process from 'process';
 import { execSync } from 'child_process';
+import fs from 'fs';
+
+// Cache shell detection result to avoid repeated blocking execSync calls
+let _cachedShell = null;
 
 /**
  * Platform detection object with boolean flags and utility functions
@@ -19,26 +23,50 @@ export const Platform = {
 
   /**
    * Get the appropriate shell for the current platform
-   * @returns {'powershell' | 'bash' | 'zsh'}
+   * @returns {'powershell' | 'pwsh' | 'bash' | 'zsh' | 'cmd'}
    */
   getShell() {
+    // Return cached result to avoid repeated blocking execSync calls
+    if (_cachedShell !== null) {
+      return _cachedShell;
+    }
+
     if (this.isWindows) {
-      // Check if PowerShell is available, otherwise fallback to cmd
+      // Check for PowerShell Core (pwsh) first — it's cross-platform and preferred
       try {
-        execSync('powershell -Command "Write-Host test"', { stdio: 'ignore' });
-        return 'powershell';
+        execSync('where pwsh 2>NUL', { stdio: 'ignore', timeout: 3000 });
+        _cachedShell = 'pwsh';
+        return _cachedShell;
       } catch {
-        return 'cmd';
+        // Fall back to Windows PowerShell
+        try {
+          execSync('powershell -Command "Write-Host test"', { stdio: 'ignore', timeout: 3000 });
+          _cachedShell = 'powershell';
+          return _cachedShell;
+        } catch {
+          _cachedShell = 'cmd';
+          return _cachedShell;
+        }
       }
     }
 
     // Unix-like systems
     const shell = process.env.SHELL || '';
-    if (shell.includes('zsh')) return 'zsh';
-    if (shell.includes('bash')) return 'bash';
+    if (shell.includes('zsh')) _cachedShell = 'zsh';
+    else if (shell.includes('bash')) _cachedShell = 'bash';
+    else if (shell.includes('fish')) _cachedShell = 'fish';
+    else _cachedShell = 'bash'; // Default fallback
 
-    // Default fallback
-    return 'bash';
+    return _cachedShell;
+  },
+
+  /**
+   * Check if shell is any PowerShell variant (pwsh or powershell)
+   * @returns {boolean}
+   */
+  isPowerShell() {
+    const shell = this.getShell();
+    return shell === 'powershell' || shell === 'pwsh';
   },
 
   /**
@@ -58,19 +86,19 @@ export const Platform = {
   normalizeCommand(cmd) {
     if (!cmd) return '';
 
-    // Convert path separators for Windows
     if (this.isWindows) {
       // Replace forward slashes with backslashes in file paths
-      cmd = cmd.replace(/([a-zA-Z]:\/[\w\/.\-]+)/g, (match) => {
+      // Matches drive-letter paths like C:/foo/bar or D:/path/to/file
+      cmd = cmd.replace(/[a-zA-Z]:\/[\w\/.\-]+/g, (match) => {
         return match.replace(/\//g, '\\');
       });
-
+      // Also handle UNC paths: //server/share -> \\server\share
+      cmd = cmd.replace(/^\/\/([\w\-\.]+)\//g, '\\\\$1\\');
       // Convert Unix-style environment variable expansion ${VAR} to %VAR%
       cmd = cmd.replace(/\$\{(\w+)\}/g, '%$1%');
     } else {
       // Convert Windows-style environment variable expansion %VAR% to ${VAR}
-      cmd = cmd.replace(/%(\w+)%/g, '$${$1}');
-
+      cmd = cmd.replace(/%(\w+)%/g, '${$1}');
       // Convert backslashes to forward slashes in file paths (but not in regex)
       cmd = cmd.replace(/\\/g, '/');
     }
@@ -92,6 +120,33 @@ export const Platform = {
    */
   getEOL() {
     return this.isWindows ? '\r\n' : '\n';
+  },
+
+  /**
+   * Normalize line endings to the platform's native format
+   * Handles \r\n (Windows), \r (old Mac), and \n (Unix)
+   * @param {string} text - Text to normalize
+   * @returns {string}
+   */
+  normalizeLineEndings(text) {
+    if (!text) return '';
+    // First normalize everything to \n
+    const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    // Then convert to platform EOL if Windows
+    if (this.isWindows) {
+      return normalized.replace(/\n/g, '\r\n');
+    }
+    return normalized;
+  },
+
+  /**
+   * Split text into lines handling all line ending formats
+   * @param {string} text - Text to split
+   * @returns {string[]}
+   */
+  splitLines(text) {
+    if (!text) return [];
+    return text.split(/\r?\n/);
   },
 
   /**
@@ -121,12 +176,11 @@ try {
   if (Platform.isLinux) {
     const release = os.release().toLowerCase();
     const version = os.version?.() || "";
-    Platform.isWSL = release.includes("microsoft") || version.includes("microsoft") || 
+    Platform.isWSL = release.includes("microsoft") || version.includes("microsoft") ||
                      release.includes("WSL") || version.includes("WSL");
 
     // Alternative detection: check for WSL-specific files
     if (!Platform.isWSL) {
-      const fs = await import('fs');
       try {
         Platform.isWSL = fs.readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft');
       } catch {}
