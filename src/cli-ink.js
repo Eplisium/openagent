@@ -3,6 +3,9 @@
  * 🎨 OpenAgent Ink CLI Entry Point
  * Smart loader that uses bundled UI when available
  * Falls back to dev mode with tsx/esbuild if needed
+ * 
+ * IMPORTANT: This file must be safe to import without side effects!
+ * The traditional CLI (cli.js) imports startInkUI from here.
  */
 
 import { createRequire } from 'module';
@@ -10,8 +13,11 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import path from 'path';
 import fs from 'fs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Safe initialization that won't fail on import
+const __filename = typeof import.meta.url === 'string' 
+  ? fileURLToPath(import.meta.url) 
+  : process.argv[1] || '';
+const __dirname = __filename ? path.dirname(__filename) : process.cwd();
 const require = createRequire(import.meta.url);
 
 // Paths
@@ -53,12 +59,13 @@ async function buildUI() {
 
 /**
  * Main entry point - starts the Ink UI
+ * This function can be called from cli.js when user runs 'openagent --ui'
  */
 export async function startInkUI(options = {}) {
   // Check if bundled version exists
   if (fileExists(bundledPath)) {
     try {
-      // Dynamic import of bundled version using file:// URL
+      // Use pathToFileURL for Windows compatibility
       const bundleUrl = pathToFileURL(bundledPath).href;
       const module = await import(bundleUrl);
       if (module.default && typeof module.default === 'function') {
@@ -114,28 +121,22 @@ export async function startInkUI(options = {}) {
   process.exit(1);
 }
 
-// Determine if this file is being run directly (not imported)
-// Use path comparison instead of URL comparison for Windows compatibility
-function isRunningDirectly() {
-  if (!process.argv[1]) return false;
-  
+// Only run if this file is executed directly (not imported)
+// Use a very safe check that won't throw errors
+if (typeof process.argv[1] === 'string' && process.argv[1].length > 0) {
   try {
-    // Resolve both paths to absolute paths for comparison
-    // This handles case sensitivity issues on Windows (C: vs c:)
-    const argPath = path.resolve(process.argv[1]);
-    const thisPath = path.resolve(__filename);
+    // Resolve both paths and compare (case-insensitive for Windows)
+    const argPath = path.resolve(process.argv[1]).toLowerCase();
+    const thisPath = path.resolve(__filename).toLowerCase();
     
-    // Normalize paths for case-insensitive comparison (Windows)
-    return argPath.toLowerCase() === thisPath.toLowerCase();
-  } catch {
-    return false;
+    if (argPath === thisPath) {
+      startInkUI().catch(error => {
+        console.error('Fatal error:', error);
+        process.exit(1);
+      });
+    }
+  } catch (e) {
+    // Silently ignore any errors in the detection logic
+    // This ensures the file is safe to import even if detection fails
   }
-}
-
-// If run directly, execute the UI
-if (isRunningDirectly()) {
-  startInkUI().catch(error => {
-    console.error('Fatal error:', error);
-    process.exit(1);
-  });
 }
