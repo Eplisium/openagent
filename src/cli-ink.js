@@ -3,7 +3,7 @@
  * 🎨 OpenAgent Ink CLI Entry Point
  * Smart loader that uses bundled UI when available
  * Falls back to dev mode with tsx/esbuild if needed
- * 
+ *
  * CRITICAL: This file is imported by cli.js for the --ui flag.
  * It MUST NOT throw any errors when imported, only when run directly.
  */
@@ -50,6 +50,9 @@ try {
   }
 }
 
+// Module-level guard to prevent recursive loading
+let inkUIStarted = false;
+
 // ═══════════════════════════════════════════════════════════════
 // Helper functions
 // ═══════════════════════════════════════════════════════════════
@@ -67,8 +70,8 @@ async function buildUI() {
   console.log('🔨 Building UI bundle...');
   try {
     const { execSync } = await import('child_process');
-    execSync('npm run build', { 
-      cwd: projectRoot, 
+    execSync('npm run build', {
+      cwd: projectRoot,
       stdio: 'inherit',
       env: { ...process.env, NODE_ENV: 'production' }
     });
@@ -90,8 +93,16 @@ export async function startInkUI(options = {}) {
     return;
   }
   inkUIStarted = true;
-  // Check if bundled version exists
-  if (fileExists(bundledPath)) {
+  
+  // Check if we're already running the bundled version to prevent recursion
+  let isBundled = false;
+  try {
+    const bundleUrl = pathToFileURL(bundledPath).href;
+    isBundled = (import.meta.url === bundleUrl);
+  } catch {}
+  
+  // Check if bundled version exists and we're not already the bundle
+  if (!isBundled && fileExists(bundledPath)) {
     try {
       // Convert path to proper file:// URL for Windows compatibility
       const bundleUrl = pathToFileURL(bundledPath).href;
@@ -134,7 +145,7 @@ export async function startInkUI(options = {}) {
     
     try {
       const { execSync } = await import('child_process');
-      execSync('npx tsx src/cli-ink.js', { 
+      execSync('npx tsx src/cli-ink.js', {
         cwd: projectRoot,
         stdio: 'inherit',
         env: { ...process.env }
