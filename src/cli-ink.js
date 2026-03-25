@@ -58,12 +58,12 @@ export async function startInkUI(options = {}) {
   // Check if bundled version exists
   if (fileExists(bundledPath)) {
     try {
-      // Dynamic import of bundled version
-      const module = await import(bundledPath);
+      // Dynamic import of bundled version using file:// URL
+      const bundleUrl = pathToFileURL(bundledPath).href;
+      const module = await import(bundleUrl);
       if (module.default && typeof module.default === 'function') {
         return await module.default(options);
       }
-      // Some bundles export startInkUI directly
       if (module.startInkUI && typeof module.startInkUI === 'function') {
         return await module.startInkUI(options);
       }
@@ -72,8 +72,8 @@ export async function startInkUI(options = {}) {
       console.error('⚠️  Bundled UI failed to load, attempting rebuild...');
       const built = await buildUI();
       if (built && fileExists(bundledPath)) {
-        // Retry with newly built bundle
-        const module = await import(bundledPath);
+        const bundleUrl = pathToFileURL(bundledPath).href;
+        const module = await import(bundleUrl);
         if (module.default && typeof module.default === 'function') {
           return await module.default(options);
         }
@@ -87,7 +87,6 @@ export async function startInkUI(options = {}) {
     console.log('📦 No bundled UI found. Trying development mode...');
     console.log('   Tip: Run "npm run build" or "npm run dev:ui" for development');
     
-    // Try using tsx for dev mode (handles JSX natively)
     try {
       const { execSync } = await import('child_process');
       execSync('npx tsx src/cli-ink.js', { 
@@ -115,39 +114,27 @@ export async function startInkUI(options = {}) {
   process.exit(1);
 }
 
-// If run directly (not imported) - with Windows path fix
-// Wrapped in an async function to avoid top-level return
-async function main() {
-  if (process.argv[1]) {
-    try {
-      // Try to convert process.argv[1] to a file URL if it's not already
-      let argvPath = process.argv[1];
-      if (!argvPath.startsWith('file://')) {
-        // On Windows, convert path to file URL properly
-        try {
-          argvPath = pathToFileURL(argvPath).href;
-        } catch (e) {
-          // If conversion fails, try direct path comparison
-          const resolvedArgv = path.resolve(process.argv[1]);
-          const resolvedFilename = path.resolve(__filename);
-          if (resolvedArgv === resolvedFilename) {
-            await startInkUI();
-          }
-          return; // Exit function, not module
-        }
-      }
-      if (fileURLToPath(argvPath) === __filename) {
-        await startInkUI();
-      }
-    } catch (error) {
-      // Ignore URL conversion errors when imported as a module
-    }
+// Determine if this file is being run directly (not imported)
+// Use path comparison instead of URL comparison for Windows compatibility
+function isRunningDirectly() {
+  if (!process.argv[1]) return false;
+  
+  try {
+    // Resolve both paths to absolute paths for comparison
+    // This handles case sensitivity issues on Windows (C: vs c:)
+    const argPath = path.resolve(process.argv[1]);
+    const thisPath = path.resolve(__filename);
+    
+    // Normalize paths for case-insensitive comparison (Windows)
+    return argPath.toLowerCase() === thisPath.toLowerCase();
+  } catch {
+    return false;
   }
 }
 
-// Run main if this file is executed directly
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(error => {
+// If run directly, execute the UI
+if (isRunningDirectly()) {
+  startInkUI().catch(error => {
     console.error('Fatal error:', error);
     process.exit(1);
   });
