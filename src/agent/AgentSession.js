@@ -54,6 +54,11 @@ export class AgentSession {
   constructor(options = {}) {
     this.sessionId = options.sessionId || createSessionId();
     this.workingDir = path.resolve(options.workingDir || process.cwd());
+    this.permissions = {
+      allowFileDelete: true,
+      ...options.permissions,
+    };
+    this.allowFullAccess = options.allowFullAccess === true || this.permissions.allowFullAccess === true;
     this.workspaceManager = options.workspaceManager || new WorkspaceManager({
       workingDir: this.workingDir,
       openAgentDir: options.openAgentDir || CONFIG.OPENAGENT_HOME,
@@ -76,10 +81,12 @@ export class AgentSession {
       getBaseDir: () => this.workingDir,
       getWorkspaceDir: () => this.activeWorkspace?.workspaceDir || null,
       getOpenAgentDir: () => this.workspaceManager.openAgentDir,
+      permissions: this.permissions,
+      allowFullAccess: this.allowFullAccess,
     };
     
     // Create tool registry with all tools
-    this.toolRegistry = new ToolRegistry();
+    this.toolRegistry = new ToolRegistry({ permissions: this.permissions });
     this.toolRegistry.registerAll([
       ...createFileTools(toolPathOptions),
       ...createShellTools(toolPathOptions),
@@ -106,6 +113,8 @@ export class AgentSession {
       workspaceDir: this.activeWorkspace?.workspaceDir || null,
       getWorkspaceDir: () => this.activeWorkspace?.workspaceDir || null,
       openAgentDir: this.workspaceManager.openAgentDir,
+      permissions: this.permissions,
+      allowFullAccess: this.allowFullAccess,
       verbose: options.verbose !== false,
       maxConcurrent: options.maxSubagents || 3,
       parentAgent: null, // Will be set after agent creation
@@ -684,6 +693,8 @@ export class AgentSession {
       saveDir: dir,
       model: data.agent?.model,
       openAgentDir: options.openAgentDir || data.workspaceManager?.openAgentDir || CONFIG.OPENAGENT_HOME,
+      permissions: options.permissions,
+      allowFullAccess: options.allowFullAccess,
       activeWorkspace: data.activeWorkspace || null,
     });
     
@@ -745,6 +756,8 @@ export class AgentSession {
     const session = await AgentSession.load(mostRecent.sessionId, dir, {
       workingDir,
       openAgentDir: options.openAgentDir,
+      permissions: options.permissions,
+      allowFullAccess: options.allowFullAccess,
     });
 
     return session;

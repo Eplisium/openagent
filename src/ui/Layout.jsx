@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useCallback, useEffect } from 'react';
-import { Box, Text, useInput, useApp } from 'ink';
+import { Box, Text } from 'ink';
 import Sidebar from './Sidebar.jsx';
 import ChatArea from './ChatArea.jsx';
 import ModelSelector from './ModelSelector.jsx';
@@ -31,7 +31,6 @@ export default function Layout({
   modelBrowser = null,
   inputHistory = [],
 }) {
-  const { exit } = useApp();
   const [notification, setNotification] = useState(null);
 
   // Handle notification display
@@ -43,13 +42,6 @@ export default function Layout({
       return () => clearTimeout(timer);
     }
   }, [notifications]);
-
-  // Keyboard shortcut for sidebar toggle
-  useInput((input, key) => {
-    if (key.ctrl && input.toLowerCase() === 'b') {
-      setSidebarCollapsed(prev => !prev);
-    }
-  });
 
   // Handle view change with validation
   const handleViewChange = useCallback((view) => {

@@ -10,6 +10,7 @@
   },
   "scripts": {
     "start": "node src/cli.js",
+    "ui": "node src/cli.js --ui",
     "start:ui": "node dist/cli-ink.mjs",
     "cli": "node src/cli.js",
     "demo": "node examples/demo.js",

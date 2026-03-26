@@ -105,11 +105,16 @@ export async function createAgent(options = {}) {
 
   const workingDir = options.workingDir || process.cwd();
   const workspaceDir = options.workspaceDir || null;
+  const permissions = {
+    allowFileDelete: true,
+    ...options.permissions,
+  };
+  const allowFullAccess = options.allowFullAccess === true || permissions.allowFullAccess === true;
   
-  const registry = new ToolRegistry();
+  const registry = new ToolRegistry({ permissions });
   registry.registerAll([
-    ...createFileTools({ baseDir: workingDir, workspaceDir }),
-    ...createShellTools({ baseDir: workingDir, workspaceDir }),
+    ...createFileTools({ baseDir: workingDir, workspaceDir, permissions, allowFullAccess }),
+    ...createShellTools({ baseDir: workingDir, workspaceDir, permissions, allowFullAccess }),
     ...webTools,
     ...createGitTools({ baseDir: workingDir, workspaceDir }),
   ]);

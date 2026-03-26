@@ -320,17 +320,17 @@ export function createShellTools(options = {}) {
         const sanitizedCommand = sanitizeCommand(command);
         
         const resolvedCwd = resolvePathForAgent(cwd);
-        const { shell } = getExecutionShell();
+        const { shell, args: shellArgs, type: shellType } = getExecutionShell();
         
         // Use cross-spawn for cross-platform process spawning
         // cross-spawn handles Windows cmd.exe quirks automatically
-        const proc = crossSpawn(shell, Platform.isWindows ? ['/c', sanitizedCommand] : ['-c', sanitizedCommand], {
+        const proc = crossSpawn(shell, [...shellArgs, sanitizedCommand], {
           cwd: resolvedCwd,
           shell: false, // We're passing shell explicitly
           stdio: ['ignore', 'pipe', 'pipe'],
           env: buildToolEnv(),
           // Windows-specific options
-          windowsVerbatimArguments: Platform.isWindows,
+          windowsVerbatimArguments: Platform.isWindows && shellType === 'cmd',
         });
 
         const pid = proc.pid;

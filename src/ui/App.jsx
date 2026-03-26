@@ -125,11 +125,19 @@ export default function App({ config = {} }) {
         setInitStatus(`Creating session with ${selectedModel}...`);
 
         // Create agent session
+        const allowFullAccess = config.allowFullAccess === true || config.permissions?.allowFullAccess === true;
+        const permissions = {
+          allowFileDelete: true,
+          ...config.permissions,
+          allowFullAccess,
+        };
         const newSession = new AgentSession({
           workingDir: workingDir,
           model: selectedModel,
           verbose: true,
           streaming: true,
+          permissions,
+          allowFullAccess,
         });
 
         if (cancelled) return;

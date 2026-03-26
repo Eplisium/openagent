@@ -23,7 +23,7 @@ export class ToolRegistry {
     this.permissions = {
       allowShell: true,
       allowFileWrite: true,
-      allowFileDelete: false,
+      allowFileDelete: true,
       allowNetwork: true,
       allowGit: true,
       confirmDestructive: true,
@@ -69,6 +69,7 @@ export class ToolRegistry {
       enabled: tool.enabled !== false,
       category: tool.category || 'general',
       destructive: tool.destructive || false,
+      permission: tool.permission || null,
       timeout: tool.timeout || this.defaultTimeout,
     });
     
@@ -177,19 +178,40 @@ export class ToolRegistry {
         errorType: ToolErrorType.PERMISSION_DENIED,
       };
     }
-    if (tool.category === 'file' && tool.destructive && !this.permissions.allowFileDelete) {
-      this.recordExecution(toolName, args, false, Date.now() - startTime, 'File deletion disabled');
-      return { 
-        success: false, 
-        error: 'File deletion is disabled',
-        errorType: ToolErrorType.PERMISSION_DENIED,
-      };
+    if (tool.category === 'file') {
+      const filePermission = tool.permission || (tool.destructive ? 'delete' : 'read');
+
+      if (filePermission === 'write' && !this.permissions.allowFileWrite) {
+        this.recordExecution(toolName, args, false, Date.now() - startTime, 'File write access disabled');
+        return {
+          success: false,
+          error: 'File write access is disabled',
+          errorType: ToolErrorType.PERMISSION_DENIED,
+        };
+      }
+
+      if (filePermission === 'delete' && !this.permissions.allowFileDelete) {
+        this.recordExecution(toolName, args, false, Date.now() - startTime, 'File deletion disabled');
+        return {
+          success: false,
+          error: 'File deletion is disabled',
+          errorType: ToolErrorType.PERMISSION_DENIED,
+        };
+      }
     }
     if (tool.category === 'network' && !this.permissions.allowNetwork) {
       this.recordExecution(toolName, args, false, Date.now() - startTime, 'Network access disabled');
       return { 
         success: false, 
         error: 'Network access is disabled',
+        errorType: ToolErrorType.PERMISSION_DENIED,
+      };
+    }
+    if (tool.category === 'git' && !this.permissions.allowGit) {
+      this.recordExecution(toolName, args, false, Date.now() - startTime, 'Git access disabled');
+      return {
+        success: false,
+        error: 'Git access is disabled',
         errorType: ToolErrorType.PERMISSION_DENIED,
       };
     }

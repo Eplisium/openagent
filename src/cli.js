@@ -310,8 +310,6 @@ const box = boxStyles;
 
 const DIVIDER = chalk.dim('─'.repeat(Math.max(40, (process.stdout.columns || 80) - 2)));
 
-
-// ═══════════════════════════════════════════════════════════════════
 // 💻 CLI Class
 // ═══════════════════════════════════════════════════════════════════
 
@@ -322,6 +320,12 @@ export class CLI {
     this.modelBrowser = null;
     this.streaming = true;
     this.verbose = true;
+    this.allowFullAccess = options.allowFullAccess === true || options.permissions?.allowFullAccess === true;
+    this.permissions = {
+      allowFileDelete: true,
+      ...options.permissions,
+      allowFullAccess: this.allowFullAccess,
+    };
     this.history = [];
     this.mode = 'agent'; // 'agent' or 'chat'
     
@@ -429,7 +433,7 @@ export class CLI {
     ));
 
     // Warn if running from the OpenAgent installation directory
-    if (isInsideInstallationDir(this.workingDir)) {
+    if (isInsideInstallationDir(this.workingDir) && !this.allowFullAccess) {
       const installDir = getInstallationDir();
       console.log(boxen(
         chalk.yellow('⚠️  You are running OpenAgent from its installation directory.\n') +
@@ -736,6 +740,8 @@ export class CLI {
       model: modelId,
       verbose: this.verbose,
       streaming: this.streaming,
+      permissions: this.permissions,
+      allowFullAccess: this.allowFullAccess,
       sessionId,
       activeWorkspace,
       openAgentDir,
@@ -983,11 +989,6 @@ export class CLI {
 
     try {
       const result = await this.session.run(task);
-      
-      // Clear the progress timeout and indicator
-      clearTimeout(progressTimeout);
-      stopProgressIndicator();
-      
       const duration = Date.now() - startTime;
 
       // Only print if onResponse callback didn't already handle it
@@ -1844,6 +1845,8 @@ ${g.title('╚══════════════════════
 
     const loaded = await AgentSession.load(sessionId, undefined, {
       workingDir: this.workingDir,
+      permissions: this.permissions,
+      allowFullAccess: this.allowFullAccess,
     });
     if (loaded) {
       this.session = loaded;
@@ -3046,6 +3049,8 @@ try {
 // Check for --ui flag or 'ui' command
 const args = process.argv.slice(2);
 const useUI = args.includes('--ui') || args.includes('ui');
+const allowFullAccess = args.includes('--full-access') || process.env.OPENAGENT_FULL_ACCESS === 'true';
+const permissions = { allowFileDelete: true, allowFullAccess };
 const modelIndex = args.indexOf('--model');
 const model = modelIndex !== -1 && args[modelIndex + 1] ? args[modelIndex + 1] : undefined;
 const themeIndex = args.indexOf('--theme');
@@ -3053,13 +3058,13 @@ const theme = themeIndex !== -1 && args[themeIndex + 1] ? args[themeIndex + 1] :
 
 if (useUI) {
   // Start Ink UI
-  startInkUI({ model, theme }).catch((error) => {
+  startInkUI({ model, theme, allowFullAccess, permissions }).catch((error) => {
     console.error('Fatal error starting Ink UI:', error.message);
     process.exit(1);
   });
 } else if (resolvedArgv && resolvedFilename === resolvedArgv) {
   // Start traditional CLI
-  runCLI().catch((error) => {
+  runCLI({ allowFullAccess, permissions }).catch((error) => {
     console.error('Fatal error:', error.message);
     process.exit(1);
   });

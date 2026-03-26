@@ -75,21 +75,33 @@ export class MultiAgent {
     this.options = options;
     this.workingDir = path.resolve(options.workingDir || process.cwd());
     this.workspaceDir = options.workspaceDir ? path.resolve(options.workspaceDir) : null;
+    this.openAgentDir = options.openAgentDir ? path.resolve(options.openAgentDir) : null;
+    this.permissions = {
+      allowFileDelete: true,
+      ...options.permissions,
+    };
+    this.allowFullAccess = options.allowFullAccess === true || this.permissions.allowFullAccess === true;
     this.agents = new Map();
     this.sharedMemory = new Map();
     this.executionLog = [];
     this.maxParallel = options.maxParallel || 3;
     
     // Shared tool registry
-    this.sharedTools = new ToolRegistry();
+    this.sharedTools = new ToolRegistry({ permissions: this.permissions });
     this.sharedTools.registerAll([
       ...createFileTools({
         baseDir: this.workingDir,
         getWorkspaceDir: () => this.workspaceDir,
+        getOpenAgentDir: () => this.openAgentDir,
+        permissions: this.permissions,
+        allowFullAccess: this.allowFullAccess,
       }),
       ...createShellTools({
         baseDir: this.workingDir,
         getWorkspaceDir: () => this.workspaceDir,
+        getOpenAgentDir: () => this.openAgentDir,
+        permissions: this.permissions,
+        allowFullAccess: this.allowFullAccess,
       }),
       ...webTools,
       ...createGitTools({

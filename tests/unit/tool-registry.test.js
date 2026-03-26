@@ -169,6 +169,62 @@ describe('ToolRegistry', () => {
       expect(result.success).toBe(false);
       expect(result.error).toContain('Network access is disabled');
     });
+
+    it('should block file write tools when allowFileWrite is false', async () => {
+      registry.setPermissions({ allowFileWrite: false });
+      registry.register({
+        name: 'write_config',
+        category: 'file',
+        permission: 'write',
+        execute: async () => ({ success: true }),
+      });
+
+      const result = await registry.execute('write_config');
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('File write access is disabled');
+    });
+
+    it('should block file delete tools when allowFileDelete is false', async () => {
+      registry.setPermissions({ allowFileDelete: false });
+      registry.register({
+        name: 'delete_config',
+        category: 'file',
+        permission: 'delete',
+        destructive: true,
+        execute: async () => ({ success: true }),
+      });
+
+      const result = await registry.execute('delete_config');
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('File deletion is disabled');
+    });
+
+    it('should allow file write tools when only delete permission is disabled', async () => {
+      registry.setPermissions({ allowFileDelete: false, allowFileWrite: true });
+      registry.register({
+        name: 'move_config',
+        category: 'file',
+        permission: 'write',
+        destructive: true,
+        execute: async () => ({ success: true }),
+      });
+
+      const result = await registry.execute('move_config');
+      expect(result.success).toBe(true);
+    });
+
+    it('should block git tools when allowGit is false', async () => {
+      registry.setPermissions({ allowGit: false });
+      registry.register({
+        name: 'git_status',
+        category: 'git',
+        execute: async () => ({ success: true }),
+      });
+
+      const result = await registry.execute('git_status');
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Git access is disabled');
+    });
   });
 
   describe('list', () => {

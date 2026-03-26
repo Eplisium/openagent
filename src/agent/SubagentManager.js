@@ -137,6 +137,12 @@ export class SubagentManager {
     this.parentAgent = options.parentAgent || null;
     this.workingDir = path.resolve(options.workingDir || process.cwd());
     this.workspaceDir = options.workspaceDir ? path.resolve(options.workspaceDir) : null;
+    this.openAgentDir = options.openAgentDir ? path.resolve(options.openAgentDir) : null;
+    this.permissions = {
+      allowFileDelete: true,
+      ...options.permissions,
+    };
+    this.allowFullAccess = options.allowFullAccess === true || this.permissions.allowFullAccess === true;
     const externalWorkspaceGetter = typeof options.getWorkspaceDir === 'function' ? options.getWorkspaceDir : null;
     this.getWorkspaceDir = () => {
       const workspaceDir = externalWorkspaceGetter ? externalWorkspaceGetter() : this.workspaceDir;
@@ -152,15 +158,21 @@ export class SubagentManager {
     this.taskIdCounter = 0;
     
     // Shared tools - created once, reused by all subagents
-    this.sharedTools = new ToolRegistry();
+    this.sharedTools = new ToolRegistry({ permissions: this.permissions });
     this.sharedTools.registerAll([
       ...createFileTools({
         baseDir: this.workingDir,
         getWorkspaceDir: () => this.getWorkspaceDir(),
+        getOpenAgentDir: () => this.openAgentDir,
+        permissions: this.permissions,
+        allowFullAccess: this.allowFullAccess,
       }),
       ...createShellTools({
         baseDir: this.workingDir,
         getWorkspaceDir: () => this.getWorkspaceDir(),
+        getOpenAgentDir: () => this.openAgentDir,
+        permissions: this.permissions,
+        allowFullAccess: this.allowFullAccess,
       }),
       ...webTools,
       ...createGitTools({

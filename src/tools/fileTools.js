@@ -15,12 +15,11 @@ import { getCachedFile } from './fileCache.js';
 
 const PATH_PREFIX_NOTE = 'Supports absolute paths plus the special prefixes project:, workdir:, workspace:, and openagent:.';
 
-
-
 export function createFileTools(options = {}) {
   const pathContext = createPathContext(options);
   const resolvePathForAgent = pathContext.resolvePath;
   const getOpenAgentDir = pathContext.getOpenAgentDir;
+  const allowFullAccess = options.allowFullAccess === true || options.permissions?.allowFullAccess === true || process.env.OPENAGENT_FULL_ACCESS === 'true';
 
   async function buildMissingFileError(filePath, resolvedPath) {
     let error = `File not found: ${resolvedPath}`;
@@ -40,25 +39,42 @@ export function createFileTools(options = {}) {
   /**
    * Validate that a resolved path is within allowed directories
    */
-  function validatePath(resolvedPath) {
+  function normalizeForComparison(targetPath) {
+    const normalized = path.resolve(targetPath);
+    return Platform.isWindows ? normalized.toLowerCase() : normalized;
+  }
+
+  function isWithinAllowedDir(targetPath, allowedDir) {
+    const relative = path.relative(
+      normalizeForComparison(allowedDir),
+      normalizeForComparison(targetPath)
+    );
+
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  }
+
+  function validatePath(resolvedPath, { access = 'read' } = {}) {
     const baseDir = pathContext.getBaseDir();
     const workspaceDir = pathContext.getWorkspaceDir();
     const openAgentDir = getOpenAgentDir?.();
     
     const canonicalPath = path.resolve(resolvedPath);
-    const allowedDirs = [baseDir, workspaceDir, openAgentDir, os.homedir()].filter(Boolean).map(d => path.resolve(d));
+    const allowedDirs = [baseDir, workspaceDir, openAgentDir, os.homedir(), os.tmpdir()].filter(Boolean).map(d => path.resolve(d));
     
-    const isAllowed = allowedDirs.some(allowed => canonicalPath.startsWith(allowed));
+    const isAllowed = allowFullAccess || allowedDirs.some(allowed => isWithinAllowedDir(canonicalPath, allowed));
     if (!isAllowed && allowedDirs.length > 0) {
-      return { valid: false, error: `Path "${resolvedPath}" is outside allowed directories` };
+      return {
+        valid: false,
+        error: `Path "${resolvedPath}" is outside allowed directories. Start OpenAgent with --full-access or set OPENAGENT_FULL_ACCESS=true to allow arbitrary filesystem access.`
+      };
     }
 
     // Block writes to OpenAgent's own installation directory (source code protection)
-    if (isProtectedInstallationPath(canonicalPath)) {
+    if (access !== 'read' && !allowFullAccess && isProtectedInstallationPath(canonicalPath)) {
       const installDir = getInstallationDir();
       return {
         valid: false,
-        error: `Path "${resolvedPath}" is inside the OpenAgent installation directory (${installDir}). You cannot write to OpenAgent's own source code. Use your project directory or the workspace instead.`
+        error: `Path "${resolvedPath}" is inside the OpenAgent installation directory (${installDir}). You cannot write to OpenAgent's own source code unless you explicitly enable full access. Use your project directory or the workspace instead, or start OpenAgent with --full-access.`
       };
     }
 
@@ -149,6 +165,7 @@ export function createFileTools(options = {}) {
     name: 'write_file',
     description: `Write content to a file. Creates parent directories automatically. ${PATH_PREFIX_NOTE}`,
     category: 'file',
+    permission: 'write',
     parameters: {
       type: 'object',
       properties: {
@@ -168,7 +185,7 @@ export function createFileTools(options = {}) {
         const resolvedPath = resolvePathForAgent(filePath);
         
         // Validate path is within allowed directories
-        const pathValidation = validatePath(resolvedPath);
+        const pathValidation = validatePath(resolvedPath, { access: 'write' });
         if (!pathValidation.valid) {
           return { success: false, error: pathValidation.error };
         }
@@ -197,6 +214,7 @@ export function createFileTools(options = {}) {
     name: 'edit_file',
     description: `Edit a file by finding and replacing text. Supports: exact match, line-based editing (startLine/endLine), batch edits, regex, dry-run, and undo. ${PATH_PREFIX_NOTE}`,
     category: 'file',
+    permission: 'write',
     parameters: {
       type: 'object',
       properties: {
@@ -260,7 +278,7 @@ export function createFileTools(options = {}) {
         const resolvedPath = resolvePathForAgent(filePath);
         
         // Validate path is within allowed directories
-        const pathValidation = validatePath(resolvedPath);
+        const pathValidation = validatePath(resolvedPath, { access: 'write' });
         if (!pathValidation.valid) {
           return { success: false, error: pathValidation.error };
         }
@@ -869,6 +887,7 @@ export function createFileTools(options = {}) {
     description: `Safely delete a file with confirmation. Requires confirm=true to actually delete. ${PATH_PREFIX_NOTE}`,
     category: 'file',
     destructive: true,
+    permission: 'delete',
     parameters: {
       type: 'object',
       properties: {
@@ -888,7 +907,7 @@ export function createFileTools(options = {}) {
         const resolvedPath = resolvePathForAgent(filePath);
 
         // Validate path is within allowed directories
-        const pathValidation = validatePath(resolvedPath);
+        const pathValidation = validatePath(resolvedPath, { access: 'delete' });
         if (!pathValidation.valid) {
           return { success: false, error: pathValidation.error };
         }
@@ -931,7 +950,7 @@ export function createFileTools(options = {}) {
     name: 'move_file',
     description: `Move or rename a file or directory. ${PATH_PREFIX_NOTE}`,
     category: 'file',
-    destructive: true,
+    permission: 'write',
     parameters: {
       type: 'object',
       properties: {
@@ -952,11 +971,11 @@ export function createFileTools(options = {}) {
         const resolvedDestination = resolvePathForAgent(destination);
 
         // Validate paths are within allowed directories
-        const sourceValidation = validatePath(resolvedSource);
+        const sourceValidation = validatePath(resolvedSource, { access: 'write' });
         if (!sourceValidation.valid) {
           return { success: false, error: sourceValidation.error };
         }
-        const destValidation = validatePath(resolvedDestination);
+        const destValidation = validatePath(resolvedDestination, { access: 'write' });
         if (!destValidation.valid) {
           return { success: false, error: destValidation.error };
         }
@@ -1276,6 +1295,7 @@ export function createFileTools(options = {}) {
     name: 'search_and_replace',
     description: `Powerful regex search-and-replace across an entire file. Supports multiple patterns, case-insensitive matching, and preview mode. Ideal for bulk renames, refactoring, and pattern-based replacements. ${PATH_PREFIX_NOTE}`,
     category: 'file',
+    permission: 'write',
     parameters: {
       type: 'object',
       properties: {
@@ -1311,7 +1331,7 @@ export function createFileTools(options = {}) {
         const resolvedPath = resolvePathForAgent(filePath);
         
         // Validate path is within allowed directories
-        const pathValidation = validatePath(resolvedPath);
+        const pathValidation = validatePath(resolvedPath, { access: 'write' });
         if (!pathValidation.valid) {
           return { success: false, error: pathValidation.error };
         }

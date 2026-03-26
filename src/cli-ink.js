@@ -8,10 +8,13 @@
 import { fileURLToPath, pathToFileURL } from 'url';
 import path from 'path';
 import fs from 'fs';
+import { spawn } from 'child_process';
+import { createRequire } from 'module';
 
 // Determine if we are the bundle or the source
 const IS_BUNDLE = import.meta.url.startsWith('file://') &&
                   import.meta.url.includes('/dist/cli-ink.mjs');
+const require = createRequire(import.meta.url);
 
 let __filename = '';
 let __dirname = '';
@@ -41,6 +44,77 @@ function fileExists(p) {
   } catch {
     return false;
   }
+}
+
+function getCLIOptions(args = process.argv.slice(2)) {
+  const modelIndex = args.indexOf('--model');
+  const themeIndex = args.indexOf('--theme');
+  const allowFullAccess = args.includes('--full-access') || process.env.OPENAGENT_FULL_ACCESS === 'true';
+
+  return {
+    model: modelIndex !== -1 && args[modelIndex + 1] ? args[modelIndex + 1] : undefined,
+    theme: themeIndex !== -1 && args[themeIndex + 1] ? args[themeIndex + 1] : undefined,
+    allowFullAccess,
+    permissions: {
+      allowFileDelete: true,
+      allowFullAccess,
+    },
+  };
+}
+
+function buildResolvedOptions(options = {}) {
+  const cliOptions = getCLIOptions();
+  const resolved = {
+    ...cliOptions,
+    ...options,
+  };
+  const allowFullAccess = resolved.allowFullAccess === true || resolved.permissions?.allowFullAccess === true;
+
+  return {
+    ...resolved,
+    allowFullAccess,
+    permissions: {
+      allowFileDelete: true,
+      ...cliOptions.permissions,
+      ...options.permissions,
+      allowFullAccess,
+    },
+  };
+}
+
+function isSourceLaunchError(error) {
+  const message = `${error?.message || ''}`;
+  return error?.code === 'ERR_UNKNOWN_FILE_EXTENSION' || /Unknown file extension ".jsx"/.test(message);
+}
+
+async function relaunchSourceUIWithTsx() {
+  let tsxCliPath = '';
+
+  try {
+    tsxCliPath = require.resolve('tsx/dist/cli.mjs');
+  } catch {
+    return false;
+  }
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [tsxCliPath, __filename, ...process.argv.slice(2)], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: 'inherit',
+    });
+
+    child.on('error', reject);
+    child.on('exit', code => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`TSX UI launcher exited with code ${code}`));
+    });
+  });
+
+  return true;
 }
 
 /**
@@ -86,7 +160,7 @@ async function launchUI(options = {}) {
   
   console.log('');
   
-  const { unmount, rerender, waitUntilExit } = render(
+  const { unmount, waitUntilExit } = render(
     React.createElement(App, { config })
   );
   
@@ -98,10 +172,12 @@ async function launchUI(options = {}) {
  * Exported function called from cli.js
  */
 export async function startInkUI(options = {}) {
+  const resolvedOptions = buildResolvedOptions(options);
+
   // If we are already the bundle, launch directly (jsx is compiled in)
   if (IS_BUNDLE) {
     try {
-      await launchUI(options);
+      await launchUI(resolvedOptions);
     } catch (error) {
       console.error('Fatal error starting Ink UI:', error.message);
       console.error(error.stack);
@@ -110,25 +186,53 @@ export async function startInkUI(options = {}) {
     return;
   }
 
+  try {
+    await launchUI(resolvedOptions);
+    return;
+  } catch (error) {
+    if (!isSourceLaunchError(error)) {
+      console.error('Fatal error starting Ink UI:', error.message);
+      console.error(error.stack);
+      process.exit(1);
+    }
+  }
+
   // Not the bundle — must load the compiled bundle
   const bundlePath = getBundlePath();
-  if (!bundlePath) {
-    console.error('Bundle not found. Run "npm run build" first.');
-    process.exit(1);
+  if (bundlePath) {
+    try {
+      const bundle = await loadBundleUI();
+      if (bundle && typeof bundle.startInkUI === 'function') {
+        return await bundle.startInkUI(resolvedOptions);
+      }
+      console.error('Bundle loaded but does not export startInkUI.');
+      process.exit(1);
+    } catch (e) {
+      try {
+        if (await relaunchSourceUIWithTsx()) {
+          return;
+        }
+      } catch (tsxError) {
+        console.error('Failed to launch UI via tsx:', tsxError.message);
+      }
+
+      console.error('Failed to load bundle:', e.message);
+      console.error('Try running "npm run build" to rebuild.');
+      process.exit(1);
+    }
   }
 
   try {
-    const bundle = await loadBundleUI();
-    if (bundle && typeof bundle.startInkUI === 'function') {
-      return await bundle.startInkUI(options);
+    if (await relaunchSourceUIWithTsx()) {
+      return;
     }
-    console.error('Bundle loaded but does not export startInkUI.');
-    process.exit(1);
-  } catch (e) {
-    console.error('Failed to load bundle:', e.message);
-    console.error('Try running "npm run build" to rebuild.');
+  } catch (tsxError) {
+    console.error('Failed to launch UI via tsx:', tsxError.message);
     process.exit(1);
   }
+
+  console.error('Bundle not found. Run "npm run build" first.');
+  process.exit(1);
 }
 
 // Also export as default for compatibility
@@ -149,7 +253,7 @@ function shouldRunDirectly() {
 }
 
 if (shouldRunDirectly()) {
-  startInkUI().catch(error => {
+  startInkUI(getCLIOptions()).catch(error => {
     console.error('Fatal error:', error);
     process.exit(1);
   });
