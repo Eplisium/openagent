@@ -1078,14 +1078,8 @@ export class CLI {
       }
       await this.saveState();
     } catch (error) {
-      // Clear progress indicator on error
-      clearTimeout(progressTimeout);
-      stopProgressIndicator();
       this.showSmartError('task_execution', { message: error.message, task: this.currentTask, suggestions: this.generateErrorSuggestions(error, this.currentTask) });
     } finally {
-      // Ensure progress indicator is stopped
-      clearTimeout(progressTimeout);
-      stopProgressIndicator();
       this.session.agent.onToolStart = previousCallbacks.onToolStart;
       this.session.agent.onToolEnd = previousCallbacks.onToolEnd;
       this.session.agent.onResponse = previousCallbacks.onResponse;
