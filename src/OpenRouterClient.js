@@ -579,10 +579,17 @@ export class OpenRouterClient {
       if (ch === '"') { inString = !inString; continue; }
       if (inString) continue;
       if (ch === '{') depth++;
-      if (ch === '}') { depth--; if (depth === 0) {
-        // Double-check with actual JSON parse to avoid false positives
-        try { JSON.parse(trimmed); return true; } catch { return false; }
-      }}
+      if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          // Brace depth matched — arguments are complete.
+          // We skip JSON.parse here because parseAccumulatedToolCalls
+          // already handles repair parsing. The strict check was causing
+          // valid arguments with trailing whitespace or minor formatting
+          // to be rejected, preventing onToolCallReady from ever firing.
+          return true;
+        }
+      }
     }
     return false;
   }

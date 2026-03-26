@@ -13,6 +13,9 @@ const INLINE_PARAM_RE = /<parameter=([A-Za-z0-9_.-]+)>([\s\S]*?)<\/parameter>/gi
 const INVOKE_PARAM_RE = /<parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/parameter>/gi;
 const TOOL_USE_RE = /<tool_use>([\s\S]*?)<\/tool_use>/gi;
 const FUNC_CALLS_RE = /<function_calls>([\s\S]*?)<\/function_calls>/gi;
+const FUNC_CALLS_NAME_RE = /<function_name>([\s\S]*?)<\/function_name>/i;
+const FUNC_CALLS_PARAMS_RE = /<parameters>([\s\S]*?)<\/parameters>/i;
+const FUNC_CALLS_PARAM_RE = /<(\w+)>([\s\S]*?)<\/\1>/g;
 
 function coerceValue(value) {
   const trimmed = String(value ?? '').trim();
@@ -66,6 +69,30 @@ export function parseXmlToolCalls(content) {
     toolCalls.push({ id: 'xml_' + Date.now() + '_' + toolCalls.length, name, arguments: args });
   }
   cleanContent = cleanContent.replace(/<tool_use>[\s\S]*?<\/tool_use>/gi, '').trim();
+  // Parse <function_calls> blocks (Anthropic-style: <function_calls><invoke>...</invoke></function_calls>)
+  // Note: inner <invoke> blocks are already caught by INVOKE_BLOCK_RE above (it scans original content).
+  // This loop catches <function_calls> blocks that use <function_name>+<parameters> structure instead of <invoke>.
+  for (const m of content.matchAll(FUNC_CALLS_RE)) {
+    const block = m[1];
+    // Extract each <invoke> inside <function_calls> that wasn't already caught
+    // (INVOKE_BLOCK_RE already handles this from the full content, so we only need
+    // to handle the <function_name>+<parameters> sub-format here)
+    const nameMatch = block.match(FUNC_CALLS_NAME_RE);
+    const name = nameMatch?.[1]?.trim();
+    if (!name) continue;
+    const args = {};
+    const paramsMatch = block.match(FUNC_CALLS_PARAMS_RE);
+    if (paramsMatch) {
+      for (const pm of paramsMatch[1].matchAll(FUNC_CALLS_PARAM_RE)) {
+        args[pm[1]] = coerceValue(pm[2]);
+      }
+    }
+    // Deduplicate: skip if we already extracted this via INVOKE_BLOCK_RE
+    const alreadyExtracted = toolCalls.some(tc => tc.name === name && JSON.stringify(tc.arguments) === JSON.stringify(args));
+    if (!alreadyExtracted) {
+      toolCalls.push({ id: 'xml_' + Date.now() + '_' + toolCalls.length, name, arguments: args });
+    }
+  }
   cleanContent = cleanContent.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi, '').trim();
   cleanContent = cleanContent.replace(/\n{3,}/g, '\n\n').trim();
 
@@ -74,14 +101,16 @@ export function parseXmlToolCalls(content) {
 
 export function hasXmlToolCalls(content) {
   if (!content || typeof content !== 'string') return false;
+  // Use regex with context-aware patterns to reduce false positives from prose.
+  // Require the tag to appear at start of line or after whitespace (not inside a sentence).
   return (
-    content.includes('<tool_call>') ||
-    content.includes('<invoke ') ||
-    content.includes('<function=') ||
-    content.includes('<function_name>') ||
-    content.includes('<parameter=') ||
-    content.includes('<parameters>') ||
-    content.includes('<tool_use>') ||
-    content.includes('<function_calls>')
+    /(?:^|\s)<tool_call[\s>]/.test(content) ||
+    /(?:^|\s)<invoke\s+name=/.test(content) ||
+    /(?:^|\s)<function=/.test(content) ||
+    /(?:^|\s)<function_name>/.test(content) ||
+    /(?:^|\s)<parameter=/.test(content) ||
+    /(?:^|\s)<parameters>/.test(content) ||
+    /(?:^|\s)<tool_use>/.test(content) ||
+    /(?:^|\s)<function_calls>/.test(content)
   );
 }

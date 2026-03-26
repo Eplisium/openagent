@@ -1,30 +1,14 @@
 /**
  * 🎨 OpenAgent Ink UI - Layout Component
- * Main layout with sidebar and content area
+ * Main layout with sidebar and content area — wired to real backend
  */
 
 import React, { useState, useCallback, useEffect } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
 import Sidebar from './Sidebar.jsx';
 import ChatArea from './ChatArea.jsx';
+import ModelSelector from './ModelSelector.jsx';
 
-/**
- * Layout component - Main application layout with sidebar and content area
- * @param {Object} props - Component props
- * @param {Object} props.theme - Theme color object
- * @param {string} props.currentView - Current active view
- * @param {Function} props.setCurrentView - Function to set current view
- * @param {boolean} props.sidebarCollapsed - Whether sidebar is collapsed
- * @param {Function} props.setSidebarCollapsed - Function to toggle sidebar
- * @param {Array} props.messages - Chat messages array
- * @param {Function} props.setMessages - Function to set messages
- * @param {boolean} props.isProcessing - Whether processing is active
- * @param {Function} props.processMessage - Function to process a message
- * @param {string} props.model - Current model name
- * @param {Function} props.setModel - Function to set model
- * @param {Array} props.notifications - Active notifications
- * @param {Function} props.addNotification - Function to add notification
- */
 export default function Layout({
   theme,
   currentView,
@@ -38,10 +22,16 @@ export default function Layout({
   model,
   setModel,
   notifications = [],
-  addNotification
+  addNotification,
+  // Real backend data
+  activeToolCalls = [],
+  currentIteration = 0,
+  modelsLoaded = false,
+  availableModels = [],
+  modelBrowser = null,
+  inputHistory = [],
 }) {
   const { exit } = useApp();
-  const [inputValue, setInputValue] = useState('');
   const [notification, setNotification] = useState(null);
 
   // Handle notification display
@@ -66,21 +56,8 @@ export default function Layout({
     const validViews = ['chat', 'skills', 'memory', 'models', 'settings'];
     if (validViews.includes(view)) {
       setCurrentView(view);
-      if (addNotification) {
-        addNotification(`Switched to ${view} view`, 'info');
-      }
-    } else {
-      console.error(`Invalid view: ${view}`);
-      if (addNotification) {
-        addNotification(`Invalid view: ${view}`, 'error');
-      }
     }
-  }, [setCurrentView, addNotification]);
-
-  // Handle sidebar toggle
-  const handleSidebarToggle = useCallback(() => {
-    setSidebarCollapsed(prev => !prev);
-  }, [setSidebarCollapsed]);
+  }, [setCurrentView]);
 
   // Render main content based on current view
   const renderContent = () => {
@@ -95,6 +72,21 @@ export default function Layout({
               isProcessing={isProcessing}
               processMessage={processMessage}
               model={model}
+              activeToolCalls={activeToolCalls}
+              currentIteration={currentIteration}
+              inputHistory={inputHistory}
+            />
+          );
+        case 'models':
+          return (
+            <ModelSelector
+              theme={theme}
+              model={model}
+              setModel={setModel}
+              modelsLoaded={modelsLoaded}
+              availableModels={availableModels}
+              modelBrowser={modelBrowser}
+              addNotification={addNotification}
             />
           );
         case 'skills':
@@ -102,6 +94,9 @@ export default function Layout({
             <Box flexDirection="column" padding={2}>
               <Text color={theme.primary} bold>📦 Skills Management</Text>
               <Text color={theme.textMuted}>Browse and manage installed skills</Text>
+              <Box marginTop={1}>
+                <Text color={theme.textDim}>Skills panel coming soon. Use /tools to see available tools.</Text>
+              </Box>
             </Box>
           );
         case 'memory':
@@ -109,13 +104,9 @@ export default function Layout({
             <Box flexDirection="column" padding={2}>
               <Text color={theme.primary} bold>🧠 Memory Browser</Text>
               <Text color={theme.textMuted}>View and search memory entries</Text>
-            </Box>
-          );
-        case 'models':
-          return (
-            <Box flexDirection="column" padding={2}>
-              <Text color={theme.primary} bold>🤖 Model Selector</Text>
-              <Text color={theme.textMuted}>Current: {model}</Text>
+              <Box marginTop={1}>
+                <Text color={theme.textDim}>Memory panel coming soon.</Text>
+              </Box>
             </Box>
           );
         case 'settings':
@@ -123,6 +114,11 @@ export default function Layout({
             <Box flexDirection="column" padding={2}>
               <Text color={theme.primary} bold>⚙️ Settings</Text>
               <Text color={theme.textMuted}>Configure OpenAgent preferences</Text>
+              <Box marginTop={1} flexDirection="column">
+                <Text color={theme.textDim}>• Theme: Ctrl+T to cycle</Text>
+                <Text color={theme.textDim}>• Streaming: /stream to toggle</Text>
+                <Text color={theme.textDim}>• Verbose: /verbose to toggle</Text>
+              </Box>
             </Box>
           );
         default:
@@ -133,7 +129,6 @@ export default function Layout({
           );
       }
     } catch (error) {
-      console.error('Error rendering content:', error);
       return (
         <Box flexDirection="column" padding={2}>
           <Text color={theme.error}>❌ Error rendering view</Text>
@@ -146,21 +141,21 @@ export default function Layout({
   // Render notification toast
   const renderNotification = () => {
     if (!notification) return null;
-    
+
     const colors = {
       info: theme.info,
       success: theme.success,
       warning: theme.warning,
-      error: theme.error
+      error: theme.error,
     };
-    
+
     const icons = {
       info: 'ℹ️',
       success: '✅',
       warning: '⚠️',
-      error: '❌'
+      error: '❌',
     };
-    
+
     return (
       <Box
         position="absolute"
@@ -189,11 +184,11 @@ export default function Layout({
           currentView={currentView}
           setCurrentView={handleViewChange}
           collapsed={sidebarCollapsed}
-          onToggle={handleSidebarToggle}
+          onToggle={() => setSidebarCollapsed(prev => !prev)}
           messageCount={messages?.length || 0}
           model={model}
         />
-        
+
         {/* Main content */}
         <Box
           flexDirection="column"
@@ -206,7 +201,7 @@ export default function Layout({
           {renderContent()}
         </Box>
       </Box>
-      
+
       {/* Notification overlay */}
       {renderNotification()}
     </Box>

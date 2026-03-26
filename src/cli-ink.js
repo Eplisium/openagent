@@ -98,27 +98,35 @@ async function launchUI(options = {}) {
  * Exported function called from cli.js
  */
 export async function startInkUI(options = {}) {
-  // If we are not bundled, try to load the bundle first
-  if (!IS_BUNDLE) {
-    const bundlePath = getBundlePath();
-    if (bundlePath) {
-      try {
-        const bundle = await loadBundleUI();
-        if (bundle && typeof bundle.startInkUI === 'function') {
-          return await bundle.startInkUI(options);
-        }
-      } catch (e) {
-        // Bundle failed, fall back to direct loading
-        console.warn('Bundle load failed, attempting direct load:', e.message);
-      }
+  // If we are already the bundle, launch directly (jsx is compiled in)
+  if (IS_BUNDLE) {
+    try {
+      await launchUI(options);
+    } catch (error) {
+      console.error('Fatal error starting Ink UI:', error.message);
+      console.error(error.stack);
+      process.exit(1);
     }
+    return;
   }
-  
+
+  // Not the bundle — must load the compiled bundle
+  const bundlePath = getBundlePath();
+  if (!bundlePath) {
+    console.error('Bundle not found. Run "npm run build" first.');
+    process.exit(1);
+  }
+
   try {
-    await launchUI(options);
-  } catch (error) {
-    console.error('Fatal error starting Ink UI:', error.message);
-    console.error(error.stack);
+    const bundle = await loadBundleUI();
+    if (bundle && typeof bundle.startInkUI === 'function') {
+      return await bundle.startInkUI(options);
+    }
+    console.error('Bundle loaded but does not export startInkUI.');
+    process.exit(1);
+  } catch (e) {
+    console.error('Failed to load bundle:', e.message);
+    console.error('Try running "npm run build" to rebuild.');
     process.exit(1);
   }
 }

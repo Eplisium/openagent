@@ -1055,10 +1055,16 @@ Task: ${userInput}`;
         },
       });
 
+      let streamToolCalls = []; // Tool calls from final stream chunk (fallback)
+
       try {
         for await (const chunk of stream) {
           if (chunk.type === 'content') {
             fullContent += chunk.content;
+          } else if (chunk.type === 'tool_calls') {
+            // Capture tool calls from final stream chunk
+            // These may overlap with onToolCallReady — deduplicate later
+            streamToolCalls = chunk.toolCalls || [];
           } else if (chunk.type === 'done') {
             streamUsage = chunk.usage;
             // Detect truncation from token limit
@@ -1131,7 +1137,44 @@ Task: ${userInput}`;
 
       this.updateUsageStats(streamUsage);
 
-      if (allToolCalls.length === 0) {
+      // Merge tool calls: combine allToolCalls (from onToolCallReady) with streamToolCalls
+      // (onToolCallReady may not fire for all models/providers, or may fire for only some)
+      let finalToolCalls = [...allToolCalls];
+      if (streamToolCalls.length > 0) {
+        const existingIds = new Set(finalToolCalls.map(tc => tc.id));
+        for (const tc of streamToolCalls) {
+          if (!existingIds.has(tc.id)) {
+            finalToolCalls.push(tc);
+          }
+        }
+      }
+      // Dispatch any tool calls that weren't already handled by onToolCallReady
+      for (let i = 0; i < finalToolCalls.length; i++) {
+        if (!dispatchedPromises.has(i)) {
+          const tc = finalToolCalls[i];
+          if (this.onToolStart) this.onToolStart(tc.name, tc.arguments);
+          const promise = this.executeSingleToolCall(tc)
+            .then(result => {
+              completedResults.set(i, result);
+              if (this.onToolEnd) this.onToolEnd(tc.name, result.result);
+              return result;
+            })
+            .catch(err => {
+              const errResult = {
+                toolCallId: tc.id,
+                toolName: tc.name,
+                args: tc.arguments,
+                result: { success: false, error: err.message },
+              };
+              completedResults.set(i, errResult);
+              if (this.onToolEnd) this.onToolEnd(tc.name, errResult.result);
+              return errResult;
+            });
+          dispatchedPromises.set(i, promise);
+        }
+      }
+
+      if (finalToolCalls.length === 0) {
         // Check if the model output tool calls as XML in the content
         if (hasXmlToolCalls(fullContent)) {
           const parsed = parseXmlToolCalls(fullContent);
@@ -1161,25 +1204,25 @@ Task: ${userInput}`;
 
       // Build ordered results array
       const toolResults = [];
-      for (let i = 0; i < allToolCalls.length; i++) {
+      for (let i = 0; i < finalToolCalls.length; i++) {
         if (completedResults.has(i)) {
           toolResults.push(completedResults.get(i));
         } else {
           toolResults.push({
-            toolCallId: allToolCalls[i].id,
-            toolName: allToolCalls[i].name,
-            args: allToolCalls[i].arguments,
+            toolCallId: finalToolCalls[i].id,
+            toolName: finalToolCalls[i].name,
+            args: finalToolCalls[i].arguments,
             result: { success: false, error: 'Tool execution incomplete' },
           });
         }
       }
 
-      this.reflectOnToolResults(toolResults, allToolCalls);
+      this.reflectOnToolResults(toolResults, finalToolCalls);
       // Strip any XML tool call tags from content when native tool calls are present
       const cleanContent = (fullContent && hasXmlToolCalls(fullContent))
         ? parseXmlToolCalls(fullContent).cleanContent
         : fullContent;
-      await this.postToolIteration(allToolCalls, toolResults, cleanContent, iterationStart, runHistory);
+      await this.postToolIteration(finalToolCalls, toolResults, cleanContent, iterationStart, runHistory);
     }
 
     if (!finalResponse) {
@@ -1347,20 +1390,27 @@ Task: ${userInput}`;
           break;
         }
         
-        // Execute tool calls with enhanced error handling
-        const toolResults = await this.executeToolCallsEnhanced(toolCalls);
+        // Execute native tool calls with enhanced error handling
+        let toolResults = await this.executeToolCallsEnhanced(toolCalls);
+        let allToolCalls = [...toolCalls];
 
-        // Self-reflection: check for failed or empty results and inject guidance
-        this.reflectOnToolResults(toolResults, toolCalls);
-
-        // Strip any XML tool call tags from content when native tool calls are present
+        // Also check for XML tool calls in content — some models output both
         let cleanContent = response.content || '';
         if (cleanContent && hasXmlToolCalls(cleanContent)) {
-          cleanContent = parseXmlToolCalls(cleanContent).cleanContent;
+          const parsed = parseXmlToolCalls(cleanContent);
+          cleanContent = parsed.cleanContent;
+          if (parsed.toolCalls.length > 0) {
+            const xmlToolResults = await this.executeToolCallsEnhanced(parsed.toolCalls);
+            toolResults = toolResults.concat(xmlToolResults);
+            allToolCalls = allToolCalls.concat(parsed.toolCalls);
+          }
         }
 
+        // Self-reflection: check for failed or empty results and inject guidance
+        this.reflectOnToolResults(toolResults, allToolCalls);
+
         // Shared post-iteration processing (circuit breaker, stall, messages, history)
-        await this.postToolIteration(toolCalls, toolResults, cleanContent, iterationStart, runHistory);
+        await this.postToolIteration(allToolCalls, toolResults, cleanContent, iterationStart, runHistory);
       }
       
       if (!finalResponse) {

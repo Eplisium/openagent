@@ -16,7 +16,7 @@
     "test": "vitest run",
     "test:unit": "vitest run",
     "test:ui": "vitest run tests/ui/",
-    "build": "npx esbuild src/cli-ink.js --bundle --platform=node --format=esm --outfile=dist/cli-ink.mjs --jsx=automatic --loader:.jsx=jsx --external:react-devtools-core",
+    "build": "node esbuild.config.mjs",
     "build:full": "npm run build && npm test",
     "dev:ui": "tsx src/cli-ink.js",
     "streaming": "node examples/streaming-demo.js",

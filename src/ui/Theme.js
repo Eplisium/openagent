@@ -32,15 +32,36 @@ export const ThemeColors = {
   header: '#0F172A',
   input: '#1E293B',
   hover: '#334155',
+  active: '#1E3A5F',
+  
+  // Message colors
+  userMessage: '#1E3A5F',
+  assistantMessage: '#1E293B',
+  systemMessage: '#3B2F1A',
+  errorBackground: '#3B1A1A',
+  
+  // Streaming
+  streaming: '#00D9FF',
+  
+  // Cost indicators
+  costLow: '#10B981',
+  costMid: '#F59E0B',
+  costHigh: '#EF4444',
   
   // Code/syntax colors
-  codeBackground: '#1E293B',
+  codeBackground: '#0D1117',
   codeBorder: '#374151',
   syntaxKeyword: '#C084FC',
   syntaxString: '#34D399',
   syntaxNumber: '#FCD34D',
   syntaxComment: '#6B7280',
   syntaxFunction: '#60A5FA',
+  syntaxOperator: '#F59E0B',
+  
+  // Gradient colors for splash
+  gradientStart: '#00D9FF',
+  gradientMid: '#7C3AED',
+  gradientEnd: '#F59E0B',
 };
 
 export const LightThemeColors = {

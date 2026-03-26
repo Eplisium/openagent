@@ -1,23 +1,11 @@
 /**
- * 🎨 OpenAgent Ink UI - Sidebar Component
- * Navigation with skills, memory, models, settings
+ * 🎨 OpenAgent Ink UI - Sidebar Component (Polished)
+ * Navigation with visual hierarchy, active states, real stats, and smooth layout.
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Box, Text, useInput } from 'ink';
-import SelectInput from 'ink-select-input';
 
-/**
- * Sidebar navigation component
- * @param {Object} props - Component props
- * @param {Object} props.theme - Theme color object
- * @param {string} props.currentView - Current active view
- * @param {Function} props.setCurrentView - Function to set current view
- * @param {boolean} props.collapsed - Whether sidebar is collapsed
- * @param {Function} props.onToggle - Function to toggle sidebar
- * @param {number} props.messageCount - Number of messages in chat
- * @param {string} props.model - Current model name
- */
 export default function Sidebar({
   theme,
   currentView,
@@ -25,85 +13,29 @@ export default function Sidebar({
   collapsed = false,
   onToggle,
   messageCount = 0,
-  model = 'gpt-4'
+  model = 'gpt-4',
+  modelCount = 0,
+  modelsLoaded = false,
 }) {
-  // Mock data for stats - in real app would come from props or context
-  const [stats, setStats] = useState({
-    skills: 12,
-    memoryEntries: 42,
-    models: 8
-  });
+  const [hoveredItem, setHoveredItem] = useState(null);
 
-  // Navigation items configuration
   const navItems = useMemo(() => [
-    {
-      id: 'chat',
-      label: '💬 Chat',
-      description: 'Main conversation',
-      icon: '💬',
-      shortcut: 'Ctrl+1'
-    },
-    {
-      id: 'skills',
-      label: '📦 Skills',
-      description: `${stats.skills} installed`,
-      icon: '📦',
-      shortcut: 'Ctrl+2'
-    },
-    {
-      id: 'memory',
-      label: '🧠 Memory',
-      description: `${stats.memoryEntries} entries`,
-      icon: '🧠',
-      shortcut: 'Ctrl+3'
-    },
-    {
-      id: 'models',
-      label: '🤖 Models',
-      description: model,
-      icon: '🤖',
-      shortcut: 'Ctrl+4'
-    },
-    {
-      id: 'settings',
-      label: '⚙️ Settings',
-      description: 'Preferences',
-      icon: '⚙️',
-      shortcut: 'Ctrl+5'
-    }
-  ], [stats, model]);
+    { id: 'chat',    icon: '💬', label: 'Chat',    shortcut: '1' },
+    { id: 'skills',  icon: '📦', label: 'Skills',  shortcut: '2' },
+    { id: 'memory',  icon: '🧠', label: 'Memory',  shortcut: '3' },
+    { id: 'models',  icon: '🤖', label: 'Models',  shortcut: '4' },
+    { id: 'settings',icon: '⚙️', label: 'Settings', shortcut: '5' },
+  ], []);
 
-  // Handle keyboard shortcuts for navigation
+  // Keyboard shortcuts for nav
   useInput((input, key) => {
     if (key.ctrl) {
-      switch (input) {
-        case '1':
-          setCurrentView('chat');
-          break;
-        case '2':
-          setCurrentView('skills');
-          break;
-        case '3':
-          setCurrentView('memory');
-          break;
-        case '4':
-          setCurrentView('models');
-          break;
-        case '5':
-          setCurrentView('settings');
-          break;
-      }
+      const item = navItems.find(n => n.shortcut === input);
+      if (item) setCurrentView(item.id);
     }
   });
 
-  // Handle navigation item selection
-  const handleSelect = (item) => {
-    if (item && item.value) {
-      setCurrentView(item.value);
-    }
-  };
-
-  // Render collapsed sidebar (icon only)
+  // ─── Collapsed view ─────────────────────────────────────────────
   if (collapsed) {
     return (
       <Box
@@ -114,80 +46,95 @@ export default function Sidebar({
         borderColor={theme.border}
         borderRight={true}
       >
-        {navItems.map((item) => (
-          <Box
-            key={item.id}
-            paddingX={1}
-            paddingY={1}
-            backgroundColor={currentView === item.id ? theme.hover : 'transparent'}
-            justifyContent="center"
-          >
-            <Text color={currentView === item.id ? theme.primary : theme.textMuted}>
-              {item.icon}
-            </Text>
-          </Box>
-        ))}
-        
-        {/* Toggle button at bottom */}
-        <Box
-          marginTop="auto"
-          paddingX={1}
-          paddingY={1}
-          justifyContent="center"
-          onClick={onToggle}
-        >
-          <Text color={theme.textMuted}>◀</Text>
+        {navItems.map((item) => {
+          const isActive = currentView === item.id;
+          return (
+            <Box
+              key={item.id}
+              paddingX={0}
+              paddingY={1}
+              justifyContent="center"
+              backgroundColor={isActive ? theme.active : 'transparent'}
+              borderLeftStyle={isActive ? 'thick' : undefined}
+              borderLeftColor={isActive ? theme.primary : undefined}
+            >
+              <Text color={isActive ? theme.primary : theme.textMuted} bold={isActive}>
+                {item.icon}
+              </Text>
+            </Box>
+          );
+        })}
+
+        {/* Spacer */}
+        <Box flex={1} />
+
+        {/* Collapse toggle */}
+        <Box paddingY={1} justifyContent="center" onClick={onToggle}>
+          <Text color={theme.textMuted}>▶</Text>
         </Box>
       </Box>
     );
   }
 
-  // Render expanded sidebar
+  // ─── Expanded view ──────────────────────────────────────────────
+  const modelDisplay = model && model.length > 22
+    ? model.slice(0, 20) + '...'
+    : (model || 'No model');
+  const modelProvider = model ? model.split('/')[0] : '';
+
   return (
     <Box
-      width={30}
+      width={28}
       flexDirection="column"
       backgroundColor={theme.sidebar}
       borderStyle="single"
       borderColor={theme.border}
       borderRight={true}
     >
-      {/* Header */}
+      {/* ── Header ──────────────────────────────────────────────── */}
       <Box
         paddingX={2}
         paddingY={1}
         borderBottomStyle="single"
         borderBottomColor={theme.border}
       >
-        <Text color={theme.primary} bold>OpenAgent</Text>
+        <Text color={theme.primary} bold>⬡ OpenAgent</Text>
       </Box>
 
-      {/* Navigation items */}
-      <Box flexDirection="column" flex={1}>
-        <SelectInput
-          items={navItems.map(item => ({
-            label: `${item.icon} ${item.id.charAt(0).toUpperCase() + item.id.slice(1)}`,
-            value: item.id,
-            description: item.description
-          }))}
-          onSelect={handleSelect}
-          initialIndex={navItems.findIndex(item => item.id === currentView)}
-          indicatorComponent={({ isSelected }) => (
-            <Text color={isSelected ? theme.primary : 'transparent'}>
-              {isSelected ? '▸' : ' '}
-            </Text>
-          )}
-          itemComponent={({ isSelected, label }) => (
-            <Box>
-              <Text color={isSelected ? theme.primary : theme.text}>
-                {label}
+      {/* ── Navigation ──────────────────────────────────────────── */}
+      <Box flexDirection="column" paddingY={1}>
+        <Box paddingX={2} marginBottom={0}>
+          <Text color={theme.textDim} bold>NAVIGATION</Text>
+        </Box>
+        {navItems.map((item) => {
+          const isActive = currentView === item.id;
+          return (
+            <Box
+              key={item.id}
+              paddingX={2}
+              paddingY={0}
+              backgroundColor={isActive ? theme.active : 'transparent'}
+              borderLeftStyle={isActive ? 'thick' : undefined}
+              borderLeftColor={isActive ? theme.primary : undefined}
+              onClick={() => setCurrentView(item.id)}
+            >
+              <Text color={isActive ? theme.primary : theme.textMuted} bold={isActive}>
+                {isActive ? '▸ ' : '  '}
               </Text>
+              <Text color={isActive ? theme.primary : theme.text} bold={isActive}>
+                {item.icon} {item.label}
+              </Text>
+              <Box flexGrow={1} />
+              <Text color={theme.textDim}>^ {item.shortcut}</Text>
             </Box>
-          )}
-        />
+          );
+        })}
       </Box>
 
-      {/* Stats section */}
+      {/* ── Spacer ──────────────────────────────────────────────── */}
+      <Box flex={1} />
+
+      {/* ── Current Model ───────────────────────────────────────── */}
       <Box
         flexDirection="column"
         paddingX={2}
@@ -195,21 +142,41 @@ export default function Sidebar({
         borderTopStyle="single"
         borderTopColor={theme.border}
       >
-        <Text color={theme.textMuted} fontSize={1}>
-          📊 Stats
-        </Text>
-        <Text color={theme.textDim} fontSize={1}>
-          • Messages: {messageCount}
-        </Text>
-        <Text color={theme.textDim} fontSize={1}>
-          • Skills: {stats.skills}
-        </Text>
-        <Text color={theme.textDim} fontSize={1}>
-          • Memory: {stats.memoryEntries}
-        </Text>
+        <Text color={theme.textDim} bold>MODEL</Text>
+        <Box marginTop={0}>
+          <Text color={theme.accent} wrap="truncate">
+            {modelDisplay}
+          </Text>
+        </Box>
+        {modelProvider && (
+          <Text color={theme.textDim}>
+            Provider: {modelProvider}
+          </Text>
+        )}
       </Box>
 
-      {/* Collapse button */}
+      {/* ── Stats ────────────────────────────────────────────────── */}
+      <Box
+        flexDirection="column"
+        paddingX={2}
+        paddingY={1}
+        borderTopStyle="single"
+        borderTopColor={theme.border}
+      >
+        <Text color={theme.textDim} bold>SESSION</Text>
+        <Box justifyContent="space-between">
+          <Text color={theme.textMuted}>Messages</Text>
+          <Text color={theme.text}>{messageCount}</Text>
+        </Box>
+        <Box justifyContent="space-between">
+          <Text color={theme.textMuted}>Models</Text>
+          <Text color={theme.text}>
+            {modelsLoaded ? modelCount : '...'}
+          </Text>
+        </Box>
+      </Box>
+
+      {/* ── Collapse toggle ──────────────────────────────────────── */}
       <Box
         paddingX={2}
         paddingY={1}
@@ -218,7 +185,7 @@ export default function Sidebar({
         borderTopColor={theme.border}
         onClick={onToggle}
       >
-        <Text color={theme.textMuted}>◀ Collapse</Text>
+        <Text color={theme.textDim}>◀ Collapse (Ctrl+B)</Text>
       </Box>
     </Box>
   );

@@ -1,6 +1,6 @@
 /**
  * OpenAgent Ink UI - Status Component
- * Real-time status bar showing model, processing state, and stats
+ * Real-time status bar showing model, processing state, cost, tokens, and iteration
  */
 
 import React, { useState, useEffect } from 'react';
@@ -14,7 +14,8 @@ export default function Status({
   isProcessing = false,
   messageCount = 0,
   cost = 0,
-  tokens = 0
+  tokens = 0,
+  iteration = 0,
 }) {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [spinnerFrame, setSpinnerFrame] = useState(0);
@@ -43,16 +44,16 @@ export default function Status({
       borderColor={theme?.border}
       borderTop={true}
       paddingX={2}
-      paddingY={1}
+      paddingY={0}
       justifyContent="space-between"
     >
       <Box alignItems="center">
         <Box marginRight={2}>
-          <Text color={theme?.primary} bold>🤖 {model}</Text>
+          <Text color={theme?.primary} bold>🤖 {model || 'no model'}</Text>
         </Box>
         {isProcessing ? (
           <Box marginRight={2}>
-            <Text color={theme?.warning}>{SPINNER_FRAMES[spinnerFrame]} Processing...</Text>
+            <Text color={theme?.warning}>{SPINNER_FRAMES[spinnerFrame]} Working{iteration > 0 ? ` (iter ${iteration})` : ''}</Text>
           </Box>
         ) : (
           <Box marginRight={2}>
@@ -61,9 +62,9 @@ export default function Status({
         )}
       </Box>
       <Box alignItems="center">
-        <Text color={theme?.textMuted}>📨 {messageCount} msgs</Text>
+        <Text color={theme?.textMuted}>📨 {messageCount}</Text>
         <Text color={theme?.textMuted}>  💰 {formatCost(cost)}</Text>
-        <Text color={theme?.textMuted}>  🔢 {formatTokens(tokens)} tok</Text>
+        <Text color={theme?.textMuted}>  🔢 {formatTokens(tokens)}</Text>
       </Box>
       <Box alignItems="center">
         <Text color={theme?.textDim}>🕒 {formatTime(currentTime)}</Text>
