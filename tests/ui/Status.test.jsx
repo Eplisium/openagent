@@ -87,7 +87,7 @@ describe('Status Component', () => {
     const props = { ...defaultProps, isProcessing: true };
     const { lastFrame } = render(<Status {...props} />);
     const frame = lastFrame();
-    expect(frame).toContain('Processing');
+    expect(frame).toContain('Working');
   });
 
   it('should display ready indicator when isProcessing is false', () => {
@@ -101,7 +101,7 @@ describe('Status Component', () => {
     const { lastFrame } = render(<Status {...defaultProps} />);
     const frame = lastFrame();
     expect(frame).toContain('10');
-    expect(frame).toContain('msgs');
+    expect(frame).toContain('💬');
   });
 
   it('should use default values when props are not provided', () => {

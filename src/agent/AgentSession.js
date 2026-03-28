@@ -38,8 +38,20 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let _agentSystemPromptTemplate = null;
 function getAgentSystemPromptTemplate() {
   if (!_agentSystemPromptTemplate) {
-    const promptPath = path.join(__dirname, '..', 'prompts', 'agent-system.md');
-    _agentSystemPromptTemplate = fs.readFileSync(promptPath, 'utf-8');
+    // Try bundled location first (dist/../prompts/), then source location (src/prompts/)
+    const candidates = [
+      path.join(__dirname, '..', 'prompts', 'agent-system.md'),
+      path.join(__dirname, '..', '..', 'src', 'prompts', 'agent-system.md'),
+    ];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) {
+        _agentSystemPromptTemplate = fs.readFileSync(p, 'utf-8');
+        break;
+      }
+    }
+    if (!_agentSystemPromptTemplate) {
+      throw new Error(`agent-system.md not found. Tried: ${candidates.join(', ')}`);
+    }
   }
   return _agentSystemPromptTemplate;
 }
@@ -704,7 +716,7 @@ export class AgentSession {
     session.activeWorkspace = data.activeWorkspace || null;
     session.taskManager.setWorkspaceDir(session.activeWorkspace?.workspaceDir || null);
     session.subagentManager.setWorkspaceDir(session.activeWorkspace?.workspaceDir || null);
-    session.refreshSystemPrompt();
+    await session.refreshSystemPrompt();
     
     return session;
   }

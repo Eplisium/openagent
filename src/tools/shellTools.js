@@ -128,7 +128,7 @@ export function escapeShellPath(filePath) {
   if (Platform.isWindows) {
     // Windows: wrap in double quotes if contains spaces or special chars
     // Special chars on Windows: & | < > ^ ( ) % ! and spaces
-    const needsQuoting = /\s[&|<>^()%!]/.test(filePath) || filePath.includes(' ');
+    const needsQuoting = /[&|<>^()%!]/.test(filePath) || filePath.includes(' ');
     if (needsQuoting) {
       // Use double quotes and escape inner double quotes with backslash
       const escaped = filePath.replace(/"/g, '\\"');

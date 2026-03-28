@@ -35,7 +35,6 @@ export {
 export {
   CONFIG,
   PLUGINS,
-  UI,
 } from './config.js';
 
 // Utilities

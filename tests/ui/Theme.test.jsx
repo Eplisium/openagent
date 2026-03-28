@@ -91,7 +91,13 @@ describe('Theme System', () => {
 
   describe('THEME_NAMES', () => {
     it('should be an array of theme names', () => {
-      expect(THEME_NAMES).toEqual(['dark', 'light', 'high-contrast']);
+      expect(THEME_NAMES).toContain('dark');
+      expect(THEME_NAMES).toContain('light');
+      expect(THEME_NAMES).toContain('high-contrast');
+      expect(THEME_NAMES).toContain('nord');
+      expect(THEME_NAMES).toContain('dracula');
+      expect(THEME_NAMES).toContain('monokai');
+      expect(THEME_NAMES.length).toBe(6);
     });
   });
 
@@ -129,7 +135,12 @@ describe('Theme System', () => {
     describe('list()', () => {
       it('should return array of theme names', () => {
         const list = ThemeProvider.list();
-        expect(list).toEqual(['dark', 'light', 'high-contrast']);
+        expect(list).toContain('dark');
+        expect(list).toContain('light');
+        expect(list).toContain('high-contrast');
+        expect(list).toContain('nord');
+        expect(list).toContain('dracula');
+        expect(list).toContain('monokai');
       });
     });
 
@@ -142,7 +153,7 @@ describe('Theme System', () => {
       });
 
       it('should cycle back to first theme after last', () => {
-        ThemeProvider.set('high-contrast');
+        ThemeProvider.set('monokai');
         const nextTheme = ThemeProvider.next();
         expect(nextTheme).toBe('dark');
         expect(ThemeProvider.current).toBe('dark');

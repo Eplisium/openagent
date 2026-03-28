@@ -43,8 +43,8 @@ export const CONFIG = {
   FALLBACK_MODEL: process.env.FALLBACK_MODEL || null,
   
   // Request Settings
-  MAX_RETRIES: parseInt(process.env.MAX_RETRIES) || 3,
-  TIMEOUT_MS: parseInt(process.env.TIMEOUT_MS) || 120000, // 2 minutes (reduced from 5min — most responses come in <30s)
+  MAX_RETRIES: parseInt(process.env.MAX_RETRIES, 10) || 3,
+  TIMEOUT_MS: parseInt(process.env.TIMEOUT_MS, 10) || 120000, // 2 minutes (reduced from 5min — most responses come in <30s)
   STREAMING_ENABLED: process.env.STREAMING_ENABLED !== 'false',
   
   // Cost Control
@@ -76,7 +76,7 @@ export const CONFIG = {
   STREAM_KEEP_ALIVE: true,
   
   // Context Management
-  MAX_CONTEXT_TOKENS: parseInt(process.env.MAX_CONTEXT_TOKENS) || 800000,
+  MAX_CONTEXT_TOKENS: parseInt(process.env.MAX_CONTEXT_TOKENS, 10) || 800000,
   COMPACT_THRESHOLD: parseFloat(process.env.COMPACT_THRESHOLD) || 0.7,
   AGENT_MAX_ITERATIONS: normalizeOptionalLimit(process.env.AGENT_MAX_ITERATIONS, null),
   AGENT_MAX_RUNTIME_MS: normalizeOptionalLimit(process.env.AGENT_MAX_RUNTIME_MS, null),
@@ -84,15 +84,15 @@ export const CONFIG = {
   AGENT_MAX_STALL_ITERATIONS: normalizePositiveInt(process.env.AGENT_MAX_STALL_ITERATIONS, 8),
   
   // Tool Settings
-  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS) || 60000, // 60s (reduced from 300s — most tools finish in <10s)
-  MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS) || 80000,
+  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS, 10) || 60000, // 60s (reduced from 300s — most tools finish in <10s)
+  MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS, 10) || 80000,
 
   // Workspace Settings
   OPENAGENT_HOME: process.env.OPENAGENT_HOME || null,
   
   // Performance
-  MIN_REQUEST_INTERVAL_MS: parseInt(process.env.MIN_REQUEST_INTERVAL_MS) || 50, // Reduced from 100ms
-  CACHE_TTL_MS: parseInt(process.env.CACHE_TTL_MS) || 10 * 60 * 1000, // 10 minutes (increased — cache hits save full API roundtrip)
+  MIN_REQUEST_INTERVAL_MS: parseInt(process.env.MIN_REQUEST_INTERVAL_MS, 10) || 50, // Reduced from 100ms
+  CACHE_TTL_MS: parseInt(process.env.CACHE_TTL_MS, 10) || 10 * 60 * 1000, // 10 minutes (increased — cache hits save full API roundtrip)
   
   // Logging
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',

@@ -104,6 +104,9 @@ export class Agent {
     this.repeatedSingleToolCount = 0;
     this.singleToolStallThreshold = 3;
 
+    // Tool failure tracking for self-reflection (used in reflectOnToolResults)
+    this.toolFailureCounts = {};
+
     // Initialize with system prompt
     if (this.systemPrompt) {
       this.pushMessage({ role: 'system', content: this.systemPrompt });
@@ -970,10 +973,15 @@ Task: ${userInput}`;
     runHistory.push(iterationRecord);
     this.recordToolRound(toolCalls);
 
-    // Update performance metrics
-    this.performanceMetrics.avgIterationTime =
-      (this.performanceMetrics.avgIterationTime * (this.performanceMetrics.totalIterations - 1) +
-       (Date.now() - iterationStart)) / this.performanceMetrics.totalIterations;
+    // Update performance metrics (guard against division by zero)
+    const iterDuration = Date.now() - iterationStart;
+    if (this.performanceMetrics.totalIterations > 0) {
+      this.performanceMetrics.avgIterationTime =
+        (this.performanceMetrics.avgIterationTime * (this.performanceMetrics.totalIterations - 1) +
+         iterDuration) / this.performanceMetrics.totalIterations;
+    } else {
+      this.performanceMetrics.avgIterationTime = iterDuration;
+    }
 
     if (this.onIterationEnd) {
       this.onIterationEnd(this.iterationCount, Date.now() - iterationStart);
@@ -1530,7 +1538,7 @@ Task: ${userInput}`;
     
     // Expanded heuristic: all read-only tools can run in parallel
     const readOnlyTools = new Set([
-      'read_file', 'list_directory', 'search_files', 'search_in_file', 'get_file_info',
+      'read_file', 'list_directory', 'search_files', 'search_in_files', 'get_file_info',
       'find_files', 'diff_files', 'preview_edit', 'read_image',
       'git_status', 'git_log', 'git_diff', 'git_info', 'git_branch',
       'web_search', 'read_webpage', 'fetch_url',
@@ -2015,7 +2023,7 @@ Task: ${userInput}`;
       // Add messages
       this.pushMessage({
         role: 'assistant',
-        content: fullContent || null,
+        content: fullContent || '',
         tool_calls: toolCalls.map(tc => ({
           id: tc.id,
           type: 'function',
@@ -2110,9 +2118,10 @@ Task: ${userInput}`;
     if (systemMsg) newMessages.push(systemMsg);
 
     // Always preserve the first user message (the original request)
-    if (firstUserMsg && !recentMessages.includes(firstUserMsg)) {
-      newMessages.push(firstUserMsg);
-    }
+    // Only add first user message if it's NOT already in recentMessages
+  if (firstUserMsg && !recentMessages.some(m => m === firstUserMsg)) {
+    newMessages.push(firstUserMsg);
+  }
 
     if (olderMessages.length > 0) {
       newMessages.push({

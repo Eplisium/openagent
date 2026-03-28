@@ -266,6 +266,7 @@ export function printMenu(title, items) {
  * 📊 Create Progress Bar
  */
 export function createProgressBar(current, total, length = 30) {
+  if (!total || total <= 0) return `${colors.primary('[')}${colors.success('░'.repeat(length))}${colors.primary(']')} 0%`;
   const percentage = Math.min(100, Math.round((current / total) * 100));
   const filled = Math.round((length * percentage) / 100);
   const empty = length - filled;
@@ -300,6 +301,7 @@ export function formatDuration(ms) {
  * 💰 Format Cost
  */
 export function formatCost(cost) {
+  if (!Number.isFinite(cost)) return '$0.0000';
   if (cost < 0.01) return `${(cost * 100).toFixed(4)}¢`;
   return `$${cost.toFixed(4)}`;
 }
@@ -336,7 +338,7 @@ export function timestamp() {
  * 🎯 Truncate Text
  */
 export function truncate(text, maxLength = 100) {
-  if (text.length <= maxLength) return text;
+  if (!text || text.length <= maxLength) return text || '';
   return text.slice(0, maxLength - 3) + '...';
 }
 
