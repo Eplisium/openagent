@@ -1,12 +1,11 @@
 # 🚀 OpenAgent v4.2
 
-> Production-grade AI agent with 400+ models, comprehensive Skills System, cross-platform support, and modern Ink UI. On par with Cursor, OpenClaw, and Claude Code.
+> Production-grade AI agent with 400+ models, comprehensive Skills System, cross-platform support, and powerful CLI. On par with Cursor, OpenClaw, and Claude Code.
 
 [![OpenRouter](https://img.shields.io/badge/OpenRouter-API-00D9FF?style=for-the-badge)](https://openrouter.ai)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js)](https://nodejs.org)
 [![License](https://img.shields.io/badge/License-MIT-FF006E?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20WSL-333)](https://github.com/Eplisium/openagent)
-[![Tests](https://img.shields.io/badge/Tests-202%2F202%20Passing-00C853)](https://github.com/Eplisium/openagent)
 
 ---
 
@@ -16,42 +15,18 @@ OpenAgent is a **full-featured agentic AI assistant** that runs in your terminal
 
 - 📁 **Read, write, and edit files** in your codebase
 - 🖥️ **Execute shell commands** and run scripts
-- 🔍 **Search codebases** with regex and semantic search
+- 🔍 **Search codebases** with regex-based search
 - 🌐 **Browse the web** and fetch documentation
-- 🔀 **Work with git** — status, diff, commit, push, pull
+- 🔀 **Work with git** — status, diff, commit, push, pull, branch
 - 🤖 **Use 400+ AI models** via OpenRouter
 - 🤝 **Multi-agent orchestration** with specialized subagents
 - 💾 **Session management** with checkpoints and history
 - ⚡ **Zero-dependency HTTP** using native fetch (undici)
 - 🛑 **Request cancellation** via AbortController
-- 🔁 **Request deduplication** for identical in-flight requests
 - 💰 **Real cost tracking** from API usage data
 - 🔌 **Protocol support** — MCP, A2A, and AG-UI
-
-## 🆕 New in v4.2
-
-### 🧩 Skills System (ClawHub-compatible)
-- **Registry System** — Discover, install, and manage skills from remote repositories
-- **Hot-Reloading** — Automatic skill reloading during development
-- **4 Skill Templates** — Basic, Tool, Workflow, and Agent templates
-- **Enhanced SKILL.md** — YAML frontmatter with hooks, dependencies, compatibility
-- **CLI Commands** — `openagent skills list/search/install/remove/update/create`
-
-### 🌐 Cross-Platform Support (Windows, macOS, Linux, WSL)
-- **Platform Detection** — Automatic OS and environment detection
-- **Cross-Spawn** — Reliable process spawning on all platforms
-- **Path Normalization** — Cross-platform path handling
-- **Terminal Capabilities** — Color, Unicode, TTY detection
-- **WSL Integration** — Automatic Windows Subsystem for Linux support
-
-### 🖥️ Modern Ink UI (React for CLI)
-- **Interactive Chat** — Real-time streaming with markdown rendering
-- **5 Themes** — Dark, Light, High Contrast, Monokai, Nord
-- **Model Selector** — 400+ models with favorites and cost estimation
-- **Skills Browser** — Marketplace interface for skill discovery
-- **Memory Viewer** — Graph/list views with search and CRUD
-- **Status Dashboard** — Live cost tracking and token usage
-- **Keyboard Shortcuts** — Ctrl+N (new), Ctrl+S (save), Ctrl+P (palette), etc.
+- 🧩 **Skills system** with hot-reloading and templates
+- 🔌 **Plugin architecture** with manifest validation
 
 ---
 
@@ -78,13 +53,7 @@ cp .env.example .env
 ### Run
 
 ```bash
-# Modern Ink UI (recommended)
-npm run ui
-
-# Or with openagent command
-openagent --ui
-
-# Traditional CLI (unchanged)
+# Start the interactive CLI
 npm start
 
 # Or run directly
@@ -102,7 +71,7 @@ openagent    # or just: oagent
 
 ## 🎯 Features
 
-### 🧩 Skills Marketplace
+### 🧩 Skills System
 
 ```bash
 # List installed skills
@@ -121,19 +90,7 @@ openagent skills update
 openagent skills create my-skill --type tool
 ```
 
-### 🖥️ Modern UI
-
-```bash
-# Launch with options
-openagent --ui --model gpt-4 --theme dark
-
-# Keyboard shortcuts
-Ctrl+P    # Command palette
-Ctrl+N    # New chat
-Ctrl+S    # Save session
-Ctrl+B    # Toggle sidebar
-Ctrl+T    # Cycle themes
-```
+Four skill templates available: **Basic**, **Tool**, **Workflow**, and **Agent**.
 
 ### 🤖 Model Browser
 
@@ -147,9 +104,6 @@ OpenAgent dynamically fetches **all available models** directly from the OpenRou
 - **🛠️ Best for Tools** — Filter to tool-calling capable models
 - **🏢 Company** — Browse by provider (OpenAI, Anthropic, Google, etc.)
 - **🔍 Search** — Fuzzy search across model IDs and names
-- **📋 All Models** — Full list with relative release dates
-
-Model cache refreshes every 15 minutes (configurable via `MODEL_CACHE_TTL_MS`).
 
 ### 🤖 Agentic Loop
 
@@ -165,12 +119,19 @@ OpenAgent uses the same **gather → act → verify → repeat** loop as Claude 
 
 | Category | Tools |
 |----------|-------|
-| **File Operations** | `read_file`, `write_file`, `edit_file`, `list_directory`, `search_in_files`, `get_file_info` |
+| **File Operations** | `read_file`, `write_file`, `edit_file`, `list_directory`, `search_in_files`, `get_file_info`, `search_and_replace` |
 | **Shell Execution** | `exec`, `exec_background`, `process_status`, `system_info` |
 | **Web Access** | `web_search`, `read_webpage`, `fetch_url` |
 | **Git Operations** | `git_status`, `git_log`, `git_diff`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_branch`, `git_info` |
 | **Subagent Delegation** | `delegate_task`, `delegate_parallel`, `delegate_with_synthesis`, `subagent_status` |
-| **Skills Management** | `skill_list`, `skill_search`, `skill_install`, `skill_remove`, `skill_update`, `skill_create` |
+| **Memory** | `memory_search`, `memory_add`, `memory_list`, `memory_stats` |
+| **Skills** | `skill_list`, `skill_search`, `skill_install`, `skill_remove`, `skill_update`, `skill_create` |
+| **MCP** | Model Context Protocol tool integration |
+| **A2A** | Agent-to-Agent communication |
+| **AG-UI** | Agent-User Interface protocol |
+| **Graph** | Knowledge graph operations |
+| **Checkpoints** | Session checkpoint management |
+| **Plugins** | Plugin lifecycle management |
 
 ### 🤝 Subagent Delegation System
 
@@ -192,6 +153,20 @@ The main agent can **delegate tasks to specialized subagents** for parallel exec
 | ✅ **Reviewer** | Code quality review |
 | 🤖 **General** | Any task |
 
+### 🧠 Memory System
+
+OpenAgent includes a persistent memory system with:
+- **MemoryManager** — Store, retrieve, and search memories
+- **MemoryValidator** — Validate memory structure and content
+- **RetrievalChecker** — Smart retrieval with relevance scoring
+
+### 🔌 Plugin System
+
+Extend OpenAgent with plugins:
+- **PluginManager** — Load, unload, and manage plugin lifecycle
+- **PluginManifest** — Validate plugin metadata and dependencies
+- **HookManager** — Register hooks for lifecycle events
+
 ---
 
 ## 💻 CLI Commands
@@ -207,18 +182,37 @@ The main agent can **delegate tasks to specialized subagents** for parallel exec
 /agents          - Show subagent status
 /stats           - Show statistics
 /skills          - Manage skills
-/ui              - Switch to Ink UI
-/clear           - Clear conversation
+/cost            - Show cost breakdown
+/context         - Show context usage
 /save            - Save session
 /load            - Load saved session
+/export          - Export session
+/undo            - Undo last action
+/diff            - Show diff of changes
 /history         - Show command history
-/info            - Show session info
+/templates       - List workflow templates
+/doctor          - Health check
+/clear           - Clear conversation
 /help            - Show all commands
 /exit            - Exit
 
 ! <cmd>          - Run shell command directly
 plain text       - Run as agentic task (default)
 ```
+
+### Command Aliases
+
+| Alias | Command | Alias | Command |
+|-------|---------|-------|---------|
+| `q` | exit | `c` | chat |
+| `a` | agent | `n` | new |
+| `m` | model | `s` | stats |
+| `h` | help | `t` | tools |
+| `cl` | clear | `st` | stream |
+| `v` | verbose | `tmp` | templates |
+| `doc` | doctor | `u` | undo |
+| `d` | diff | `ex` | export |
+| `co` | cost | `ctx` | context |
 
 ---
 
@@ -227,54 +221,99 @@ plain text       - Run as agentic task (default)
 ```
 openagent/
 ├── src/
-│   ├── ui/                    # Ink React components (NEW in v4.2)
-│   │   ├── App.jsx            # Main application component
-│   │   ├── Chat.jsx           # Chat interface
-│   │   ├── Layout.jsx         # Layout with sidebar
-│   │   ├── ModelSelector.jsx  # Interactive model browser
-│   │   ├── SkillsBrowser.jsx  # Skills marketplace
-│   │   ├── MemoryViewer.jsx   # Memory visualization
-│   │   └── Theme.js           # Theme system (5 themes)
-│   ├── skills/                # Skills system (NEW in v4.2)
-│   │   ├── SkillRegistry.js   # Registry API integration
+│   ├── agent/                    # Agent system
+│   │   ├── Agent.js              # Core agent with agentic loop
+│   │   ├── AgentSession.js       # Session management
+│   │   ├── MultiAgent.js         # Multi-agent orchestration
+│   │   ├── SubagentManager.js    # Subagent lifecycle
+│   │   ├── TaskManager.js        # Task tracking
+│   │   ├── GitCheckpoint.js      # Git-based checkpoints
+│   │   ├── WorkspaceManager.js   # Workspace management
+│   │   ├── ContextManager.js     # Context window management
+│   │   ├── contextAllocator.js   # Hierarchical context allocation
+│   │   └── subagents/            # Subagent specializations
+│   ├── tools/                    # Built-in tools
+│   │   ├── ToolRegistry.js       # Tool registration & permissions
+│   │   ├── ToolGuard.js          # Safety guardrails
+│   │   ├── fileTools.js          # File operations
+│   │   ├── shellTools.js         # Shell execution
+│   │   ├── webTools.js           # Web search & fetch
+│   │   ├── gitTools.js           # Git operations
+│   │   ├── subagentTools.js      # Subagent delegation
+│   │   ├── mcpTools.js           # MCP protocol
+│   │   ├── a2aTools.js           # A2A protocol
+│   │   ├── aguiTools.js          # AG-UI protocol
+│   │   ├── graphTools.js         # Knowledge graph
+│   │   ├── memoryTools.js        # Memory operations
+│   │   ├── skillTools.js         # Skills management
+│   │   ├── checkpointTools.js    # Session checkpoints
+│   │   ├── pluginTools.js        # Plugin management
+│   │   └── xmlToolParser.js      # XML tool call parser
+│   ├── skills/                   # Skills system
+│   │   ├── SkillManager.js       # Skill lifecycle
+│   │   ├── SkillRegistry.js      # Registry API integration
 │   │   ├── EnhancedSkillParser.js # Advanced YAML parsing
-│   │   ├── SkillHotReloader.js # File watcher with debouncing
-│   │   └── templates/         # 4 skill templates
-│   ├── utils/                 # Cross-platform utilities (NEW in v4.2)
-│   │   ├── platform.js        # OS detection module
-│   │   └── terminal.js        # Terminal capabilities detection
-│   ├── cli.js                 # Traditional CLI entry point
-│   ├── cli-ink.js             # Ink UI entry point (NEW in v4.2)
-│   ├── config.js              # Configuration & models
-│   ├── paths.js               # Cross-platform path utilities
-│   └── tools/                 # Built-in tools
+│   │   ├── SkillHotReloader.js   # File watcher with debouncing
+│   │   └── templates/            # 4 skill templates
+│   │       ├── basic/
+│   │       ├── tool/
+│   │       ├── workflow/
+│   │       └── agent/
+│   ├── memory/                   # Memory system
+│   │   ├── MemoryManager.js      # Store & retrieve
+│   │   ├── MemoryValidator.js    # Structure validation
+│   │   └── RetrievalChecker.js   # Relevance scoring
+│   ├── protocols/                # Communication protocols
+│   │   ├── a2a.js                # Agent-to-Agent protocol
+│   │   └── agui.js               # Agent-User Interface
+│   ├── plugins/                  # Plugin system
+│   ├── hooks/                    # Lifecycle hooks
+│   ├── cli/                      # CLI modules
+│   │   ├── commands.js           # Command registry & aliases
+│   │   ├── constants.js          # Templates & health checks
+│   │   ├── display.js            # Visual output & panels
+│   │   ├── sessionOps.js         # Save/load/export/undo
+│   │   ├── stateOps.js           # Persistent local state
+│   │   ├── formatting.js         # Number/text formatting
+│   │   ├── errorUtils.js         # Error categorization
+│   │   ├── themes.js             # Theme system
+│   │   ├── onboarding.js         # First-run setup
+│   │   └── ...
+│   ├── utils/                    # Cross-platform utilities
+│   │   ├── platform.js           # OS detection
+│   │   └── terminal.js           # Terminal capabilities
+│   ├── cli.js                    # CLI entry point
+│   ├── index.js                  # Library entry point
+│   ├── config.js                 # Configuration
+│   ├── OpenRouterClient.js       # API client (undici)
+│   ├── ModelBrowser.js           # Interactive model browser
+│   ├── inputHandler.js           # Input processing
+│   ├── vision.js                 # Multimodal/vision support
+│   └── paths.js                  # Path utilities
 ├── tests/
-│   ├── ui/                    # UI component tests (NEW in v4.2)
-│   └── unit/                  # Unit tests (202 total)
-├── dist/
-│   └── cli-ink.mjs            # Bundled UI (420kb, NEW in v4.2)
-├── package.json               # Version 4.2.0
-└── README.md                  # This file
+│   ├── unit/                     # Unit tests
+│   └── ui/                       # UI component tests (WIP)
+├── docs/                         # Documentation
+├── examples/                     # Usage examples
+├── plugins/                      # Built-in plugins
+├── prompts/                      # Prompt templates
+├── package.json
+├── vitest.config.js
+└── README.md
 ```
 
 ---
 
 ## 🔥 Usage Examples
 
-### Modern Ink UI
+### Interactive CLI
 
 ```bash
-# Launch the interactive UI
-openagent --ui
-
-# With custom model and theme
-openagent --ui --model gpt-4 --theme monokai
-
-# Keyboard shortcuts
-Ctrl+P    # Command palette
-Ctrl+N    # New chat
-Ctrl+S    # Save session
-Ctrl+B    # Toggle sidebar
+npm start
+# Then type your task:
+> Read all JavaScript files in src/ and find any bugs
+> Create a new React component for user authentication
+> Search the web for the latest Node.js security best practices
 ```
 
 ### Skills System
@@ -291,16 +330,6 @@ openagent skills list
 
 # Create your own skill
 openagent skills create my-api-wrapper --type tool
-```
-
-### Traditional CLI
-
-```bash
-npm start
-# Then type your task:
-> Read all JavaScript files in src/ and find any bugs
-> Create a new React component for user authentication
-> Search the web for the latest Node.js security best practices
 ```
 
 ### Programmatic Usage
@@ -324,19 +353,34 @@ console.log(`Iterations: ${result.iterations}`);
 console.log(`Tools used: ${result.stats.toolsUsed.join(', ')}`);
 ```
 
+### Quick Run (no setup)
+
+```javascript
+import { quickRun, quickChat } from './src/index.js';
+
+// Agentic task with tools
+const result = await quickRun('Summarize all .md files in this directory', {
+  model: 'anthropic/claude-sonnet-4',
+});
+
+// Simple chat without tools
+const reply = await quickChat('What is the capital of France?', {
+  model: 'anthropic/claude-sonnet-4',
+});
+```
+
 ---
 
 ## 📊 Quality Metrics
 
 | Metric | Value |
 |--------|-------|
-| **Test Success Rate** | 100% (202/202) |
-| **Dependencies** | 358 packages, 0 vulnerabilities |
-| **UI Bundle Size** | 420kb (optimized) |
-| **Model Support** | 400+ AI models |
+| **Dependencies** | 17 production, 2 dev |
+| **Model Support** | 400+ AI models via OpenRouter |
 | **Cross-Platform** | Windows, macOS, Linux, WSL |
 | **Skill Templates** | 4 types (Basic, Tool, Workflow, Agent) |
-| **Themes** | 5 options (Dark, Light, High Contrast, Monokai, Nord) |
+| **Built-in Tools** | 30+ across 12 categories |
+| **Protocols** | MCP, A2A, AG-UI |
 
 ---
 
@@ -366,6 +410,16 @@ OpenAgent follows the same architecture principles as Claude Code and Codex:
     └──────────┘ └─────────┘ └─────────┘
 ```
 
+### Key Design Decisions
+
+- **Native fetch (undici)** — Zero axios dependency, better streaming
+- **AbortController** — Request/stream cancellation
+- **Request deduplication** — Coalesce identical in-flight requests
+- **Content-hashed cache keys** — No cache collisions
+- **XML tool call parsing** — Reliable tool invocation from any model
+- **Hierarchical context allocation** — Smart context window management
+- **Circuit breaker** — Graceful degradation on repeated failures
+
 ---
 
 ## 🔒 Environment Variables
@@ -375,13 +429,39 @@ OpenAgent follows the same architecture principles as Claude Code and Codex:
 | `OPENROUTER_API_KEY` | Your API key | **Required** |
 | `SITE_URL` | For OpenRouter rankings | `https://localhost` |
 | `SITE_NAME` | App name | `OpenAgent` |
-| `DEFAULT_MODEL` | Default AI model | `anthropic/claude-sonnet-4` |
-| `FALLBACK_MODEL` | Fallback for routing | `anthropic/claude-sonnet-4` |
+| `FALLBACK_MODEL` | Fallback for routing | `null` |
 | `MAX_RETRIES` | Retry attempts | `3` |
-| `TIMEOUT_MS` | Request timeout | `300000` |
-| `AGENT_MAX_ITERATIONS` | Max agent loops | `30` |
+| `TIMEOUT_MS` | Request timeout | `120000` (2 min) |
+| `AGENT_MAX_ITERATIONS` | Max agent loops | `null` (unlimited) |
 | `MAX_CONTEXT_TOKENS` | Max context window | `800000` |
-| `CACHE_TTL_MS` | Cache duration | `300000` (5 min) |
+| `CACHE_TTL_MS` | Cache duration | `600000` (10 min) |
+| `DAILY_BUDGET_USD` | Daily spending limit | `50.00` |
+| `MAX_COST_PER_REQUEST_USD` | Per-request cost cap | `1.00` |
+| `OPENAGENT_HOME` | Override config directory | `~/.openagent` |
+| `LOG_LEVEL` | Logging verbosity | `info` |
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+npm test
+
+# Run unit tests only
+npm run test:unit
+```
+
+Tests use [Vitest](https://vitest.dev/) with 137+ tests covering:
+- Tool registry & permissions
+- Skill management & registry
+- Platform detection
+- Web tools
+- Memory management
+- Hooks system
+- XML tool parsing
+- Path utilities
+- Subagent tools
 
 ---
 
