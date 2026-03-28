@@ -706,7 +706,12 @@ export function createFileTools(options = {}) {
           if (results.length >= maxResults) break;
 
           const ext = path.extname(file).toLowerCase();
-          if (['.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.zip', '.gz', '.tar'].includes(ext)) {
+          if (['.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.zip', '.gz', '.tar', '.mp4', '.mp3', '.wav', '.avi', '.mov', '.pdf', '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.db', '.sqlite', '.pyc', '.class', '.o', '.obj', '.lock'].includes(ext)) {
+            continue;
+          }
+          
+          // Skip common large/noise directories
+          if (file.includes('node_modules') || file.includes('.git' + path.sep) || file.includes(path.sep + 'dist' + path.sep) || file.includes(path.sep + 'build' + path.sep) || file.includes(path.sep + '.next' + path.sep) || file.includes(path.sep + 'coverage' + path.sep) || file.includes('__pycache__')) {
             continue;
           }
 

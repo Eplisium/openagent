@@ -319,14 +319,14 @@ ${tree}
       maxIterations: customOptions.maxIterations ?? spec.maxIterations,
       streaming: false, // Subagents never stream
       workingDir: this.workingDir,
-      maxToolResultChars: customOptions.maxToolResultChars ?? 20000,
+      maxToolResultChars: customOptions.maxToolResultChars ?? 40000,
       // Use longer timeouts for subagents to handle complex tasks
-      maxRetries: 2,
-      retryDelay: 2000,
+      maxRetries: 3,
+      retryDelay: 1500,
     });
     
-    // Enforce max runtime timeout (default: 8 minutes)
-    const maxRuntime = customOptions.maxRuntime || 480000;
+    // Enforce max runtime timeout (default: 10 minutes for coding tasks)
+    const maxRuntime = customOptions.maxRuntime || 600000;
     const timeoutTimer = setTimeout(() => {
       if (this.verbose) {
         console.log(UI.progress(chalk.red(`⏰ Subagent exceeded max runtime (${maxRuntime}ms) - aborting`)));

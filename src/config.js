@@ -81,10 +81,10 @@ export const CONFIG = {
   AGENT_MAX_ITERATIONS: normalizeOptionalLimit(process.env.AGENT_MAX_ITERATIONS, null),
   AGENT_MAX_RUNTIME_MS: normalizeOptionalLimit(process.env.AGENT_MAX_RUNTIME_MS, null),
   AGENT_MAX_TOOL_CALLS: normalizeOptionalLimit(process.env.AGENT_MAX_TOOL_CALLS, null),
-  AGENT_MAX_STALL_ITERATIONS: normalizePositiveInt(process.env.AGENT_MAX_STALL_ITERATIONS, 8),
+  AGENT_MAX_STALL_ITERATIONS: normalizePositiveInt(process.env.AGENT_MAX_STALL_ITERATIONS, 10),
   
   // Tool Settings
-  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS, 10) || 60000, // 60s (reduced from 300s — most tools finish in <10s)
+  TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS, 10) || 90000, // 90s — builds and large file operations need more headroom
   MAX_TOOL_RESULT_CHARS: parseInt(process.env.MAX_TOOL_RESULT_CHARS, 10) || 80000,
 
   // Workspace Settings
@@ -113,7 +113,7 @@ export const CONFIG = {
   // 🖥️ Shell Tool Limits
   // ═══════════════════════════════════════════════════════════════
   EXEC_MAX_BUFFER_BYTES: 10 * 1024 * 1024, // 10MB
-  EXEC_DEFAULT_TIMEOUT_MS: 30000,
+  EXEC_DEFAULT_TIMEOUT_MS: 45000,
   BG_PROCESS_OUTPUT_LIMIT: 30000, // Reduced from 50K — less memory per background process
   BG_PROCESS_OUTPUT_TRIM: 15000, // Reduced from 25K
 
@@ -123,7 +123,7 @@ export const CONFIG = {
   AGENT_DEFAULT_MAX_RETRIES: 3,
   AGENT_DEFAULT_RETRY_DELAY_MS: 1000,
   AGENT_DEFAULT_RETRY_BACKOFF: 2,
-  SINGLE_TOOL_STALL_THRESHOLD: 3,
+  SINGLE_TOOL_STALL_THRESHOLD: 4,
   IMAGE_TOKEN_COST: 85,
   MESSAGE_OVERHEAD_TOKENS: 4,
   TRUNCATE_TEXT_DEFAULT_MAX: 160,

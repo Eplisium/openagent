@@ -17,9 +17,9 @@ export class ContextAllocator {
   constructor(maxTokens = 800000) {
     this.maxTokens = maxTokens;
     this.budgets = {
-      system:     { fraction: 0.15, priority: 1 },
-      recent:     { fraction: 0.40, priority: 0 },
-      workingSet: { fraction: 0.25, priority: 0 },
+      system:     { fraction: 0.12, priority: 1 },
+      recent:     { fraction: 0.38, priority: 0 },
+      workingSet: { fraction: 0.30, priority: 0 },
       older:      { fraction: 0.15, priority: 2 },
       buffer:     { fraction: 0.05, priority: 3 },
     };

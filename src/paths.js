@@ -315,14 +315,14 @@ export function normalizePath(inputPath) {
 }
 
 /**
- * Check if a path is absolute
+ * Check if a path is absolute (cross-platform)
+ * Handles both Unix-style (/foo) and Windows-style (C:\foo) paths
  * @param {string} inputPath
  * @returns {boolean}
  */
 export function isAbsolutePath(inputPath) {
   if (!inputPath) return false;
-
-  // Use Node's path.isAbsolute which is cross-platform
+  // Use Node's built-in path.isAbsolute — handles Unix, Windows, and UNC paths correctly
   return path.isAbsolute(inputPath);
 }
 

@@ -299,7 +299,7 @@ describe('SkillRegistry', () => {
   describe('uninstall', () => {
     it('should uninstall a skill successfully', async () => {
       const skillId = 'remove-skill';
-      const skillDir = `/tmp/test-skills/${skillId}`;
+      const skillDir = path.join('/tmp/test-skills', skillId);
       
       fs.pathExists.mockResolvedValue(true);
       fs.remove.mockResolvedValue(undefined);
@@ -329,9 +329,10 @@ describe('SkillRegistry', () => {
       const skillsDir = '/tmp/test-skills';
       
       fs.pathExists.mockImplementation((p) => {
-        if (p === skillsDir) return Promise.resolve(true);
-        if (p.includes('skill-1/')) return Promise.resolve(true);
-        if (p.includes('skill-2/')) return Promise.resolve(true);
+        const normalized = p.replace(/\\/g, '/');
+        if (normalized === skillsDir) return Promise.resolve(true);
+        if (normalized.includes('skill-1/')) return Promise.resolve(true);
+        if (normalized.includes('skill-2/')) return Promise.resolve(true);
         return Promise.resolve(false);
       });
       
@@ -341,10 +342,11 @@ describe('SkillRegistry', () => {
       ]);
       
       fs.readJson.mockImplementation((p) => {
-        if (p.includes('skill-1/')) {
+        const normalized = p.replace(/\\/g, '/');
+        if (normalized.includes('skill-1/')) {
           return Promise.resolve({ version: '1.0.0' });
         }
-        if (p.includes('skill-2/')) {
+        if (normalized.includes('skill-2/')) {
           return Promise.resolve({ version: '2.0.0' });
         }
         return Promise.resolve({});

@@ -148,8 +148,9 @@ describe('Path Utilities', () => {
     expect(isAbsolutePath('/absolute/path')).toBe(true);
     expect(isAbsolutePath('relative/path')).toBe(false);
     if (Platform.isWindows) {
-      expect(isAbsolutePath('C:\absolute\path')).toBe(true);
-      expect(isAbsolutePath('relative\path')).toBe(false);
+      expect(isAbsolutePath('C:/absolute/path')).toBe(true);
+      expect(isAbsolutePath('C:\\absolute\\path')).toBe(true);
+      expect(isAbsolutePath('relative\\path')).toBe(false);
     }
   });
 
@@ -185,7 +186,7 @@ describe('Path Utilities', () => {
     if (Platform.isWindows) {
       // Test Windows environment variable expansion
       process.env.USERPROFILE = home;
-      const expanded = expandHome('%USERPROFILE%\test');
+      const expanded = expandHome('%USERPROFILE%/test');
       expect(expanded).toBe(path.join(home, 'test'));
     } else {
       // Test Unix tilde expansion
@@ -239,10 +240,10 @@ describe('Config Directory Resolution', () => {
   });
 
   it('should respect OPENAGENT_HOME environment variable', () => {
-    const customHome = '/custom/openagent/home';
+    const customHome = Platform.isWindows ? 'C:\\custom\\openagent\\home' : '/custom/openagent/home';
     process.env.OPENAGENT_HOME = customHome;
     const configDir = getConfigDir();
-    expect(configDir).toBe(customHome);
+    expect(configDir).toBe(path.resolve(customHome));
   });
 });
 
