@@ -56,6 +56,7 @@ export class Agent {
     
     // Context management settings
     this.maxContextTokens = options.maxContextTokens || CONFIG.MAX_CONTEXT_TOKENS;
+    this.maxOutputTokens = options.maxOutputTokens || CONFIG.DEFAULT_PARAMS.max_tokens;
     this.maxToolResultChars = options.maxToolResultChars || CONFIG.MAX_TOOL_RESULT_CHARS;
     this.compactThreshold = options.compactThreshold || CONFIG.COMPACT_THRESHOLD;
     this.workspaceDir = options.workspaceDir || null;
@@ -410,6 +411,16 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     }
 
     return this.maxContextTokens;
+  }
+
+  /**
+   * Set max output tokens based on model capability
+   */
+  setMaxOutputTokens(maxOutputTokens) {
+    if (Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) {
+      this.maxOutputTokens = maxOutputTokens;
+    }
+    return this.maxOutputTokens;
   }
 
   updateUsageStats(usage) {
@@ -1052,7 +1063,7 @@ Task: ${userInput}`;
       const stream = this.client.chatStream(messagesForLLM, {
         model: this.model,
         temperature: 0.3,
-        max_tokens: 16384,
+        max_tokens: this.maxOutputTokens,
         // Send tool definitions so the model can use native tool calling via streaming.
         // If a model rejects streaming+tools, we catch the error and fall back to non-streaming.
         tools: this.tools.getToolDefinitions(),
@@ -1490,8 +1501,8 @@ Task: ${userInput}`;
     const maxRetries = this.maxRetries;
     const messagesToSend = messages || this.messages;
     
-    // Keep max_tokens stable across retries — reducing it makes truncation WORSE, not better
-    const maxTokens = 16384;
+    // Use model's actual max output — reducing it makes truncation WORSE, not better
+    const maxTokens = this.maxOutputTokens;
     
     try {
       const result = await this.client.chatWithTools(

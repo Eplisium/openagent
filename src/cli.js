@@ -516,9 +516,12 @@ export class CLI {
     if (!this.session?.agent || !modelId) return null;
     this.session.model = modelId;
     this.session.agent.model = modelId;
+    const model = this.modelBrowser?.getModel(modelId) || null;
     const contextLength = this.modelBrowser?.getContextLength(modelId) || CONFIG.MAX_CONTEXT_TOKENS;
+    const maxOutput = model?.maxOutput || CONFIG.DEFAULT_PARAMS.max_tokens;
     this.session.agent.setMaxContextTokens(contextLength);
-    return { model: this.modelBrowser?.getModel(modelId) || null, contextLength };
+    this.session.agent.setMaxOutputTokens(maxOutput);
+    return { model, contextLength };
   }
 
   createSession({
