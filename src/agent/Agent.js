@@ -105,6 +105,10 @@ export class Agent {
     this.repeatedSingleToolCount = 0;
     this.singleToolStallThreshold = 3;
 
+    // No-action trap detection: limit how many times we nudge before giving up
+    this.noActionTrapCount = 0;
+    this.maxNoActionTraps = 3;
+
     // Tool failure tracking for self-reflection (used in reflectOnToolResults)
     this.toolFailureCounts = {};
 
@@ -243,6 +247,85 @@ When done, provide a clear summary: what changed, why, what was verified, and an
 
   hasStalled() {
     return this.repeatedToolRoundCount >= this.maxStallIterations;
+  }
+
+  /**
+   * Detect "hallucinated action" — the model describes doing something
+   * but produces zero tool calls. This happens when a model doesn't
+   * support native function calling and falls into a "I'll do X" loop.
+   *
+   * Returns a nudge message to inject, or null if content looks like
+   * a genuine final answer.
+   */
+  detectNoActionTrap(content) {
+    if (!content || typeof content !== 'string') return null;
+    const text = content.trim();
+    if (text.length < 20) return null;
+
+    // Action-oriented phrases that indicate the model INTENDS to use tools
+    const actionPatterns = [
+      /\blet me\b/i,
+      /\bi'll\b/i,
+      /\bi will\b/i,
+      /\bnow i\b/i,
+      /\bfirst i\b/i,
+      /\bnext i\b/i,
+      /\bgoing to\b/i,
+      /\bhere'?s what i'?ll\b/i,
+      /\blet'?s\b/i,
+      /\bi need to\b/i,
+      /\bi should\b/i,
+      /\bi can\b.*\b(read|edit|write|create|modify|update|change|fix|refactor|add|remove|delete|open|check)\b/i,
+      /\b(step \d|phase \d)\b.*\b(read|edit|write|create|modify|update|change|fix)\b/i,
+      /\b(read|edit|write|create|modify|update|change|fix|refactor|add|remove)\b.*\b(the|this|these|those|that)\b.*\b(file|code|component|function|class|page|style|css|html|js|tsx)\b/i,
+    ];
+
+    const hasActionLanguage = actionPatterns.some(p => p.test(text));
+
+    // Tool-call indicators that suggest the model IS trying to use tools
+    const toolIndicators = [
+      /<tool_call>/i,
+      /<invoke/i,
+      /\bedit_file\b/i,
+      /\bwrite_file\b/i,
+      /\bread_file\b/i,
+      /\bexec\b/i,
+      /\bsearch_and_replace\b/i,
+      /\blist_directory\b/i,
+      /\bgit_\w+\b/i,
+    ];
+
+    const hasToolIndicator = toolIndicators.some(p => p.test(text));
+
+    // Also check if this looks like a genuine summary/completion
+    const completionPatterns = [
+      /^(done|complete|finished|here'?s? (the |a )?summary|summary of|what (i|we) (changed|did|modified))[:.]/i,
+      /^(the )?(changes?|modifications?|updates?) (have been|are|include)/i,
+      /^(here|this) (is|are) (the |your )?(updated|modified|new|result)/i,
+      /^i'?ve (already )?(made|completed|finished|done|applied|implemented)/i,
+    ];
+
+    const looksLikeCompletion = completionPatterns.some(p => p.test(text));
+
+    // If action language is present but no tool indicators and doesn't look like completion
+    if (hasActionLanguage && !hasToolIndicator && !looksLikeCompletion) {
+      this.noActionTrapCount++;
+
+      if (this.noActionTrapCount > this.maxNoActionTraps) {
+        // We've nudged enough times — accept whatever the model says as final
+        // to avoid infinite loops. The model clearly can't/won't use tools.
+        return null;
+      }
+
+      if (this.noActionTrapCount === 1) {
+        return `[System] Your response described actions but contained no tool calls. You MUST use tools to make changes — describing what you want to do is not enough. Use edit_file, write_file, or other tools to actually perform the work. If you need to read files first, use read_file. Then use edit_file with the exact text from the file. Do NOT describe your plan — execute it with tool calls.`;
+      }
+
+      // Escalating nudge for repeated failures
+      return `[System] You are still not making any tool calls. Your previous response described actions but contained NO tool calls. This is attempt ${this.noActionTrapCount}/${this.maxNoActionTraps}. You MUST call at least one tool right now. Example: edit_file { path: "file.js", find: "old text", replace: "new text" }. If you truly have nothing to do, provide a final summary with NO action language.`;
+    }
+
+    return null;
   }
 
   formatIterationLabel() {
@@ -1152,6 +1235,17 @@ Task: ${userInput}`;
               continue;
             }
           }
+          // No tool calls — check for no-action trap before accepting
+          const fbNoActionNudge = this.detectNoActionTrap(fallbackContent);
+          if (fbNoActionNudge) {
+            this.pushMessage({ role: 'assistant', content: fallbackContent });
+            this.pushMessage({ role: 'user', content: fbNoActionNudge });
+            if (this.shouldEmitVerboseLogs()) {
+              logger.warn('No-action trap detected (streaming fallback): model described actions but produced no tool calls. Injecting nudge.');
+            }
+            continue;
+          }
+
           finalResponse = fallbackContent;
           this.pushMessage({ role: 'assistant', content: finalResponse });
           this.stopReason = 'completed';
@@ -1229,7 +1323,19 @@ Task: ${userInput}`;
             continue;
           }
         }
-        // No tool calls — final response
+        // No tool calls detected — but is this a genuine final answer
+        // or the model hallucinating actions without actually calling tools?
+        const noActionNudge = this.detectNoActionTrap(fullContent);
+        if (noActionNudge) {
+          this.pushMessage({ role: 'assistant', content: fullContent });
+          this.pushMessage({ role: 'user', content: noActionNudge });
+          if (this.shouldEmitVerboseLogs()) {
+            logger.warn('No-action trap detected: model described actions but produced no tool calls. Injecting nudge.');
+          }
+          continue;
+        }
+
+        // Genuine final response
         finalResponse = fullContent;
         this.pushMessage({ role: 'assistant', content: fullContent });
         this.stopReason = 'completed';
@@ -1307,6 +1413,7 @@ Task: ${userInput}`;
     this.stopReason = null;
     this.lastToolCallSignature = null;
     this.repeatedToolRoundCount = 0;
+    this.noActionTrapCount = 0;
     this.abortController = new AbortController();
     
     // Add user message (skip if already pushed, e.g. multimodal messages)
@@ -1350,6 +1457,7 @@ Task: ${userInput}`;
         this.iterationCount = 0;
         this.lastToolCallSignature = null;
         this.repeatedToolRoundCount = 0;
+        this.noActionTrapCount = 0;
         this.toolFailureCounts = {};
         // Fall through to non-streaming path below
       }
@@ -1421,7 +1529,19 @@ Task: ${userInput}`;
               continue;
             }
           }
-          // No tool calls - this is the final response
+          // No tool calls detected — but is this a genuine final answer
+          // or the model hallucinating actions without actually calling tools?
+          const noActionNudge = this.detectNoActionTrap(response.content);
+          if (noActionNudge) {
+            this.pushMessage({ role: 'assistant', content: response.content });
+            this.pushMessage({ role: 'user', content: noActionNudge });
+            if (this.shouldEmitVerboseLogs()) {
+              logger.warn('No-action trap detected: model described actions but produced no tool calls. Injecting nudge.');
+            }
+            continue;
+          }
+
+          // Genuine final response
           finalResponse = response.content;
           this.pushMessage({ role: 'assistant', content: response.content });
           this.stopReason = 'completed';
@@ -1971,6 +2091,7 @@ Task: ${userInput}`;
     this.stopReason = null;
     this.lastToolCallSignature = null;
     this.repeatedToolRoundCount = 0;
+    this.noActionTrapCount = 0;
     const startTime = Date.now();
     
     while (true) {
@@ -2043,7 +2164,18 @@ Task: ${userInput}`;
             continue;
           }
         }
-        // Final response
+        // No tool calls — check for no-action trap before accepting
+        const streamNoActionNudge = this.detectNoActionTrap(fullContent);
+        if (streamNoActionNudge) {
+          this.pushMessage({ role: 'assistant', content: fullContent });
+          this.pushMessage({ role: 'user', content: streamNoActionNudge });
+          if (this.shouldEmitVerboseLogs()) {
+            logger.warn('No-action trap detected (runStream): model described actions but produced no tool calls. Injecting nudge.');
+          }
+          continue;
+        }
+
+        // Genuine final response
         this.pushMessage({ role: 'assistant', content: fullContent });
         this.stopReason = 'completed';
         yield { type: 'done', content: fullContent };
@@ -2244,6 +2376,7 @@ Task: ${userInput}`;
     this.stopReason = null;
     this.lastToolCallSignature = null;
     this.repeatedToolRoundCount = 0;
+    this.noActionTrapCount = 0;
     this.consecutiveFailures = {};
     this.circuitBreakerTripped = false;
     this.lastSingleToolSignature = null;
