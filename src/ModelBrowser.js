@@ -214,39 +214,39 @@ export class ModelBrowser {
     if (sortMode === 'cancel') return null;
 
     if (sortMode === 'favorites') {
-      return this.pickFromFavorites(currentModel);
+      return await this.pickFromFavorites(currentModel);
     }
 
     if (sortMode === 'recents') {
-      return this.pickFromRecents(currentModel);
+      return await this.pickFromRecents(currentModel);
     }
 
     if (sortMode === 'search') {
-      return this.pickBySearch(currentModel);
+      return await this.pickBySearch(currentModel);
     }
 
     if (sortMode === 'provider') {
-      return this.pickByProvider(currentModel);
+      return await this.pickByProvider(currentModel);
     }
 
     if (sortMode === 'newest') {
-      return this.pickNewest(currentModel);
+      return await this.pickNewest(currentModel);
     }
 
     if (sortMode === 'cheapest') {
-      return this.pickCheapest(currentModel);
+      return await this.pickCheapest(currentModel);
     }
 
     if (sortMode === 'largest_context') {
-      return this.pickLargestContext(currentModel);
+      return await this.pickLargestContext(currentModel);
     }
 
     if (sortMode === 'tools') {
-      return this.pickToolsOnly(currentModel);
+      return await this.pickToolsOnly(currentModel);
     }
 
     // All models
-    return this.pickFromList(this.models, currentModel);
+    return await this.pickFromList(this.models, currentModel);
   }
 
   /**
