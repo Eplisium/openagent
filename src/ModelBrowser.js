@@ -267,7 +267,7 @@ export class ModelBrowser {
       return null;
     }
 
-    return this.pickFromList(favModels, currentModel, '⭐ Favorites');
+    return await this.pickFromList(favModels, currentModel, '⭐ Favorites');
   }
 
   /**
