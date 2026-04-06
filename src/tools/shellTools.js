@@ -9,7 +9,7 @@ import crossSpawn from 'cross-spawn';
 import { promisify } from 'util';
 import path from 'path';
 import os from 'os';
-import { buildOpenAgentEnv, createPathContext, resolveAgentPath } from '../paths.js';
+import { buildOpenAgentEnv, createPathContext } from '../paths.js';
 import { CONFIG } from '../config.js';
 import { ProcessManager } from './ProcessManager.js';
 import { Platform } from '../utils/platform.js';
@@ -38,14 +38,14 @@ function sanitizeCommand(command) {
   // ═══════════════════════════════════════════════════════════════
   
   // Destructive operations on root filesystem (Unix)
-  if (/rm\s+-rf\s+[\/\\]\s*$/i.test(lower)) return block(command, 'Recursive delete on root');
-  if (/rm\s+-r\s+[\/\\]\s*$/i.test(lower)) return block(command, 'Recursive delete on root');
+  if (/rm\s+-rf\s+[/\\]\s*$/i.test(lower)) return block(command, 'Recursive delete on root');
+  if (/rm\s+-r\s+[/\\]\s*$/i.test(lower)) return block(command, 'Recursive delete on root');
   
   // Format drive (with force flags) — Windows
-  if (/format\s+[a-z]:\s*\/[yq]/i.test(lower)) return block(command, 'Format drive with force');
+  if (/format\s+[a-z]:\s*[/][yq]/i.test(lower)) return block(command, 'Format drive with force');
   
   // System shutdown/reboot (with force flags)
-  if (/\bshutdown\s+\/[sf]\b/i.test(lower)) return block(command, 'Force shutdown');
+  if(/\bshutdown\s+[/][sf]\b/i.test(lower)) return block(command, 'Force shutdown');
   if (/restart-computer\s+-force/i.test(lower)) return block(command, 'Force restart');
   
   // Fork bombs — Unix
@@ -138,7 +138,8 @@ export function escapeShellPath(filePath) {
   } else {
     // Unix: single-quote and escape embedded single quotes
     // Single quotes prevent all shell interpretation except for embedded single quotes
-    return `'${filePath.replace(/'/g, "'\''")}'`;
+     
+    return `'${filePath.replace(/'/g, "'\\\\''")}'`;
   }
 }
 
@@ -473,7 +474,7 @@ export function createShellTools(options = {}) {
                   if (!p.proc.killed) {
                     p.proc.kill('SIGKILL');
                   }
-                } catch {}
+                } catch { /* process may have already exited */ }
               }, 3000);
               // Clean up timer if process exits naturally
               p.proc.on('exit', () => clearTimeout(forceTimeout));

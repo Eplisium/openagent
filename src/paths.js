@@ -185,13 +185,13 @@ export function getInstallationDir() {
             _cachedInstallationDir = path.resolve(dir);
             return _cachedInstallationDir;
           }
-        } catch {}
+        } catch { /* corrupt package.json — skip this directory */ }
       }
       const parent = path.dirname(dir);
       if (parent === dir) break; // filesystem root
       dir = parent;
     }
-  } catch {}
+  } catch { /* installation dir detection failed */ }
 
   _cachedInstallationDir = null;
   return null;

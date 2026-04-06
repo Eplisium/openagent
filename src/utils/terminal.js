@@ -66,7 +66,7 @@ export const Terminal = {
     // Check terminal type
     const term = process.env.TERM || '';
     const termProgram = process.env.TERM_PROGRAM || '';
-    const termVersion = process.env.TERM_PROGRAM_VERSION || '';
+    const _termVersion = process.env.TERM_PROGRAM_VERSION || '';
 
     // Windows Terminal and ConPTY support truecolor
     if (Platform.isWindows) {

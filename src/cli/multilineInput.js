@@ -127,7 +127,7 @@ export class MultilineInput {
     this._active = false;
     this.stdin.removeListener('data', this._handler);
     if (!this._wasRaw) {
-      try { this.stdin.setRawMode(false); } catch {}
+      try { this.stdin.setRawMode(false); } catch { /* setRawMode may fail if stream closed */ }
     }
   }
 

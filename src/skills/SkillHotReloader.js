@@ -69,7 +69,7 @@ export class SkillHotReloader {
         stabilityThreshold: 500,
         pollInterval: 100
       },
-      ignored: /(^|[\/\\])\../,
+      ignored: /(^|[/\\])\../,
     });
     
     // Set up event handlers
@@ -159,8 +159,6 @@ export class SkillHotReloader {
    * Handle directory changes
    */
   async handleDirChange(event, dirPath) {
-    const dirName = path.basename(dirPath);
-    
     // Check if this is a skill directory (has SKILL.md)
     const skillFile = path.join(dirPath, SKILL_FILE);
     if (await fs.pathExists(skillFile)) {

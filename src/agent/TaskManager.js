@@ -14,7 +14,7 @@ import fs from 'fs-extra';
 import path from 'path';
 import chalk from 'chalk';
 import { getDefaultTaskStateDir } from '../paths.js';
-import { CONFIG } from '../config.js';
+// CONFIG removed — not used in this file
 
 // ═══════════════════════════════════════════════════════════════════
 // 📊 Feature Status
@@ -54,7 +54,7 @@ export class TaskManager {
   /**
    * Initialize task environment (first run)
    */
-  async initialize(task, options = {}) {
+  async initialize(task, _options = {}) {
     await fs.ensureDir(this.taskDir);
 
     // Check if already initialized
@@ -416,7 +416,7 @@ export class TaskManager {
         }
         return progress;
       }
-    } catch (error) {
+    } catch (_error) {
       // Ignore read errors
     }
     return {
@@ -447,7 +447,7 @@ export class TaskManager {
       if (await fs.pathExists(this.featuresFile)) {
         return await fs.readJson(this.featuresFile);
       }
-    } catch (error) {
+    } catch (_error) {
       // Ignore read errors
     }
     return null;

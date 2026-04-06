@@ -7,7 +7,7 @@ import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import chalk from 'chalk';
-import ora from 'ora';
+// ora removed — not used
 import boxen from 'boxen';
 import inquirer from 'inquirer';
 import { promptWithTerminalReset } from './cli/terminal.js';
@@ -70,7 +70,7 @@ export class ModelBrowser {
           return;
         }
       }
-    } catch (e) {
+    } catch (_e) {
       // Cache read failed, fetch fresh
     }
 
@@ -214,39 +214,39 @@ export class ModelBrowser {
     if (sortMode === 'cancel') return null;
 
     if (sortMode === 'favorites') {
-      return await this.pickFromFavorites(currentModel);
+      return this.pickFromFavorites(currentModel);
     }
 
     if (sortMode === 'recents') {
-      return await this.pickFromRecents(currentModel);
+      return this.pickFromRecents(currentModel);
     }
 
     if (sortMode === 'search') {
-      return await this.pickBySearch(currentModel);
+      return this.pickBySearch(currentModel);
     }
 
     if (sortMode === 'provider') {
-      return await this.pickByProvider(currentModel);
+      return this.pickByProvider(currentModel);
     }
 
     if (sortMode === 'newest') {
-      return await this.pickNewest(currentModel);
+      return this.pickNewest(currentModel);
     }
 
     if (sortMode === 'cheapest') {
-      return await this.pickCheapest(currentModel);
+      return this.pickCheapest(currentModel);
     }
 
     if (sortMode === 'largest_context') {
-      return await this.pickLargestContext(currentModel);
+      return this.pickLargestContext(currentModel);
     }
 
     if (sortMode === 'tools') {
-      return await this.pickToolsOnly(currentModel);
+      return this.pickToolsOnly(currentModel);
     }
 
     // All models
-    return await this.pickFromList(this.models, currentModel);
+    return this.pickFromList(this.models, currentModel);
   }
 
   /**
@@ -267,7 +267,7 @@ export class ModelBrowser {
       return null;
     }
 
-    return await this.pickFromList(favModels, currentModel, '⭐ Favorites');
+    return this.pickFromList(favModels, currentModel, '⭐ Favorites');
   }
 
   /**
@@ -293,7 +293,7 @@ export class ModelBrowser {
       return null;
     }
 
-    return await this.pickFromList(recentModels, currentModel, '🕐 Recent');
+    return this.pickFromList(recentModels, currentModel, '🕐 Recent');
   }
 
   /**
@@ -315,7 +315,7 @@ export class ModelBrowser {
       return null;
     }
 
-    return await this.pickFromList(results, currentModel, `🔍 "${query}"`);
+    return this.pickFromList(results, currentModel, `🔍 "${query}"`);
   }
 
   /**
@@ -332,7 +332,7 @@ export class ModelBrowser {
       return null;
     }
 
-    return await this.pickFromList(sorted, currentModel, '🆕 Recently Released');
+    return this.pickFromList(sorted, currentModel, '🆕 Recently Released');
   }
 
   /**
@@ -349,7 +349,7 @@ export class ModelBrowser {
       return null;
     }
 
-    return await this.pickFromList(sorted, currentModel, '💰 Cheapest (by input price)');
+    return this.pickFromList(sorted, currentModel, '💰 Cheapest (by input price)');
   }
 
   /**
@@ -366,7 +366,7 @@ export class ModelBrowser {
       return null;
     }
 
-    return await this.pickFromList(sorted, currentModel, '📏 Largest Context Window');
+    return this.pickFromList(sorted, currentModel, '📏 Largest Context Window');
   }
 
   /**
@@ -387,7 +387,7 @@ export class ModelBrowser {
       return null;
     }
 
-    return await this.pickFromList(toolsModels, currentModel, '🛠️ Tool-Enabled Models');
+    return this.pickFromList(toolsModels, currentModel, '🛠️ Tool-Enabled Models');
   }
 
   /**
@@ -411,7 +411,7 @@ export class ModelBrowser {
     if (provider === 'back') return this.pickModel({ currentModel });
 
     const providerModels = this.filterModels({ provider });
-    return await this.pickFromList(providerModels, currentModel, `🏢 ${provider}`);
+    return this.pickFromList(providerModels, currentModel, `🏢 ${provider}`);
   }
 
   /**
@@ -592,7 +592,7 @@ export class ModelBrowser {
       if (await fs.pathExists(RECENTS_FILE)) {
         this.recents = await fs.readJson(RECENTS_FILE);
       }
-    } catch (e) {
+    } catch (_e) {
       this.recents = [];
     }
   }
@@ -623,7 +623,7 @@ export class ModelBrowser {
       if (await fs.pathExists(FAVORITES_FILE)) {
         this.favorites = await fs.readJson(FAVORITES_FILE);
       }
-    } catch (e) {
+    } catch (_e) {
       this.favorites = [];
     }
   }

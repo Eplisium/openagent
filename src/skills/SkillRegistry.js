@@ -14,7 +14,7 @@ import fs from 'fs-extra';
 import path from 'path';
 import os from 'os';
 import chalk from 'chalk';
-import { execSync } from 'child_process';
+// execSync removed — not used
 
 // ═══════════════════════════════════════════════════════════════════
 // 📋 Constants
@@ -273,7 +273,7 @@ export class SkillRegistry {
         success: true,
         skill: SkillPackage.fromRegistry(data),
       };
-    } catch (err) {
+    } catch (_err) {
       // Check cache
       const cache = await this.loadCache();
       if (cache.skills[skillId]) {
@@ -467,7 +467,7 @@ export class SkillRegistry {
             availableVersion: info.skill.version,
           });
         }
-      } catch (err) {
+      } catch (_err) {
         // Skip skills with invalid manifests
       }
     }

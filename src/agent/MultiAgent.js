@@ -160,7 +160,7 @@ export class MultiAgent {
   /**
    * Run a task with the planner → executor → reviewer pipeline
    */
-  async pipeline(task, options = {}) {
+  async pipeline(task, _options = {}) {
     const results = {
       task,
       steps: [],
@@ -200,7 +200,7 @@ export class MultiAgent {
   /**
    * Run multiple agents in parallel on different aspects of a task
    */
-  async parallel(task, aspects, options = {}) {
+  async parallel(task, aspects, _options = {}) {
     const results = {
       task,
       aspects: {},
@@ -351,7 +351,7 @@ Be persuasive but honest. Address counterarguments.`,
    * Clear all agents
    */
   clearAll() {
-    for (const [role, agent] of this.agents) {
+    for (const [_role, agent] of this.agents) {
       agent.clear();
     }
     this.sharedMemory.clear();

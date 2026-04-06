@@ -90,11 +90,11 @@ function isRetryableError(error) {
 
 /** Sleep helper */
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(resolve => { setTimeout(resolve, ms); });
 }
 
 /** Retry with exponential backoff */
-async function withRetry(fn, { maxRetries = 2, baseDelayMs = 500, label = 'operation' } = {}) {
+async function withRetry(fn, { maxRetries = 2, baseDelayMs = 500, _label = 'operation' } = {}) {
   let lastError;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -181,7 +181,7 @@ const searchAnalytics = {
   byQueryType: {},
   avgResultQuality: 0,
 
-  record(engine, queryType, resultCount) {
+  record(engine, queryType, _resultCount) {
     this.totalSearches++;
     this.byEngine[engine] = (this.byEngine[engine] || 0) + 1;
     this.byQueryType[queryType] = (this.byQueryType[queryType] || 0) + 1;
@@ -389,7 +389,7 @@ function ddgTableStrategy(html, maxResults, results, seen, excludeDomains) {
   }
 }
 
-function regexExec(regex, str) {
+function _regexExec(regex, str) {
   return regex.exec(str);
 }
 
@@ -725,62 +725,54 @@ async function searchBrave(query, maxResults) {
 
 /** StackOverflow Search API (free, no key needed for basic usage) */
 async function searchStackOverflow(query, maxResults) {
-  try {
-    const url = `https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(query)}&site=stackoverflow&pagesize=${maxResults}`;
-    const response = await fetchWithTimeout(url, {
-      headers: {
-        'User-Agent': getRandomUA(),
-        'Accept': 'application/json',
-      },
-    }, CONFIG.WEB_FETCH_TIMEOUT_MS || 15000);
+  const url = `https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=${encodeURIComponent(query)}&site=stackoverflow&pagesize=${maxResults}`;
+  const response = await fetchWithTimeout(url, {
+    headers: {
+      'User-Agent': getRandomUA(),
+      'Accept': 'application/json',
+    },
+  }, CONFIG.WEB_FETCH_TIMEOUT_MS || 15000);
 
-    if (!response.ok) {
-      const body = await response.text();
-      throw createHttpError('stackoverflow search', response, body);
-    }
-
-    const data = await response.json();
-    return (data?.items || []).slice(0, maxResults).map(r => ({
-      title: stripHtmlTags(r.title || ''),
-      url: r.link,
-      snippet: r.body_markdown ? truncateText(stripHtmlTags(r.body_markdown), 200) : '',
-    }));
-  } catch (error) {
-    throw error;
+  if (!response.ok) {
+    const body = await response.text();
+    throw createHttpError('stackoverflow search', response, body);
   }
+
+  const data = await response.json();
+  return (data?.items || []).slice(0, maxResults).map(r => ({
+    title: stripHtmlTags(r.title || ''),
+    url: r.link,
+    snippet: r.body_markdown ? truncateText(stripHtmlTags(r.body_markdown), 200) : '',
+  }));
 }
 
 /** GitHub Code Search API (free, no key needed for basic usage) */
 async function searchGitHubCode(query, maxResults) {
-  try {
-    const url = `https://api.github.com/search/code?q=${encodeURIComponent(query)}&per_page=${maxResults}`;
-    const response = await fetchWithTimeout(url, {
-      headers: {
-        'User-Agent': getRandomUA(),
-        'Accept': 'application/vnd.github.v3+json',
-      },
-    }, CONFIG.WEB_FETCH_TIMEOUT_MS || 15000);
+  const url = `https://api.github.com/search/code?q=${encodeURIComponent(query)}&per_page=${maxResults}`;
+  const response = await fetchWithTimeout(url, {
+    headers: {
+      'User-Agent': getRandomUA(),
+      'Accept': 'application/vnd.github.v3+json',
+    },
+  }, CONFIG.WEB_FETCH_TIMEOUT_MS || 15000);
 
-    if (!response.ok) {
-      const body = await response.text();
-      throw createHttpError('github code search', response, body);
-    }
-
-    const data = await response.json();
-    return (data?.items || []).slice(0, maxResults).map(r => {
-      const repoName = r.repository?.full_name || '';
-      const fileName = r.name || '';
-      const title = repoName ? `${repoName}/${fileName}` : fileName;
-      const snippet = r.path ? `Path: ${r.path}` : '';
-      return {
-        title: truncateText(title, 200),
-        url: r.html_url,
-        snippet,
-      };
-    });
-  } catch (error) {
-    throw error;
+  if (!response.ok) {
+    const body = await response.text();
+    throw createHttpError('github code search', response, body);
   }
+
+  const data = await response.json();
+  return (data?.items || []).slice(0, maxResults).map(r => {
+    const repoName = r.repository?.full_name || '';
+    const fileName = r.name || '';
+    const title = repoName ? `${repoName}/${fileName}` : fileName;
+    const snippet = r.path ? `Path: ${r.path}` : '';
+    return {
+      title: truncateText(title, 200),
+      url: r.html_url,
+      snippet,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,7 +1040,7 @@ export const webSearchTool = {
         // Build primary backends from routed engines (original query)
         const primaryBackends = routedEngines
           .filter(name => engineRunners[name])
-          .map((name, i) => ({
+          .map((name, _i) => ({
             name,
             runner: () => engineRunners[name](query),
           }));
@@ -1529,7 +1521,7 @@ export const fetchUrlTool = {
 // Factory & exports
 // ---------------------------------------------------------------------------
 
-export function createWebTools(options = {}) {
+export function createWebTools(_options = {}) {
   return [
     webSearchTool,
     readWebpageTool,

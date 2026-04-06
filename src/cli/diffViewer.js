@@ -1,4 +1,4 @@
-import chalk from 'chalk';
+// chalk removed — not used in this file
 
 export function renderDiff(oldContent, newContent, filePath, theme) {
   const oldLines = oldContent.split('\n');
@@ -39,7 +39,7 @@ function computeDiff(oldLines, newLines) {
   // Keep it simple — no need for full Myers diff
 
   const hunks = [];
-  let hunk = { lines: [] };
+  const hunk = { lines: [] };
   let oi = 0, ni = 0;
   let oldNum = 1, newNum = 1;
 

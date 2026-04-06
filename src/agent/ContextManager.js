@@ -4,7 +4,7 @@
  */
 
 import { CONFIG } from '../config.js';
-import { normalizeOptionalLimit } from '../utils.js';
+// normalizeOptionalLimit removed — not used
 
 export class ContextManager {
   constructor(options = {}) {
@@ -40,7 +40,7 @@ export class ContextManager {
       if (typeof message.content === 'string') {
         // String content: estimate based on character patterns
         const content = message.content;
-        const isCode = /[{}\[\]()=><;]/.test(content);
+        const isCode = /[{}[\\]()=><;]/.test(content); // eslint-disable-line no-useless-escape
         // Code is ~3 chars/token, prose is ~4 chars/token
         total += isCode ? Math.ceil(content.length / 3) : Math.ceil(content.length / 4);
       } else if (Array.isArray(message.content)) {

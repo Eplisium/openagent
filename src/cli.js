@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 💻 OpenAgent CLI v4.2
+ * 💻 OpenAgent CLI v0.1.20
  * Interactive terminal with real-time streaming & tool visualization
  *
  * Architecture:
@@ -32,39 +32,30 @@ import { resolveCommand, parseCommand } from './cli/commands.js';
 import { multilinePrompt, MultilineInput } from './cli/multilineInput.js';
 import { createReadlineInterfaceWithTerminalReset, promptWithTerminalReset } from './cli/terminal.js';
 import { runOnboarding } from './cli/onboarding.js';
-import { getTheme, listThemes, nextTheme, THEME_ORDER } from './cli/themes.js';
-import { VERSION, STATE_DIR, STATE_FILE, DEFAULT_STATE } from './cli/state.js';
+import { getTheme, nextTheme } from './cli/themes.js';
+import { VERSION } from './cli/state.js';
 
 // ── Extracted modules ──────────────────────────────────────────
 import {
   WORKFLOW_TEMPLATES,
   HEALTH_CHECKS,
-  COMMAND_ENTRIES,
-  SHORTCUT_ENTRIES,
-  INPUT_SHORTCUT_ENTRIES,
 } from './cli/constants.js';
 
 import {
   formatCompactNumber,
   formatDuration,
   formatElapsedTime,
-  truncateInline,
   shortenModelLabel,
   deduplicateResponse,
 } from './cli/formatting.js';
 
 import {
-  printBanner,
   formatCommandList,
   getShortcutSummary,
   getInputShortcutSummary,
-  buildPromptStatusLine,
   printAIResponse,
-  showThinkingSpinner,
-  showRespondingIndicator,
   printEnhancedToolCallStart,
   printEnhancedToolCallEnd,
-  printTaskSummary,
   printEnhancedTaskSummary,
   printSessionStats,
   printGoodbye,
@@ -75,10 +66,7 @@ import {
   showHelp,
   showCost,
   showContext,
-  showSmartSuggestions,
-  getProjectMemoryLabel,
   getWorkspaceLabel,
-  getSessionLabel,
 } from './cli/display.js';
 
 import {
@@ -97,7 +85,6 @@ import { loadState, saveState } from './cli/stateOps.js';
 import {
   showSmartError,
   generateErrorSuggestions,
-  categorizeError,
 } from './cli/errorUtils.js';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -323,9 +310,9 @@ export class CLI {
           try {
             const result = await readDroppedFile(dropPath);
             if (result.type === 'image') { imageResults.push(result); } else { dropResults.push(result); }
-          } catch {}
+          } catch { /* skip unreadable dropped files */ }
         }
-        let contextText = formatDroppedContent(dropResults);
+        const contextText = formatDroppedContent(dropResults);
         if (imageResults.length > 0) {
           const modelId = this.session?.agent?.model || '';
           if (isVisionModel(modelId)) {
@@ -424,7 +411,7 @@ export class CLI {
         if (this.verbose && !this.promptActive) {
           console.log(chalk.dim('\n💾 Auto-saved session'));
         }
-      } catch {} finally {
+      } catch { /* auto-save failure is non-fatal */ } finally {
         this.sessionSaveInFlight = null;
       }
     }, this.autoSaveInterval);
@@ -822,7 +809,7 @@ export class CLI {
       case 'exit': case 'quit': case 'q':
         this.stopAutoSave();
         if (this.autoSave) {
-          try { await this.session.save(); this.lastSaveTime = Date.now(); console.log(chalk.dim('💾 Session auto-saved')); } catch {}
+          try { await this.session.save(); this.lastSaveTime = Date.now(); console.log(chalk.dim('💾 Session auto-saved')); } catch { /* save on exit is best-effort */ }
         }
         return false;
 
@@ -1059,8 +1046,8 @@ const argvPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
 
 let resolvedFilename = __filename;
 let resolvedArgv = argvPath;
-try { if (fs.existsSync(__filename)) resolvedFilename = fs.realpathSync(__filename); } catch {}
-try { if (argvPath && fs.existsSync(argvPath)) resolvedArgv = fs.realpathSync(argvPath); } catch {}
+try { if (fs.existsSync(__filename)) resolvedFilename = fs.realpathSync(__filename); } catch { /* realpath may fail on broken symlinks */ }
+try { if (argvPath && fs.existsSync(argvPath)) resolvedArgv = fs.realpathSync(argvPath); } catch { /* realpath may fail on broken symlinks */ }
 
 const args = process.argv.slice(2);
 const allowFullAccess = args.includes('--full-access') || process.env.OPENAGENT_FULL_ACCESS === 'true';

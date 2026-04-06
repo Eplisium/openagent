@@ -416,7 +416,7 @@ export function createPlanningNode(options = {}) {
 
       // Check for abort before starting
       if (config?.signal?.aborted) {
-        throw new DOMException('PlanningNode: aborted before execution', 'AbortError');
+        throw new Error('PlanningNode: aborted before execution');
       }
 
       // Non-retrieval modes: single pass
@@ -432,7 +432,7 @@ export function createPlanningNode(options = {}) {
       for (let i = 1; i <= maxIterations; i++) {
         // Check abort between iterations
         if (config?.signal?.aborted) {
-          throw new DOMException('PlanningNode: aborted during retrieval iteration', 'AbortError');
+          throw new Error('PlanningNode: aborted during retrieval iteration');
         }
 
         lastPlan = await runIteration(currentState, config, i);

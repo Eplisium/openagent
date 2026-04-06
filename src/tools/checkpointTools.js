@@ -4,7 +4,7 @@
  */
 
 import { GitCheckpoint } from '../agent/GitCheckpoint.js';
-import path from 'path';
+// path removed — not used
 
 /**
  * Create checkpoint tools for the agent

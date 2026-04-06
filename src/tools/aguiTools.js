@@ -14,7 +14,7 @@ let aguiServer = null;
  * @param {object} options
  * @returns {object[]}
  */
-export function createAGUITools(options = {}) {
+export function createAGUITools(_options = {}) {
   /**
    * Start AG-UI server
    */
@@ -42,7 +42,7 @@ export function createAGUITools(options = {}) {
         }
 
         aguiServer = new AGUIServer();
-        const result = await aguiServer.start(port);
+        await aguiServer.start(port);
         
         console.log(chalk.green(`[AG-UI] Server started on port ${port}`));
         

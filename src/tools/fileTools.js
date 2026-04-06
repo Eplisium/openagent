@@ -8,7 +8,7 @@ import path from 'path';
 import os from 'os';
 import { glob } from 'glob';
 import { createPathContext, isProtectedInstallationPath, getInstallationDir } from '../paths.js';
-import { encodeImageToBase64, getImageMimeType, isVisionModel } from '../vision.js';
+import { encodeImageToBase64, getImageMimeType } from '../vision.js';
 import { CONFIG } from '../config.js';
 import { Platform } from '../utils/platform.js';
 import { getCachedFile } from './fileCache.js';
@@ -594,7 +594,7 @@ export function createFileTools(options = {}) {
                 size: fileStat.size,
                 modified: fileStat.mtime.toISOString(),
               });
-            } catch {}
+            } catch { /* skip entries with stat errors (broken symlinks, permission denied) */ }
           }
         } else {
           const items = await fs.readdir(resolvedPath);
@@ -614,7 +614,7 @@ export function createFileTools(options = {}) {
                 size: itemStat.size,
                 modified: itemStat.mtime.toISOString(),
               });
-            } catch {}
+            } catch { /* skip entries with stat errors (broken symlinks, permission denied) */ }
           }
         }
 

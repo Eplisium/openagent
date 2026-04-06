@@ -228,9 +228,9 @@ export class EnhancedSkillParser {
     let currentValue = '';
     let inArray = false;
     let arrayItems = [];
-    let inObject = false;
-    let objectKey = null;
-    let objectValue = '';
+    const _inObject = false;
+    const _objectKey = null;
+    const _objectValue = '';
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -477,7 +477,7 @@ export class EnhancedSkillParser {
   /**
    * Extract resources from frontmatter and body
    */
-  extractResources(frontmatter, body, skillDir) {
+  extractResources(frontmatter, body, _skillDir) {
     const resources = [];
     
     // From frontmatter

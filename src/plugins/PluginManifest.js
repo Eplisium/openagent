@@ -4,7 +4,7 @@
  */
 
 const REQUIRED_FIELDS = ['name', 'version', 'description'];
-const OPTIONAL_FIELDS = ['author', 'license', 'main', 'tools', 'hooks', 'dependencies'];
+const _OPTIONAL_FIELDS = ['author', 'license', 'main', 'tools', 'hooks', 'dependencies'];
 
 /**
  * Validates a plugin manifest structure

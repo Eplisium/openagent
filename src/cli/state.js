@@ -5,8 +5,10 @@
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import { createRequire } from 'module';
 
-const VERSION = '4.1.0';
+const require = createRequire(import.meta.url);
+const { version: VERSION } = require('../../package.json');
 
 // ═══════════════════════════════════════════════════════════════════
 // 🏠 Local State Management

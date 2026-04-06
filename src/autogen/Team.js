@@ -148,7 +148,7 @@ export class Team {
     const workingDir = options.workingDir || this.supervisor?.workingDir || process.cwd();
     const workspaceDir = options.workspaceDir || this.supervisor?.workspaceDir || null;
     let projectTree = '';
-    try { projectTree = Team._scanProjectTree(workingDir); } catch {}
+    try { projectTree = Team._scanProjectTree(workingDir); } catch { /* project tree scan is optional */ }
     const envBlock = [
       '',
       '## Environment',

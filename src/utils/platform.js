@@ -82,7 +82,6 @@ export const Platform = {
    * Handles path separators, command syntax, and special characters
    * @param {string} cmd - The command to normalize
    * @returns {string}
-   */
   normalizeCommand(cmd) {
     if (!cmd) return '';
 
@@ -102,7 +101,6 @@ export const Platform = {
       // Convert backslashes to forward slashes in file paths (but not in regex)
       cmd = cmd.replace(/\\/g, '/');
     }
-
     return cmd;
   },
 
@@ -183,10 +181,10 @@ try {
     if (!Platform.isWSL) {
       try {
         Platform.isWSL = fs.readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft');
-      } catch {}
+      } catch { /* /proc/version not readable — not WSL */ }
     }
   }
-} catch (error) {
+} catch (_error) {
   // WSL detection failed, keep default
 }
 

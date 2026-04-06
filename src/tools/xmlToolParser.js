@@ -20,7 +20,7 @@ const FUNC_CALLS_PARAM_RE = /<(\w+)>([\s\S]*?)<\/\1>/g;
 function coerceValue(value) {
   const trimmed = String(value ?? '').trim();
   if (!trimmed) return '';
-  try { return JSON.parse(trimmed); } catch {}
+  try { return JSON.parse(trimmed); } catch { /* not valid JSON — fall through to string coercion */ }
   if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) return Number(trimmed);
   if (/^(true|false)$/i.test(trimmed)) return trimmed.toLowerCase() === 'true';
   return trimmed;
@@ -64,7 +64,7 @@ export function parseXmlToolCalls(content) {
     const args = {};
     const inputMatch = block.match(/<input>([\s\S]*?)<\/input>/i);
     if (inputMatch) {
-      try { Object.assign(args, JSON.parse(inputMatch[1])); } catch {}
+      try { Object.assign(args, JSON.parse(inputMatch[1])); } catch { /* input block is not valid JSON — treat as string */ }
     }
     toolCalls.push({ id: 'xml_' + Date.now() + '_' + toolCalls.length, name, arguments: args });
   }

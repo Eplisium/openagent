@@ -61,7 +61,7 @@ export class ProcessManager {
    * Used for cleanup when parent process exits
    */
   killAll() {
-    for (const [label, procData] of Object.entries(this.processes)) {
+    for (const [_label, procData] of Object.entries(this.processes)) {
       if (procData.proc && !procData.proc.killed) {
         try {
           procData.proc.kill('SIGTERM');
@@ -71,7 +71,7 @@ export class ProcessManager {
               procData.proc.kill('SIGKILL');
             }
           }, 5000);
-        } catch (err) {
+        } catch (_err) {
           // Ignore errors during cleanup
         }
       }

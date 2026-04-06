@@ -20,8 +20,8 @@ import { EnhancedSkillParser } from './EnhancedSkillParser.js';
 
 const SKILL_FILE = 'SKILL.md';
 const SKILLS_DIR = 'skills';
-const MAX_SKILL_CONTENT_SIZE = 50000; // chars
-const METADATA_TOKEN_BUDGET = 100; // ~100 tokens per skill for metadata
+const _MAX_SKILL_CONTENT_SIZE = 50000; // chars
+const _METADATA_TOKEN_BUDGET = 100; // ~100 tokens per skill for metadata
 
 // ═══════════════════════════════════════════════════════════════════
 // 🎯 Skill Class (backward compatible, now uses EnhancedSkillParser)
@@ -308,7 +308,7 @@ To use a skill, call it by name. The skill's instructions will be loaded into co
         required: ['skill'],
       },
       execute: async ({ skill: skillName, action = 'load' }) => {
-        return await this.executeSkillAction(skillName, action);
+        return this.executeSkillAction(skillName, action);
       },
     };
   }

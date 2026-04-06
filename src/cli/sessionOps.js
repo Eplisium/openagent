@@ -232,7 +232,7 @@ async function findBakFiles(cli) {
           });
         }
       }
-    } catch {}
+    } catch { /* skip unreadable directories during walk */ }
   };
   await walk(cli.workingDir);
   return results.sort((a, b) => b.mtime - a.mtime);

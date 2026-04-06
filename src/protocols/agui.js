@@ -93,7 +93,7 @@ export class AGUIServer {
       });
 
       this.server.on('error', (error) => {
-        reject({ success: false, error: error.message });
+        reject(new Error(error.message));
       });
     });
   }
@@ -108,7 +108,7 @@ export class AGUIServer {
       for (const [res] of this.subscribers) {
         try {
           res.end();
-        } catch (e) {
+        } catch (_e) {
           // Ignore errors during cleanup
         }
       }
@@ -291,7 +291,7 @@ export class AGUIServer {
         for (const res of allSubs) {
           try {
             res.write(sseData);
-          } catch (error) {
+          } catch (_error) {
             // Ignore
           }
         }
@@ -395,7 +395,7 @@ export class AGUIServer {
    */
   getSubscribers() {
     const subs = [];
-    for (const [res, info] of this.subscribers) {
+    for (const [_res, info] of this.subscribers) {
       subs.push({
         id: info.id,
         channel: info.channel,

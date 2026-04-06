@@ -1,19 +1,49 @@
 {
   "name": "openagent",
-  "version": "4.2.0",
-  "description": "🚀 OpenAgent v4.2 - Production-grade AI agent with 400+ models, cross-platform support, and skills marketplace.",
+  "version": "0.1.20",
+  "description": "🚀 OpenAgent v0.1.20 - Production-grade AI agent with 400+ models, cross-platform support, and skills marketplace.",
   "main": "src/index.js",
   "type": "module",
   "bin": {
     "openagent": "src/cli.js",
     "oagent": "src/cli.js"
   },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md"
+  ],
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "default": "./src/index.js"
+    },
+    "./agent": {
+      "import": "./src/agent/Agent.js",
+      "default": "./src/agent/Agent.js"
+    },
+    "./tools": {
+      "import": "./src/tools/index.js",
+      "default": "./src/tools/index.js"
+    },
+    "./config": {
+      "import": "./src/config.js",
+      "default": "./src/config.js"
+    },
+    "./errors": {
+      "import": "./src/errors.js",
+      "default": "./src/errors.js"
+    }
+  },
   "scripts": {
     "start": "node src/cli.js",
     "cli": "node src/cli.js",
     "demo": "node examples/demo.js",
     "test": "vitest run",
-    "test:unit": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/ tests/",
+    "lint:fix": "eslint src/ tests/ --fix",
     "streaming": "node examples/streaming-demo.js",
     "tools": "node examples/tool-calling-demo.js",
     "agents": "node examples/agents-demo.js",
@@ -56,6 +86,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.5",
+    "eslint": "^9.39.4",
     "vitest": "^4.1.0"
   },
   "engines": {

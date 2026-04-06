@@ -209,7 +209,7 @@ export function printEnhancedToolCallStart(cli, toolName, args, count, taskStart
 /**
  * Enhanced tool call end with rich result display
  */
-export function printEnhancedToolCallEnd(cli, toolName, result, taskStartTime, count) {
+export function printEnhancedToolCallEnd(cli, toolName, result, taskStartTime, _count) {
   const t = cli.theme;
   const isSubagentTool = toolName.startsWith('delegate_') || toolName === 'subagent_status';
   const resultData = result.result || result;
@@ -286,7 +286,7 @@ export function printEnhancedToolCallEnd(cli, toolName, result, taskStartTime, c
             const diffOutput = renderDiff(cachedContent, newContent, filePath, themeObj);
             console.log(diffOutput);
             cli.fileContentCache.set(filePath, newContent);
-          } catch {}
+          } catch { /* diff rendering failure is non-critical */ }
         } else if (newContent !== undefined) {
           const lineCount = newContent.split('\n').length;
           console.log(chalk.hex(t.muted)(`    │ ${lineCount} lines`));
@@ -735,7 +735,7 @@ export function showHistory(cli) {
 /**
  * Show help panel
  */
-export function showHelp(cli) {
+export function showHelp(_cli) {
   console.log(boxen(
     `${chalk.bold('Commands')}\n\n` +
     `${formatCommandList([...COMMAND_ENTRIES.slice(0, -1), ['/reset', 'Alias for /new'], COMMAND_ENTRIES.at(-1)])}\n\n` +

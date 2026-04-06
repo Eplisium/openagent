@@ -88,7 +88,7 @@ class TestRunner {
 const runner = new TestRunner();
 
 // Skip tests if no API key
-const hasApiKey = !!CONFIG.API_KEY;
+const hasApiKey = Boolean(CONFIG.API_KEY);
 
 // ========================================
 // Configuration Tests

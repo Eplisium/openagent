@@ -36,17 +36,17 @@ export async function resetTerminalInput(input = process.stdin) {
 
   try {
     input.pause?.();
-  } catch {}
+  } catch { /* pause may fail on non-TTY streams */ }
 
   try {
     if (input.isTTY && typeof input.setRawMode === 'function') {
       input.setRawMode(false);
     }
-  } catch {}
+  } catch { /* setRawMode may fail if stream closed */ }
 
   try {
     input.resume?.();
-  } catch {}
+  } catch { /* resume may fail on non-TTY streams */ }
 
   drainBufferedTerminators(input);
 

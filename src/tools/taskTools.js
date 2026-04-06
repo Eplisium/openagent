@@ -3,7 +3,7 @@
  * Tools for planning, tracking, and verifying long-running tasks
  */
 
-import { TaskManager, FeatureStatus } from '../agent/TaskManager.js';
+// TaskManager and FeatureStatus are used via the taskManager parameter passed to createTaskTools
 
 /**
  * Create task management tools for a given TaskManager
@@ -143,7 +143,7 @@ Use this to decide what to work on next. The feature will be marked as "in_progr
         properties: {},
       },
       timeout: 10000,
-      async execute(args) {
+      async execute(_args) {
         try {
           const feature = await taskManager.getNextFeature();
           
@@ -296,7 +296,7 @@ Use this to understand where you are in the task.`,
         properties: {},
       },
       timeout: 10000,
-      async execute(args) {
+      async execute(_args) {
         try {
           const status = await taskManager.getStatus();
           return {
@@ -327,7 +327,7 @@ Use this to report progress to the user or understand the current state.`,
         properties: {},
       },
       timeout: 10000,
-      async execute(args) {
+      async execute(_args) {
         try {
           const report = await taskManager.generateProgressReport();
           return {
@@ -364,7 +364,7 @@ Always call this before ending a session.`,
         },
       },
       timeout: 10000,
-      async execute(args) {
+      async execute(_args) {
         try {
           await taskManager.saveSessionLog();
           return {

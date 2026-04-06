@@ -1,4 +1,4 @@
-# 🚀 OpenAgent v4.2
+# 🚀 OpenAgent v0.1.20
 
 > Production-grade AI agent with 400+ models, comprehensive Skills System, cross-platform support, and powerful CLI. On par with Cursor, OpenClaw, and Claude Code.
 
@@ -490,5 +490,5 @@ MIT License - Feel free to use in your projects!
 
 <p align="center">
   <strong>Built with 💙 for the AI community</strong><br>
-  <sub>v4.2 - 2026 Edition - Agentic AI for Everyone</sub>
+  <sub>v0.1.20 - 2026 Edition - Agentic AI for Everyone</sub>
 </p>

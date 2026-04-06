@@ -317,7 +317,7 @@ export function clearScreen() {
  * 💤 Sleep
  */
 export function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(resolve => { setTimeout(resolve, ms); });
 }
 
 /**
@@ -379,9 +379,8 @@ export function normalizePositiveInt(value, fallback) {
 }
 
 // Pre-compiled regexes for token estimation (avoid recompilation on every call)
-const CODE_PATTERN_REGEX = /[{}\[\]()=><;]|(?:^|\s)(function|const|let|var|class|import|export|return|if|else|for|while|async|await|def |print |from |require\(|module\.)(?:\s|$)/gm;
-const NEWLINE_REGEX = /\n/g;
-const JSON_STRUCTURE_REGEX = /[{}\[\]]/g;
+const CODE_PATTERN_REGEX = /[{}[\]()=><;]|(?:^|\s)(function|const|let|var|class|import|export|return|if|else|for|while|async|await|def |print |from |require\(|module\.)(?:\s|$)/gm;
+const JSON_STRUCTURE_REGEX = /[{}[\]]/g;
 
 // Token estimation LRU cache — avoids re-estimating identical strings
 const _tokenCache = new Map();

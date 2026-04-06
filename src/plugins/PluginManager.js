@@ -6,7 +6,7 @@
 import fs from 'fs-extra';
 import path from 'path';
 import { validateManifest } from './PluginManifest.js';
-import { Plugin } from './Plugin.js';
+// Plugin import removed — not directly used
 
 /**
  * Central plugin manager for OpenAgent

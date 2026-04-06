@@ -7,7 +7,7 @@
 
 import chalk from 'chalk';
 import http from 'http';
-import https from 'https';
+// https removed — not used
 import { URL } from 'url';
 import { EventEmitter } from 'events';
 
@@ -332,7 +332,7 @@ export class A2AAgent extends EventEmitter {
       });
 
       this.server.on('error', (error) => {
-        reject({ success: false, error: error.message });
+        reject(new Error(error.message));
       });
     });
   }

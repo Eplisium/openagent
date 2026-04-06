@@ -5,8 +5,7 @@
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import path from 'path';
-import fs from 'fs-extra';
+// path and fs removed — not used in this file
 
 const execFileAsync = promisify(execFile);
 

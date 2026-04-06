@@ -106,7 +106,7 @@ export class ToolRegistry {
   getFunctionDefinitions() {
     if (this._cachedFunctionDefs) return this._cachedFunctionDefs;
     const defs = [];
-    for (const [name, tool] of this.tools) {
+    for (const [_name, tool] of this.tools) {
       if (tool.enabled !== false) {
         defs.push({
           type: 'function',
@@ -128,7 +128,7 @@ export class ToolRegistry {
   getToolDefinitions() {
     if (this._cachedToolDefs) return this._cachedToolDefs;
     const defs = [];
-    for (const [name, tool] of this.tools) {
+    for (const [_name, tool] of this.tools) {
       if (tool.enabled !== false) {
         defs.push({
           name: tool.name,

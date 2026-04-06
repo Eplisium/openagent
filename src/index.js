@@ -83,7 +83,7 @@ export { CLI } from './cli.js';
 
 // Main function
 import { CLI } from './cli.js';
-import { CONFIG } from './config.js';
+// CONFIG import removed — not used in this file
 
 
 /**

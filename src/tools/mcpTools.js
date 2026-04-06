@@ -180,7 +180,7 @@ class MCPStdioClient extends EventEmitter {
         try {
           const message = JSON.parse(line);
           this.handleMessage(message);
-        } catch (e) {
+        } catch (_e) {
           // Not JSON, ignore
         }
       }
@@ -217,7 +217,7 @@ class MCPStdioClient extends EventEmitter {
         id,
       };
 
-      const pending = { resolve, reject };
+      const _pending = { resolve, reject };
       
       // Set up one-time listener for this response
       const onResponse = (response) => {
@@ -310,7 +310,7 @@ class MCPStdioClient extends EventEmitter {
  */
 export function createMcpTools(options = {}) {
   const {
-    baseDir = '.',
+    _baseDir = '.',
   } = options;
 
   /**

@@ -1,8 +1,8 @@
 /**
- * 🤝 Subagent Manager v4.1
+ * 🤝 Subagent Manager v0.1.20
  * Production-grade subagent lifecycle, task delegation, and result aggregation
  * 
- * v4.1 improvements:
+ * v0.1.20 improvements:
  * - Auto-inject project file tree into subagent system prompts
  * - Platform-aware shell command guidance (no Unix commands on Windows)
  * - Full file editing rules in all specialization prompts
@@ -37,7 +37,7 @@ import { createA2ATools } from '../tools/a2aTools.js';
 import { createAGUITools } from '../tools/aguiTools.js';
 import chalk from 'chalk';
 import { SUBAGENT_SPECIALIZATIONS } from './subagents/specializations.js';
-import { UI, stripAnsi } from './subagents/subagentUI.js';
+import { UI } from './subagents/subagentUI.js';
 import { SubagentTask, TaskState } from './subagents/SubagentTask.js';
 
 // ─── Project Context Scanner ───────────────────────────────────
@@ -570,12 +570,12 @@ ${tree}
       console.log(UI.parallelHeader(tasks.length, maxConcurrent));
       
       // Show task list
-      tasks.forEach((taskSpec, i) => {
+      tasks.forEach((taskSpec, iteration) => {
         const task = typeof taskSpec === 'string' 
           ? { task: taskSpec, specialization: 'general' }
           : taskSpec;
         const spec = SUBAGENT_SPECIALIZATIONS[task.specialization || 'general'] || SUBAGENT_SPECIALIZATIONS.general;
-        console.log(UI.taskRow(i, spec.name, TaskState.QUEUED, task.task.substring(0, 60)));
+        console.log(UI.taskRow(iteration, spec.name, TaskState.QUEUED, task.task.substring(0, 60)));
       });
       console.log(chalk.dim('  ╠' + '═'.repeat(58) + '╣'));
     }
@@ -588,7 +588,7 @@ ${tree}
         console.log(UI.progress(`── Batch ${Math.floor(i / maxConcurrent) + 1} ──`));
       }
       
-      const batchPromises = batch.map((taskSpec, batchIdx) => {
+      const batchPromises = batch.map((taskSpec, _batchIdx) => {
         const task = typeof taskSpec === 'string' 
           ? { task: taskSpec, specialization: 'general' }
           : taskSpec;
@@ -772,7 +772,7 @@ Please synthesize these results into a single coherent, well-organized response.
 
   getAllTasksStatus() {
     const tasks = [];
-    for (const [id, task] of this.tasks) {
+    for (const [_id, task] of this.tasks) {
       tasks.push(task.toJSON());
     }
     return tasks;
@@ -896,7 +896,7 @@ Please synthesize these results into a single coherent, well-organized response.
     if (typeof subagent.abort === 'function') {
       try {
         subagent.abort();
-      } catch (err) {
+      } catch (_err) {
         // Ignore abort errors - subagent may have already finished
       }
     }

@@ -2,7 +2,7 @@
  * 🧠 Subagent Specializations
  * System prompts and configuration for each agent specialization type.
  *
- * v4.1 improvements:
+ * v0.1.20 improvements:
  * - Full file editing rules (read-before-edit, line-based, batch edits)
  * - Windows platform awareness (no Unix-only commands)
  * - Path prefix guidance (project:, workspace:, workdir:, openagent:)

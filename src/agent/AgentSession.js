@@ -28,7 +28,7 @@ import { createA2ATools } from '../tools/a2aTools.js';
 import { createAGUITools } from '../tools/aguiTools.js';
 import { createGraphTools } from '../tools/graphTools.js';
 import { AutoGenBridge } from '../autogen/AutoGenBridge.js';
-import { WorkflowGraph, GraphState, END } from '../graph/index.js';
+import { WorkflowGraph } from '../graph/index.js';
 import { FileCheckpointer as GraphFileCheckpointer } from '../graph/checkpointers/FileCheckpointer.js';
 import { fileURLToPath } from 'url';
 
@@ -234,13 +234,13 @@ export class AgentSession {
     this.workflowRegistry.set(name, entry);
 
     // Listen for HITL pauses on this workflow
-    compiled.interruptManager.on('paused', ({ threadId, nodeName, state }) => {
+    compiled.interruptManager.on('paused', ({ threadId, _nodeName, _state }) => {
       // Track active graph so tools can find it
       this.activeGraphs.set(threadId, compiled);
     });
 
     // Clean up active graphs when they complete
-    compiled.interruptManager.on('resumed', ({ threadId }) => {
+    compiled.interruptManager.on('resumed', ({ _threadId }) => {
       // Still active after resume
     });
 
@@ -314,7 +314,7 @@ export class AgentSession {
    */
   async resumeWorkflow(threadId, humanInput = null) {
     // Find the compiled graph for this thread
-    for (const [name, entry] of this.workflowRegistry) {
+    for (const [_name, entry] of this.workflowRegistry) {
       const state = await entry.compiled.getState(threadId);
       if (state) {
         this.activeGraphs.set(threadId, entry.compiled);
@@ -804,7 +804,7 @@ export class AgentSession {
             iterations: data.agent?.stats?.iterations || 0,
             activeWorkspaceDir: data.metadata?.activeWorkspaceDir || data.activeWorkspace?.workspaceDir || null,
           });
-        } catch {}
+        } catch { /* session data may be corrupt — skip */ }
       }
     }
     

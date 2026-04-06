@@ -15,7 +15,7 @@
  * - Model routing and fallback
  */
 
-import { CONFIG, PLUGINS } from './config.js';
+import { CONFIG } from './config.js';
 import { logger } from './logger.js';
 import { OpenRouterError, RateLimitError, AuthenticationError, AbortError } from './errors.js';
 import { parseXmlToolCalls, hasXmlToolCalls } from './tools/xmlToolParser.js';
@@ -919,8 +919,8 @@ export class OpenRouterClient {
       frequency_penalty, presence_penalty, reasoning_effort,
       tools, tool_choice, response_format,
       plugins, provider, transforms, route, models: fallbackModels,
-      retries, cacheTTL, // internal options to exclude
-      ...extraParams
+      _retries, _cacheTTL, // internal options to exclude
+      ..._extraParams
     } = options;
     
     const payload = {

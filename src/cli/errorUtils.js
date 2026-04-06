@@ -206,7 +206,7 @@ export function showSmartError(errorType, details = {}) {
 
   let content = '';
   let title = '❌ Error';
-  let fixSuggestions = suggestions.length > 0 ? suggestions : errorCategory.suggestions;
+  const fixSuggestions = suggestions.length > 0 ? suggestions : errorCategory.suggestions;
 
   if (httpStatus) {
     title += ` ${chalk.yellow('⚠')} ${chalk.white(httpStatus)}`;

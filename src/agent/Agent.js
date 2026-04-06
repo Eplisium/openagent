@@ -1,14 +1,14 @@
 
 
 import { OpenRouterClient } from '../OpenRouterClient.js';
-import { AgentError, ToolExecutionError, ContextOverflowError, AgentAbortError, AbortError, ToolErrorType } from '../errors.js';
+import { AgentError, AgentAbortError, AbortError, ToolErrorType } from '../errors.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
 import { parseXmlToolCalls, hasXmlToolCalls } from '../tools/xmlToolParser.js';
 import { CONFIG } from '../config.js';
 import { logger } from '../logger.js';
 import { ContextAllocator } from './contextAllocator.js';
 import { normalizeOptionalLimit, normalizePositiveInt, estimateTokens } from '../utils.js';
-import chalk from 'chalk';
+// chalk removed — not used in this file
 import fs from 'fs-extra';
 import path from 'path';
 
@@ -529,7 +529,7 @@ When done, provide a clear summary: what changed, why, what was verified, and an
               const name = tc.function?.name || '';
               if (Agent._writeTools.has(name)) {
                 let args = {};
-                try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
+                try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; logger.warn(`Failed to parse tool call arguments for ${name}`); }
                 codeChanges.push(args.path ? `${name}: ${args.path}` : `${name} (no path in args)`);
               }
             }
@@ -833,7 +833,7 @@ Task: ${userInput}`;
   /**
    * Reflect on failed tool executions and inject guidance messages
    */
-  reflectOnToolResults(toolResults, toolCalls) {
+  reflectOnToolResults(toolResults, _toolCalls) {
     const errors = toolResults.filter(r => r.result && r.result.success === false);
     const empties = toolResults.filter(r => {
       if (r.result && r.result.success === false) return false;
@@ -958,7 +958,7 @@ Task: ${userInput}`;
             ? `workspace:.tool-cache/${path.basename(cacheFile)}`
             : cacheFile;
           cacheInfo = `\n\n📁 Full result (${original.length} chars) cached to: ${relPath}\nUse read_file with startLine/endLine to read specific sections.`;
-        } catch (cacheErr) {
+        } catch (_cacheErr) {
           cacheInfo = `\n\n... [truncated - showing ${cutPoint} of ${original.length} chars]`;
         }
         content = original.substring(0, cutPoint) + cacheInfo;
@@ -1030,7 +1030,7 @@ Task: ${userInput}`;
    * this dispatches each tool call as soon as it's complete in the stream.
    * Falls back to non-streaming if streaming errors mid-iteration.
    */
-  async runWithStreaming(userInput, options = {}) {
+  async runWithStreaming(userInput, _options = {}) {
     const startTime = Date.now();
     const runHistory = [];
     let finalResponse = null;
@@ -1055,7 +1055,7 @@ Task: ${userInput}`;
 
       // ── Streaming iteration ──
       let fullContent = '';
-      let allToolCalls = [];
+      const allToolCalls = [];
       const dispatchedPromises = new Map(); // index -> Promise
       const completedResults = new Map();   // index -> toolResult
       let streamUsage = null;
@@ -1182,7 +1182,7 @@ Task: ${userInput}`;
 
       // Merge tool calls: combine allToolCalls (from onToolCallReady) with streamToolCalls
       // (onToolCallReady may not fire for all models/providers, or may fire for only some)
-      let finalToolCalls = [...allToolCalls];
+      const finalToolCalls = [...allToolCalls];
       if (streamToolCalls.length > 0) {
         const existingIds = new Set(finalToolCalls.map(tc => tc.id));
         for (const tc of streamToolCalls) {

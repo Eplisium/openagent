@@ -14,7 +14,7 @@ let a2aServer = null;
  * @param {object} options
  * @returns {object[]}
  */
-export function createA2ATools(options = {}) {
+export function createA2ATools(_options = {}) {
   /**
    * Start A2A agent server
    */
@@ -61,7 +61,7 @@ export function createA2ATools(options = {}) {
           },
         });
 
-        const result = await a2aServer.start(port);
+        await a2aServer.start(port);
         
         console.log(chalk.green(`[A2A] Server started on port ${port}`));
         

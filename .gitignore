@@ -41,3 +41,11 @@ build/
 docs/
 fonts/
 
+# Tooling cache
+.eslintcache
+*.tsbuildinfo
+.nyc_output/
+
+# Test artifacts
+*.test.snap
+

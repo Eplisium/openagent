@@ -47,7 +47,7 @@ class SubagentTask {
       priority: this.priority,
       duration: this.duration,
       retryCount: this.retryCount,
-      hasResult: !!this.result,
+      hasResult: Boolean(this.result),
       error: this.error,
     };
   }
