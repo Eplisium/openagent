@@ -95,6 +95,65 @@ export function createFileTools(options = {}) {
     return { valid: true };
   }
 
+  const readFilesTool = {
+    name: 'read_files',
+    description: `Read MULTIPLE files at once. Returns all file contents with line numbers. USE THIS instead of calling read_file multiple times — it's ONE tool call for multiple files. ${PATH_PREFIX_NOTE}`,
+    category: 'file',
+    parameters: {
+      type: 'object',
+      properties: {
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: `Array of file paths to read. ${PATH_PREFIX_NOTE}`,
+        },
+      },
+      required: ['paths'],
+    },
+    async execute({ paths: filePaths }) {
+      if (!Array.isArray(filePaths) || filePaths.length === 0) {
+        return { success: false, error: 'paths must be a non-empty array' };
+      }
+      const results = [];
+      const MAX_LINES = CONFIG.FILE_READ_MAX_LINES;
+      const MAX_CHARS = Math.floor(CONFIG.FILE_READ_MAX_CHARS / Math.min(filePaths.length, 4)); // Split budget
+
+      for (const filePath of filePaths) {
+        try {
+          const resolvedPath = resolvePathForAgent(filePath);
+          const pathValidation = validatePath(resolvedPath);
+          if (!pathValidation.valid) {
+            results.push({ path: filePath, success: false, error: pathValidation.error });
+            continue;
+          }
+          if (!await fs.pathExists(resolvedPath)) {
+            results.push({ path: filePath, success: false, error: await buildMissingFileError(filePath, resolvedPath) });
+            continue;
+          }
+          const stat = await fs.stat(resolvedPath);
+          if (stat.isDirectory()) {
+            results.push({ path: filePath, success: false, error: 'Path is a directory' });
+            continue;
+          }
+          const { content } = await getCachedFile(resolvedPath);
+          const lines = Platform.splitLines(content);
+          const limitedLines = lines.length > MAX_LINES ? lines.slice(0, MAX_LINES) : lines;
+          const numbered = limitedLines.map((line, i) => `${i + 1}│ ${line}`).join('\n');
+          results.push({
+            path: filePath,
+            success: true,
+            content: numbered.length > MAX_CHARS ? numbered.substring(0, MAX_CHARS) + '\n... [truncated]' : numbered,
+            totalLines: lines.length,
+            truncated: lines.length > MAX_LINES,
+          });
+        } catch (error) {
+          results.push({ path: filePath, success: false, error: error.message });
+        }
+      }
+      return { success: true, files: results, count: results.length };
+    },
+  };
+
   const readFileTool = {
     name: 'read_file',
     description: `Read the contents of a file. Returns the full file content with line numbers. ${PATH_PREFIX_NOTE}`,
@@ -1661,10 +1720,12 @@ export function createFileTools(options = {}) {
 
   return [
     readFileTool,
+    readFilesTool,
     writeFileTool,
     editFileTool,
     searchAndReplaceTool,
     listDirectoryTool,
+    fileTreeTool,
     searchInFilesTool,
     getFileInfoTool,
     readImageTool,
@@ -1673,7 +1734,6 @@ export function createFileTools(options = {}) {
     findFilesTool,
     diffFilesTool,
     previewEditTool,
-    fileTreeTool,
   ];
 }
 
@@ -1681,10 +1741,12 @@ const defaultFileTools = createFileTools();
 
 export const [
   readFileTool,
+  readFilesTool,
   writeFileTool,
   editFileTool,
   searchAndReplaceTool,
   listDirectoryTool,
+  fileTreeTool,
   searchInFilesTool,
   getFileInfoTool,
   readImageTool,
@@ -1693,7 +1755,6 @@ export const [
   findFilesTool,
   diffFilesTool,
   previewEditTool,
-  fileTreeTool,
 ] = defaultFileTools;
 
 export const fileTools = defaultFileTools;

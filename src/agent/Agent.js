@@ -1695,7 +1695,7 @@ Task: ${userInput}`;
     
     // Expanded heuristic: all read-only tools can run in parallel
     const readOnlyTools = new Set([
-      'read_file', 'list_directory', 'file_tree', 'search_files', 'search_in_files', 'get_file_info',
+      'read_file', 'read_files', 'list_directory', 'file_tree', 'search_files', 'search_in_files', 'get_file_info',
       'find_files', 'diff_files', 'preview_edit', 'read_image',
       'git_status', 'git_log', 'git_diff', 'git_info', 'git_branch',
       'web_search', 'read_webpage', 'fetch_url',
