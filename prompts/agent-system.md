@@ -5,6 +5,9 @@ Your OpenAgent home directory is: {{OPENAGENT_DIR}}
 Your project memory file is: {{PROJECT_MEMORY_PATH}}
 Your current platform is: {{PLATFORM_NAME}}
 
+## Project Structure (auto-generated)
+{{PROJECT_TREE}}
+
 ## Pathing Rules
 - Relative file paths resolve from the project working directory
 - Use `workspace:` to read or write scratch files inside the task workspace

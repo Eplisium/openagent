@@ -342,6 +342,7 @@ export class AgentSession {
     const projectMemoryPath = this.memoryManager?.paths?.projectMemory || path.join(this.workspaceManager.openAgentDir, 'memory', 'MEMORY.md');
     const platformName = process.platform;
     const pathStyle = platformName === 'win32' ? 'Windows-style' : 'POSIX-style';
+    const projectTree = this._buildProjectTree();
     const template = getAgentSystemPromptTemplate();
     return template
       .replace(/\{\{WORKING_DIR\}\}/g, this.workingDir)
@@ -351,7 +352,53 @@ export class AgentSession {
       .replace(/\{\{PLATFORM_NAME\}\}/g, platformName)
       .replace(/\{\{PATH_STYLE\}\}/g, pathStyle)
       .replace(/\{\{MEMORY_CONTEXT\}\}/g, memoryContext)
-      .replace(/\{\{SKILL_CONTEXT\}\}/g, skillContext);
+      .replace(/\{\{SKILL_CONTEXT\}\}/g, skillContext)
+      .replace(/\{\{PROJECT_TREE\}\}/g, projectTree);
+  }
+
+  /**
+   * Build a synchronous file tree of the working directory.
+   * This is injected into the system prompt so the agent never needs to explore.
+   * @returns {string} Formatted file tree
+   */
+  _buildProjectTree() {
+    try {
+      const SKIP = new Set(['node_modules', '.git', '.openagent', 'dist', 'build', '.next', '__pycache__', '.venv', 'venv', '.windop-backups']);
+      const MAX_DEPTH = 3;
+      const MAX_ENTRIES = 200;
+      let count = 0;
+
+      const build = (dir, depth) => {
+        if (depth > MAX_DEPTH || count >= MAX_ENTRIES) return '';
+        let entries;
+        try { entries = fs.readdirSync(dir); } catch { return ''; }
+        const filtered = entries.filter(e => !e.startsWith('.') && !SKIP.has(e)).sort();
+        let result = '';
+        for (const name of filtered) {
+          if (count >= MAX_ENTRIES) { result += '  ... (truncated)\n'; break; }
+          const fullPath = path.join(dir, name);
+          try {
+            const stat = fs.lstatSync(fullPath);
+            if (stat.isDirectory()) {
+              result += `${'  '.repeat(depth)}${name}/\n`;
+              count++;
+              result += build(fullPath, depth + 1);
+            } else {
+              const size = stat.size < 1024 ? `${stat.size}B` : `${(stat.size / 1024).toFixed(0)}KB`;
+              result += `${'  '.repeat(depth)}${name} (${size})\n`;
+              count++;
+            }
+          } catch { /* skip broken symlinks */ }
+        }
+        return result;
+      };
+
+      const basename = path.basename(this.workingDir);
+      const tree = build(this.workingDir, 1);
+      return `\`\`\`\n${basename}/\n${tree}\`\`\``;
+    } catch {
+      return '(file tree unavailable)';
+    }
   }
 
   /**
