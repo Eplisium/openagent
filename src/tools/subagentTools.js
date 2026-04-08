@@ -332,6 +332,192 @@ Example:
     },
 
     {
+      name: 'delegate_background',
+      description: `Fire-and-forget delegation: start a subagent task and return IMMEDIATELY with a task ID.
+
+Best for:
+- Starting long-running tasks (research, test suites, builds) while you keep working
+- Parallel work where you don't need results right away
+- Multi-task scenarios: start 3-4 tasks, do other work, then collect results
+
+The subagent runs in the background. Use get_background_result or await_background to collect results later.
+
+CRITICAL: Include exact file paths in task descriptions. Subagents start blind.`,
+      category: 'subagent',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: {
+            type: 'string',
+            description: 'Detailed task description with exact file paths (project: prefix or relative).',
+          },
+          specialization: {
+            type: 'string',
+            enum: ['general', 'coder', 'architect', 'researcher', 'file_manager', 'tester', 'reviewer'],
+            default: 'general',
+          },
+        },
+        required: ['task'],
+      },
+      timeout: 5000, // Returns immediately
+      async execute(args) {
+        try {
+          const result = subagentManager.delegateBackground(args.task, {
+            specialization: args.specialization || 'general',
+          });
+          return { success: true, ...result };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      },
+    },
+
+    {
+      name: 'get_background_result',
+      description: 'Check the status/result of a background subagent task. Returns immediately — does NOT wait. Use this to poll for results while doing other work.',
+      category: 'subagent',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskId: {
+            type: 'string',
+            description: 'The task ID returned from delegate_background.',
+          },
+        },
+        required: ['taskId'],
+      },
+      timeout: 5000,
+      async execute(args) {
+        try {
+          return { success: true, ...subagentManager.getBackgroundResult(args.taskId) };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      },
+    },
+
+    {
+      name: 'await_background',
+      description: 'Wait for a background subagent task to complete and return its full result. Blocks until done or timeout.',
+      category: 'subagent',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskId: {
+            type: 'string',
+            description: 'The task ID returned from delegate_background.',
+          },
+          timeoutMs: {
+            type: 'number',
+            description: 'Max wait time in ms. Default: 600000 (10 min).',
+            default: 600000,
+          },
+        },
+        required: ['taskId'],
+      },
+      timeout: 600000,
+      async execute(args) {
+        try {
+          const result = await subagentManager.awaitBackground(args.taskId, args.timeoutMs);
+          return { success: result.success !== false, ...result };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      },
+    },
+
+    {
+      name: 'delegate_fanout',
+      description: `Fan-out a large coding task into parallel subagents, each working on different files.
+
+Best for:
+- Refactoring across multiple files (each file gets its own coder)
+- Adding a feature that touches many files (split by component/module)
+- Large-scale changes (rename, API migration, style updates)
+
+You provide file groups — each group gets its own coder subagent.
+All groups run in parallel. Results are aggregated.
+
+Example:
+[
+  { "files": ["src/auth.js", "src/middleware.js"], "description": "Add JWT validation middleware" },
+  { "files": ["src/routes/api.js"], "description": "Update API routes to use new auth" },
+  { "files": ["tests/auth.test.js"], "description": "Write tests for new auth flow" }
+]`,
+      category: 'subagent',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: {
+            type: 'string',
+            description: 'Overall task description that provides context for all subagents.',
+          },
+          fileGroups: {
+            type: 'array',
+            description: 'Array of file groups. Each group gets its own parallel subagent.',
+            items: {
+              type: 'object',
+              properties: {
+                files: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'File paths this subagent should modify (project: prefix or relative).',
+                },
+                description: {
+                  type: 'string',
+                  description: 'What this subagent should do with these files.',
+                },
+                specialization: {
+                  type: 'string',
+                  enum: ['general', 'coder', 'architect', 'researcher', 'file_manager', 'tester', 'reviewer'],
+                  default: 'coder',
+                },
+              },
+              required: ['files', 'description'],
+            },
+          },
+          maxConcurrent: {
+            type: 'number',
+            description: 'Max subagents to run at once. Default: 3.',
+            default: 3,
+          },
+        },
+        required: ['task', 'fileGroups'],
+      },
+      timeout: 600000,
+      async execute(args) {
+        try {
+          const result = await subagentManager.delegateFanout(
+            args.task,
+            args.fileGroups,
+            { maxConcurrent: args.maxConcurrent || 3 }
+          );
+          return result;
+        } catch (error) {
+          return { success: false, error: `Fan-out failed: ${error.message}` };
+        }
+      },
+    },
+
+    {
+      name: 'list_background_tasks',
+      description: 'List all background (fire-and-forget) subagent tasks and their current status. Use this to see what\'s running in the background.',
+      category: 'subagent',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      timeout: 5000,
+      async execute() {
+        try {
+          return { success: true, tasks: subagentManager.listBackgroundTasks() };
+        } catch (error) {
+          return { success: false, error: error.message };
+        }
+      },
+    },
+
+    {
       name: 'subagent_status',
       description: 'Check subagent task status, statistics, and available specializations.',
       category: 'subagent',

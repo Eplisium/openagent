@@ -213,6 +213,13 @@ export class SubagentManager {
     this.messageBus = new Map(); // subagentId -> message queue (array of messages)
     this.sharedContext = new Map(); // key -> value shared across subagents
     
+    // Background task tracking (fire-and-forget delegation)
+    this.backgroundTasks = new Map(); // taskId -> { promise, resolve, reject }
+    
+    // File lock manager for concurrent subagent write safety
+    this.fileLocks = new Map(); // normalizedFilePath -> { owner: taskId, timestamp }
+    this.fileLockQueue = new Map(); // normalizedFilePath -> [waiting resolvers]
+    
     // Periodic cleanup of stale subagents (every 60 seconds)
     this._cleanupInterval = setInterval(() => {
       try {
@@ -757,6 +764,236 @@ Please synthesize these results into a single coherent, well-organized response.
       success: results.every(r => r.success),
       stages: results,
       finalResult: results[results.length - 1],
+    };
+  }
+
+  // ─── Background Delegation (Fire-and-Forget) ───────────────────
+
+  /**
+   * Delegate a task in the background — returns immediately with a taskId.
+   * The parent agent can keep working while the subagent runs.
+   * Use getBackgroundResult(taskId) to collect the result later.
+   * @param {string} task - Task description
+   * @param {object} options - Delegation options
+   * @returns {{ taskId: string, started: boolean }}
+   */
+  delegateBackground(task, options = {}) {
+    const specialization = options.specialization || 'general';
+    const taskId = this.generateTaskId();
+
+    // Start the delegation asynchronously — don't await
+    const promise = this.delegate(task, {
+      specialization,
+      priority: options.priority || 5,
+      maxRetries: options.maxRetries || 1,
+    }).then(result => {
+      // Store result for later retrieval
+      const bg = this.backgroundTasks.get(taskId);
+      if (bg) {
+        bg.result = result;
+        bg.status = result.success ? 'completed' : 'failed';
+        bg.endTime = Date.now();
+      }
+      return result;
+    }).catch(error => {
+      const bg = this.backgroundTasks.get(taskId);
+      if (bg) {
+        bg.result = { success: false, error: error.message };
+        bg.status = 'failed';
+        bg.endTime = Date.now();
+      }
+      return { success: false, error: error.message };
+    });
+
+    this.backgroundTasks.set(taskId, {
+      taskId,
+      promise,
+      task: task.substring(0, 200),
+      specialization,
+      status: 'running',
+      startTime: Date.now(),
+      endTime: null,
+      result: null,
+    });
+
+    return { taskId, started: true, specialization };
+  }
+
+  /**
+   * Get the result of a background task. Returns null if still running.
+   * @param {string} taskId
+   * @returns {object|null} Result or null if still running
+   */
+  getBackgroundResult(taskId) {
+    const bg = this.backgroundTasks.get(taskId);
+    if (!bg) return { error: 'Background task not found' };
+    return {
+      taskId: bg.taskId,
+      status: bg.status,
+      task: bg.task,
+      specialization: bg.specialization,
+      duration: bg.endTime ? bg.endTime - bg.startTime : Date.now() - bg.startTime,
+      result: bg.result,
+    };
+  }
+
+  /**
+   * Wait for a background task to complete and return its result.
+   * @param {string} taskId
+   * @param {number} timeoutMs - Max wait time (default: 10 minutes)
+   * @returns {Promise<object>} Task result
+   */
+  async awaitBackground(taskId, timeoutMs = 600000) {
+    const bg = this.backgroundTasks.get(taskId);
+    if (!bg) return { success: false, error: 'Background task not found' };
+    if (bg.result) return bg.result; // Already done
+
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Background task timeout')), timeoutMs)
+    );
+
+    try {
+      return await Promise.race([bg.promise, timeoutPromise]);
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * List all background tasks and their statuses.
+   */
+  listBackgroundTasks() {
+    const tasks = [];
+    for (const [id, bg] of this.backgroundTasks) {
+      tasks.push({
+        taskId: id,
+        status: bg.status,
+        task: bg.task,
+        specialization: bg.specialization,
+        duration: bg.endTime ? bg.endTime - bg.startTime : Date.now() - bg.startTime,
+      });
+    }
+    return tasks;
+  }
+
+  // ─── File Lock Manager (Concurrent Write Safety) ────────────────
+
+  /**
+   * Acquire a lock on a file before writing. Blocks if another subagent holds the lock.
+   * @param {string} filePath - The file to lock
+   * @param {string} ownerTaskId - The task ID requesting the lock
+   * @param {number} timeoutMs - Max wait for lock (default: 30s)
+   * @returns {Promise<{acquired: boolean, waited: number}>}
+   */
+  async acquireFileLock(filePath, ownerTaskId, timeoutMs = 30000) {
+    const normalized = path.resolve(filePath).toLowerCase();
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      const existing = this.fileLocks.get(normalized);
+      if (!existing || existing.owner === ownerTaskId) {
+        // Lock available or we already own it
+        this.fileLocks.set(normalized, { owner: ownerTaskId, timestamp: Date.now() });
+        return { acquired: true, waited: Date.now() - start };
+      }
+      // Wait for the lock to be released
+      await this.sleep(100);
+    }
+
+    return { acquired: false, waited: Date.now() - start };
+  }
+
+  /**
+   * Release a file lock.
+   * @param {string} filePath
+   * @param {string} ownerTaskId
+   */
+  releaseFileLock(filePath, ownerTaskId) {
+    const normalized = path.resolve(filePath).toLowerCase();
+    const existing = this.fileLocks.get(normalized);
+    if (existing && existing.owner === ownerTaskId) {
+      this.fileLocks.delete(normalized);
+    }
+  }
+
+  /**
+   * Release all locks owned by a task.
+   * @param {string} ownerTaskId
+   */
+  releaseAllLocks(ownerTaskId) {
+    for (const [filePath, lock] of this.fileLocks) {
+      if (lock.owner === ownerTaskId) {
+        this.fileLocks.delete(filePath);
+      }
+    }
+  }
+
+  /**
+   * Check if a file is currently locked.
+   * @param {string} filePath
+   * @returns {{ locked: boolean, owner: string|null }}
+   */
+  isFileLocked(filePath) {
+    const normalized = path.resolve(filePath).toLowerCase();
+    const existing = this.fileLocks.get(normalized);
+    return existing ? { locked: true, owner: existing.owner } : { locked: false, owner: null };
+  }
+
+  // ─── Fan-Out Delegation (Auto-Decomposition) ────────────────────
+
+  /**
+   * Fan-out a large coding task into parallel subagents, each working on different files.
+   * Automatically decomposes the task and assigns file groups to specialized coders.
+   * @param {string} task - The overall task description
+   * @param {Array<{files: string[], description: string}>} fileGroups - Pre-defined file groups
+   * @param {object} options
+   * @returns {Promise<object>} Aggregated results
+   */
+  async delegateFanout(task, fileGroups, options = {}) {
+    this.checkAborted();
+    const maxConcurrent = options.maxConcurrent || this.maxConcurrent;
+
+    if (this.verbose) {
+      console.log(UI.parallelHeader(fileGroups.length, maxConcurrent));
+    }
+
+    // Build parallel tasks from file groups
+    const tasks = fileGroups.map((group, i) => {
+      const fileList = group.files.map(f => `project:${f}`).join(', ');
+      return {
+        task: `${group.description}\n\nFiles to modify: ${fileList}\n\nContext: ${task}\n\nIMPORTANT: Only modify the files listed above. Do NOT modify other files.`,
+        specialization: group.specialization || 'coder',
+        files: group.files,
+      };
+    });
+
+    // Run all groups in parallel
+    const results = await this.delegateParallel(tasks, { maxConcurrent });
+
+    // Aggregate results
+    const successful = results.filter(r => r.success);
+    const failed = results.filter(r => !r.success);
+    const allFilesModified = fileGroups.flatMap(g => g.files);
+
+    return {
+      success: failed.length === 0,
+      partial: successful.length > 0 && failed.length > 0,
+      results: results.map((r, i) => ({
+        taskId: r.taskId,
+        success: r.success,
+        files: fileGroups[i]?.files || [],
+        specialization: r.specialization,
+        response: r.response?.substring(0, 500),
+        duration: r.duration,
+        error: r.error,
+      })),
+      summary: {
+        total: results.length,
+        successful: successful.length,
+        failed: failed.length,
+        filesModified: allFilesModified,
+        totalDuration: results.length > 0 ? Math.max(...results.map(r => r.duration || 0)) : 0,
+      },
     };
   }
 

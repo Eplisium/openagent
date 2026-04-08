@@ -1703,6 +1703,7 @@ Task: ${userInput}`;
       'get_memory', 'list_skills', 'list_memories',
       'get_task_status', 'get_progress_report', 'list_tasks',
       'subagent_status', 'get_subagent_messages', 'get_shared_context', 'list_subagents',
+      'get_background_result',
       'list_workflows', 'get_workflow_state',
       'list_mcp_tools', 'list_a2a_agents',
     ]);
