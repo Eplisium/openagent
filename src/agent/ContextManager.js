@@ -283,7 +283,7 @@ export class ContextManager {
    * @param {Function} shouldEmitVerbose - Optional callback to check if verbose logs should emit
    * @returns {boolean} Whether compaction occurred
    */
-  async maybeCompactContext(emitStatus, shouldEmitVerbose) {
+  async maybeCompactContext(emitStatus, _shouldEmitVerbose) {
     const { usedTokens: estimatedTokens, maxTokens } = this.getContextStats();
     
     if (estimatedTokens < maxTokens * this.compactThreshold) {

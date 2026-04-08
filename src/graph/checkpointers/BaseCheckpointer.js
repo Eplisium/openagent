@@ -16,7 +16,7 @@ export class BaseCheckpointer {
    * @returns {Promise<string>} The generated checkpointId.
    * @abstract
    */
-  async save(threadId, snapshot) {
+  async save(_threadId, _snapshot) {
     throw new Error(`${this.constructor.name}.save() is not implemented`);
   }
 
@@ -27,7 +27,7 @@ export class BaseCheckpointer {
    * @returns {Promise<Object|null>} The last saved snapshot, or null if none exists.
    * @abstract
    */
-  async load(threadId) {
+  async load(_threadId) {
     throw new Error(`${this.constructor.name}.load() is not implemented`);
   }
 
@@ -39,7 +39,7 @@ export class BaseCheckpointer {
    *   Array of checkpoint metadata objects, ordered from oldest to newest.
    * @abstract
    */
-  async list(threadId) {
+  async list(_threadId) {
     throw new Error(`${this.constructor.name}.list() is not implemented`);
   }
 
@@ -50,7 +50,7 @@ export class BaseCheckpointer {
    * @returns {Promise<void>}
    * @abstract
    */
-  async delete(threadId) {
+  async delete(_threadId) {
     throw new Error(`${this.constructor.name}.delete() is not implemented`);
   }
 }

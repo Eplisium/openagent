@@ -35,7 +35,7 @@ export class FileCheckpointer extends BaseCheckpointer {
    */
   _threadPath(threadId) {
     // Sanitize threadId to prevent path traversal
-    const safeId = threadId.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+    const safeId = threadId.replace(/[^a-zA-Z0-9_.-]/g, '_');
     return path.join(this._dir, `${safeId}.json`);
   }
 

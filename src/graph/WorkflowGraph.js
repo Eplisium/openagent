@@ -11,7 +11,7 @@
  *   and route through ParallelExecutor when needed.
  */
 
-import { START, END, NODE_TYPES, GRAPH_DEFAULTS } from './constants.js';
+import { START, END, NODE_TYPES } from './constants.js';
 import { GraphEdgeError, GraphError } from './errors.js';
 import { CompiledGraph } from './CompiledGraph.js';
 

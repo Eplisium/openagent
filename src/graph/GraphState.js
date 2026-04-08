@@ -159,7 +159,7 @@ export class GraphStateSchema {
    * @returns {Record<string, unknown>} JSON-serializable object
    */
   serialize(state) {
-    return JSON.parse(JSON.stringify(state, _jsonReplacer));
+    return _deepClone(state);
   }
 
   /**
@@ -252,8 +252,8 @@ function _jsonReplacer(_key, value) {
 }
 
 /**
- * Shallow-safe deep clone for plain objects and arrays.
- * Falls back to JSON round-trip for deep structures.
+ * Fast deep clone using structuredClone (Node 18+).
+ * Falls back to JSON round-trip for non-cloneable values.
  * @param {unknown} value
  * @returns {unknown}
  * @private
@@ -261,10 +261,14 @@ function _jsonReplacer(_key, value) {
 function _deepClone(value) {
   if (value === null || typeof value !== 'object') return value;
   try {
-    return JSON.parse(JSON.stringify(value));
+    return structuredClone(value);
   } catch {
-    // Non-serializable default: return as-is (e.g., functions used as constructors)
-    return value;
+    // Non-cloneable values (functions, symbols, etc.) — fallback to JSON round-trip
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return value;
+    }
   }
 }
 

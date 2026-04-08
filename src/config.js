@@ -259,7 +259,7 @@ export function getDataDir(options = {}) {
  * @param {Object} options - Configuration options
  * @returns {string}
  */
-export function getCacheDir(options = {}) {
+export function getCacheDir(_options = {}) {
   if (Platform.isWindows) {
     const temp = process.env.TEMP || process.env.TMP || 'C:\\Temp';
     return path.join(temp, 'openagent-cache');

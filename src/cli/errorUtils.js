@@ -159,7 +159,7 @@ export function categorizeError(errorType, message, errorData) {
 /**
  * Generate error suggestions based on error type
  */
-export function generateErrorSuggestions(error, task) {
+export function generateErrorSuggestions(error, _task) {
   const suggestions = [];
   const errorMsg = error.message?.toLowerCase() || '';
 

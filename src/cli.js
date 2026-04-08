@@ -572,7 +572,7 @@ export class CLI {
 
     console.log(chalk.dim('──────────────────────'));
 
-    this.session.agent.onIterationStart = (iteration) => {
+    this.session.agent.onIterationStart = (_iteration) => {
       const iterationLabel = this.session.agent.formatIterationLabel();
       console.log(chalk.dim(`\n── ${iterationLabel} ──`));
     };
@@ -1009,6 +1009,34 @@ export class CLI {
     await this.runAgentTask(tmpl.prompt);
   }
 
+  async gracefulShutdown() {
+    this.stopAutoSave();
+
+    if (this.sessionSaveInFlight) {
+      try {
+        await this.sessionSaveInFlight;
+      } catch {
+        // Ignore pending auto-save failures during shutdown.
+      } finally {
+        this.sessionSaveInFlight = null;
+      }
+    }
+
+    if (this.session) {
+      try {
+        await this.session.save();
+      } catch {
+        // Ignore best-effort save failures during shutdown.
+      }
+
+      try {
+        await this.session.agent?.client?.close?.();
+      } catch {
+        // Ignore cleanup failures during shutdown.
+      }
+    }
+  }
+
   // ── State Delegation ─────────────────────────────────────────
 
   async loadState() { await loadState(this); }
@@ -1031,6 +1059,8 @@ export async function runCLI(options = {}) {
 
   const signalHandler = async (signal) => {
     console.log(chalk.yellow(`\n⚠ Received ${signal}. Cleaning up...`));
+    process.off('SIGINT', signalHandler);
+    process.off('SIGTERM', signalHandler);
     await cli.gracefulShutdown();
     process.exit(0);
   };
@@ -1038,7 +1068,13 @@ export async function runCLI(options = {}) {
   process.on('SIGINT', signalHandler);
   process.on('SIGTERM', signalHandler);
 
-  await cli.start();
+  try {
+    await cli.start();
+  } finally {
+    process.off('SIGINT', signalHandler);
+    process.off('SIGTERM', signalHandler);
+    await cli.gracefulShutdown();
+  }
 }
 
 const __filename = fileURLToPath(import.meta.url);

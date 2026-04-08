@@ -46,7 +46,7 @@ const TEXT_EXTENSIONS = [
  */
 const WINDOWS_PATH_PATTERN = /[a-zA-Z]:[\\/](?:[^<>:"|?*\n\r]+[\\/]?)*[^<>:"|?*\n\r\s]*/g;
 const QUOTED_PATH_PATTERN = /["']([a-zA-Z]:[\\/][^"'\n]+)["']/g;
-const UNIX_PATH_PATTERN = /(?:^|\s)(\/(?:[^\/\s]+\/?)*[^\/\s]*)(?:\s|$)/g;
+const UNIX_PATH_PATTERN = /(?:^|\s)(\/(?:[^/\s]+\/?)*[^/\s]*)(?:\s|$)/g;
 
 /**
  * Check if a file path points to an image
@@ -207,7 +207,7 @@ export async function readDroppedFile(filePath) {
   let stat;
   try {
     stat = await fs.stat(resolvedPath);
-  } catch (error) {
+  } catch {
     throw new Error(`Path does not exist: ${resolvedPath}`);
   }
 
@@ -280,7 +280,7 @@ export async function readDroppedFile(filePath) {
         lines,
         extension: ext,
       };
-    } catch (error) {
+    } catch {
       // Might be binary after all
       return {
         type: 'binary',

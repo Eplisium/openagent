@@ -103,7 +103,7 @@ export async function runOnboarding(state, saveState, modelBrowser = null) {
   console.log('');
 
   // Build model choices
-  const choices = RECOMMENDED_MODELS.map((model, index) => ({
+  const choices = RECOMMENDED_MODELS.map((model, _index) => ({
     name: `  ○ ${chalk.cyan(model.name)} ${chalk.gray(`(${model.description})`)}`,
     value: model.id,
     short: model.name,

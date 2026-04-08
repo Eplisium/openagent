@@ -35,7 +35,7 @@ export async function loadState(cli) {
         lastUsed: new Date().toISOString(),
       };
     }
-  } catch (error) {
+  } catch (_error) {
     cli.state = {
       ...DEFAULT_STATE,
       firstRun: true,
@@ -55,9 +55,9 @@ export async function saveState(cli) {
     cli.state.lastUsed = new Date().toISOString();
     cli.state.history = cli.history.slice(-50); // Keep last 50 entries
     await fs.writeJson(STATE_FILE, cli.state, { spaces: 2 });
-  } catch (error) {
+  } catch (_error) {
     if (cli.verbose) {
-      console.log(chalk.dim(`⚠️ Could not save state: ${error.message}`));
+      console.log(chalk.dim('⚠️ Could not save state'));
     }
   }
 }

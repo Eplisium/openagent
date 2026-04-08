@@ -105,26 +105,32 @@ export class MemoryManager {
     let result = content;
     const matches = [...content.matchAll(importRegex)];
 
-    for (const match of matches) {
-      const importPath = match[1].trim();
-      const resolvedPath = path.resolve(basePath, importPath);
-      
-      try {
-        if (await fs.pathExists(resolvedPath)) {
-          const importedContent = await fs.readFile(resolvedPath, 'utf-8');
-          // Recursively resolve imports in imported content
-          const resolved = await this.resolveImports(
-            importedContent,
-            path.dirname(resolvedPath),
-            depth + 1
-          );
-          result = result.replace(match[0], `\n<!-- Imported from: ${importPath} -->\n${resolved}\n<!-- End import: ${importPath} -->\n`);
-        } else {
-          result = result.replace(match[0], `<!-- Import not found: ${importPath} -->`);
+    if (matches.length === 0) return content;
+
+    // Resolve all imports in parallel — they're independent
+    const resolutions = await Promise.all(
+      matches.map(async (match) => {
+        const importPath = match[1].trim();
+        const resolvedPath = path.resolve(basePath, importPath);
+        try {
+          if (await fs.pathExists(resolvedPath)) {
+            const importedContent = await fs.readFile(resolvedPath, 'utf-8');
+            const resolved = await this.resolveImports(
+              importedContent,
+              path.dirname(resolvedPath),
+              depth + 1
+            );
+            return { match: match[0], replacement: `\n<!-- Imported from: ${importPath} -->\n${resolved}\n<!-- End import: ${importPath} -->\n` };
+          }
+          return { match: match[0], replacement: `<!-- Import not found: ${importPath} -->` };
+        } catch (err) {
+          return { match: match[0], replacement: `<!-- Import error: ${importPath} - ${err.message} -->` };
         }
-      } catch (err) {
-        result = result.replace(match[0], `<!-- Import error: ${importPath} - ${err.message} -->`);
-      }
+      })
+    );
+
+    for (const { match, replacement } of resolutions) {
+      result = result.replace(match, replacement);
     }
 
     return result;
@@ -183,64 +189,52 @@ export class MemoryManager {
       return this._cache;
     }
 
+    // Load all memory files in parallel — they're independent
+    const [
+      globalAgents,
+      globalOpenAgent,
+      projectAgents,
+      projectClaude,
+      projectOpenAgent,
+      projectLocal,
+      globalMemory,
+      projectMemory,
+    ] = await Promise.all([
+      this.readFile(this.paths.globalAgents),
+      this.readFile(this.paths.globalOpenAgent),
+      this.readFile(this.paths.projectAgents),
+      this.readFile(this.paths.projectClaude),
+      this.readFile(this.paths.projectOpenAgent),
+      this.readFile(this.paths.projectLocal),
+      this.readFile(this.paths.globalMemory),
+      this.readFile(this.paths.projectMemory),
+    ]);
+
     const sections = [];
 
-    // 1. Global AGENTS.md
-    const globalAgents = await this.readFile(this.paths.globalAgents);
-    if (globalAgents) {
-      sections.push({ source: 'global:AGENTS.md', ...globalAgents });
-    }
+    if (globalAgents) sections.push({ source: 'global:AGENTS.md', ...globalAgents });
+    if (globalOpenAgent) sections.push({ source: 'global:OPENAGENT.md', ...globalOpenAgent });
+    if (projectAgents) sections.push({ source: 'project:AGENTS.md', ...projectAgents });
+    if (projectClaude) sections.push({ source: 'project:CLAUDE.md', ...projectClaude });
+    if (projectOpenAgent) sections.push({ source: 'project:OPENAGENT.md', ...projectOpenAgent });
+    if (projectLocal) sections.push({ source: 'project:OPENAGENT.local.md', ...projectLocal });
 
-    // 2. Global OPENAGENT.md
-    const globalOpenAgent = await this.readFile(this.paths.globalOpenAgent);
-    if (globalOpenAgent) {
-      sections.push({ source: 'global:OPENAGENT.md', ...globalOpenAgent });
-    }
-
-    // 3. Project AGENTS.md
-    const projectAgents = await this.readFile(this.paths.projectAgents);
-    if (projectAgents) {
-      sections.push({ source: 'project:AGENTS.md', ...projectAgents });
-    }
-
-    // 4. Project CLAUDE.md (compatibility)
-    const projectClaude = await this.readFile(this.paths.projectClaude);
-    if (projectClaude) {
-      sections.push({ source: 'project:CLAUDE.md', ...projectClaude });
-    }
-
-    // 5. Project OPENAGENT.md
-    const projectOpenAgent = await this.readFile(this.paths.projectOpenAgent);
-    if (projectOpenAgent) {
-      sections.push({ source: 'project:OPENAGENT.md', ...projectOpenAgent });
-    }
-
-    // 6. Project OPENAGENT.local.md (non-committed)
-    const projectLocal = await this.readFile(this.paths.projectLocal);
-    if (projectLocal) {
-      sections.push({ source: 'project:OPENAGENT.local.md', ...projectLocal });
-    }
-
-    // 7. Global MEMORY.md (agent-written)
-    const globalMemory = await this.readFile(this.paths.globalMemory);
     if (globalMemory) {
       const lines = globalMemory.content.split('\n');
       const autoLoad = lines.slice(0, MEMORY_AUTO_LOAD_LINES).join('\n');
-      sections.push({ 
-        source: 'global:MEMORY.md', 
+      sections.push({
+        source: 'global:MEMORY.md',
         content: autoLoad,
         path: globalMemory.path,
         truncated: lines.length > MEMORY_AUTO_LOAD_LINES
       });
     }
 
-    // 8. Project MEMORY.md (agent-written, first 200 lines auto-load)
-    const projectMemory = await this.readFile(this.paths.projectMemory);
     if (projectMemory) {
       const lines = projectMemory.content.split('\n');
       const autoLoad = lines.slice(0, MEMORY_AUTO_LOAD_LINES).join('\n');
-      sections.push({ 
-        source: 'project:MEMORY.md', 
+      sections.push({
+        source: 'project:MEMORY.md',
         content: autoLoad,
         path: projectMemory.path,
         truncated: lines.length > MEMORY_AUTO_LOAD_LINES
@@ -371,7 +365,7 @@ ${memory.combined}
    * Initialize memory files for a project
    * Creates starter AGENTS.md and OPENAGENT.md
    */
-  async initProject(options = {}) {
+  async initProject(_options = {}) {
     await this.ensureDirs();
 
     // Create AGENTS.md if it doesn't exist

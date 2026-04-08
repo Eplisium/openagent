@@ -1186,6 +1186,13 @@ export class OpenRouterClient {
     this.inFlightRequests.clear();
     this.requestHistory = [];
   }
+  
+  /**
+   * Backward-compatible close alias for cleanup callers.
+   */
+  close() {
+    return this.destroy();
+  }
 }
 
 export default OpenRouterClient;

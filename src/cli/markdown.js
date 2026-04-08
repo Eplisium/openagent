@@ -5,7 +5,6 @@
 
 import chalk from 'chalk';
 import { marked } from 'marked';
-import boxen from 'boxen';
 import { highlightCode } from './syntaxHighlight.js';
 
 /**
@@ -160,7 +159,7 @@ renderer.table = function(token) {
     const separator = colWidths.map(w => '─'.repeat(w)).join('─┼─');
     const bodyRows = rows.map(row => formatRow(row.map(cell => cell?.text || '')));
     return `\n${chalk.bold(headerRow)}\n${chalk.dim(separator)}\n${bodyRows.join('\n')}\n`;
-  } catch (e) {
+  } catch {
     return '\n' + (token?.text || '') + '\n';
   }
 };

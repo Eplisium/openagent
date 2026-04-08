@@ -223,7 +223,7 @@ export class HookManager {
    * @param {object} toolResult - Tool result
    * @returns {Promise<{ results: Array }>}
    */
-  async runPostToolUse(toolName, toolArgs = {}, toolResult = {}) {
+  async runPostToolUse(toolName, toolArgs = {}, _toolResult = {}) {
     await this.ensureLoaded();
     
     const hooks = this.hooks[HookType.POST_TOOL_USE].filter(h => 

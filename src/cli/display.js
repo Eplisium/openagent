@@ -780,7 +780,6 @@ export function showCost(cli) {
  */
 export function showContext(cli) {
   const contextStats = cli.session.agent.getContextStats();
-  const clientStats = cli.session.agent.client.getStats();
 
   const contextColor = contextStats.percent > 70 ? chalk.red :
                        contextStats.percent > 40 ? chalk.yellow : chalk.green;

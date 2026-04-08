@@ -26,7 +26,7 @@ export class SkillsCLI {
    * List installed skills
    */
   async list(options = {}) {
-    const { json = false, global = false, project = false } = options;
+    const { json = false } = options;
     
     try {
       const installed = await this.registry.listInstalled();
