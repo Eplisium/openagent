@@ -6,6 +6,7 @@
 import fs from 'fs-extra';
 import path from 'path';
 import os from 'os';
+import { execFile } from 'child_process';
 import { glob } from 'glob';
 import { createPathContext, isProtectedInstallationPath, getInstallationDir } from '../paths.js';
 import { encodeImageToBase64, getImageMimeType } from '../vision.js';
@@ -14,6 +15,19 @@ import { Platform } from '../utils/platform.js';
 import { getCachedFile } from './fileCache.js';
 
 const PATH_PREFIX_NOTE = 'Supports absolute paths plus the special prefixes project:, workdir:, workspace:, and openagent:.';
+
+// Detect if ripgrep (rg) is available on the system
+let _rgAvailable = null;
+async function isRgAvailable() {
+  if (_rgAvailable !== null) return _rgAvailable;
+  try {
+    await new Promise((resolve, reject) => {
+      execFile('rg', ['--version'], { timeout: 3000 }, (err) => err ? reject(err) : resolve());
+    });
+    _rgAvailable = true;
+  } catch { _rgAvailable = false; }
+  return _rgAvailable;
+}
 
 export function createFileTools(options = {}) {
   const pathContext = createPathContext(options);
@@ -284,6 +298,9 @@ export function createFileTools(options = {}) {
         }
         
         const bakPath = resolvedPath + '.bak';
+        // Only create .bak files when explicitly requested via undo or when file is large
+        // (reduces disk I/O — the agent re-reads files before editing anyway)
+        const shouldBackup = undo;
 
         // --- Undo mode: restore from .bak file ---
         if (undo) {
@@ -404,7 +421,7 @@ export function createFileTools(options = {}) {
             return { success: true, message: 'No changes made', path: resolvedPath };
           }
 
-          await fs.writeFile(bakPath, originalContent, 'utf-8');
+          if (shouldBackup) await fs.writeFile(bakPath, originalContent, 'utf-8');
           await fs.writeFile(resolvedPath, content, 'utf-8');
 
           return {
@@ -464,8 +481,8 @@ export function createFileTools(options = {}) {
             };
           }
 
-          // Create backup before writing
-          await fs.writeFile(bakPath, originalContent, 'utf-8');
+          // Create backup before writing (only when undo mode active)
+          if (shouldBackup) await fs.writeFile(bakPath, originalContent, 'utf-8');
           await fs.writeFile(resolvedPath, content, 'utf-8');
 
           return {
@@ -505,8 +522,8 @@ export function createFileTools(options = {}) {
             return { success: true, message: 'No changes made', path: resolvedPath };
           }
 
-          // Create backup before writing
-          await fs.writeFile(bakPath, originalContent, 'utf-8');
+          // Create backup before writing (only when undo mode active)
+          if (shouldBackup) await fs.writeFile(bakPath, originalContent, 'utf-8');
           await fs.writeFile(resolvedPath, content, 'utf-8');
 
           return {
@@ -694,6 +711,110 @@ export function createFileTools(options = {}) {
           return { success: false, error: `Not a directory: ${resolvedPath}` };
         }
 
+        // Use ripgrep for fast search
+        if (await isRgAvailable()) {
+          const args = ['--json', '--context', String(contextLines)];
+          if (!caseSensitive) args.push('-i');
+          if (filePattern) args.push('-g', filePattern);
+          args.push(pattern, resolvedPath);
+
+          const { stdout } = await new Promise((resolve, reject) => {
+            execFile('rg', args, { maxBuffer: 50 * 1024 * 1024, timeout: 30000 }, (err, stdout, _stderr) => {
+              if (err && err.code !== 1 && err.code !== 2) return reject(err); // code 1 = no matches
+              resolve({ stdout: stdout || '' });
+            });
+          });
+
+          const fileMap = new Map();
+          let filesSearched = 0;
+
+          for (const line of stdout.split('\n')) {
+            if (!line) continue;
+            let msg;
+            try { msg = JSON.parse(line); } catch { continue; }
+
+            if (msg.type === 'begin') {
+              filesSearched++;
+            } else if (msg.type === 'match') {
+              const filePath = msg.data.path.text;
+              if (!fileMap.has(filePath)) fileMap.set(filePath, []);
+              fileMap.get(filePath).push({
+                line: msg.data.line_number,
+                content: (msg.data.lines.text || '').trim(),
+                submatches: (msg.data.submatches || []).map(s => ({
+                  start: s.start,
+                  end: s.end,
+                  text: s.match.text,
+                })),
+              });
+            } else if (msg.type === 'context') {
+              const filePath = msg.data.path.text;
+              if (!fileMap.has(filePath)) fileMap.set(filePath, []);
+              fileMap.get(filePath).push({
+                line: msg.data.line_number,
+                content: (msg.data.lines.text || '').trim(),
+                isContext: true,
+              });
+            }
+          }
+
+          const results = [];
+          for (const [filePath, entries] of fileMap) {
+            const matchEntries = entries.filter(e => !e.isContext);
+            if (matchEntries.length === 0) continue;
+
+            const lineSet = new Map();
+            for (const e of entries) lineSet.set(e.line, e);
+
+            const context = [...lineSet.values()]
+              .sort((a, b) => a.line - b.line)
+              .map(e => ({
+                line: e.line,
+                content: e.content,
+                isMatch: !e.isContext,
+              }));
+
+            results.push({
+              file: filePath,
+              fullPath: path.resolve(resolvedPath, filePath),
+              matchCount: matchEntries.length,
+              matches: matchEntries.map(m => ({
+                line: m.line,
+                content: m.content,
+                context,
+              })),
+            });
+          }
+
+          results.sort((a, b) => a.file.localeCompare(b.file));
+          const totalMatches = results.reduce((sum, r) => sum + r.matchCount, 0);
+          let resultStr = JSON.stringify(results);
+          let truncated = false;
+
+          if (resultStr.length > CONFIG.SEARCH_RESULTS_MAX_CHARS) {
+            for (const entry of results) {
+              if (entry.matches.length > CONFIG.SEARCH_MAX_MATCHES_PER_FILE) {
+                entry.matches = entry.matches.slice(0, CONFIG.SEARCH_MAX_MATCHES_PER_FILE);
+                entry.matchCount = entry.matches.length;
+                entry.hasMore = true;
+              }
+            }
+            truncated = true;
+          }
+
+          return {
+            success: true,
+            pattern,
+            searchPath: resolvedPath,
+            filesSearched,
+            filesWithMatches: results.length,
+            totalMatches,
+            truncated,
+            results,
+          };
+        }
+
+        // Fallback: glob-based search when rg is not available
         const globPattern = filePattern
           ? path.join(resolvedPath, '**', filePattern).replace(/\\/g, '/')
           : path.join(resolvedPath, '**', '*').replace(/\\/g, '/');
@@ -709,8 +830,7 @@ export function createFileTools(options = {}) {
           if (['.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.zip', '.gz', '.tar', '.mp4', '.mp3', '.wav', '.avi', '.mov', '.pdf', '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.db', '.sqlite', '.pyc', '.class', '.o', '.obj', '.lock'].includes(ext)) {
             continue;
           }
-          
-          // Skip common large/noise directories
+
           if (file.includes('node_modules') || file.includes('.git' + path.sep) || file.includes(path.sep + 'dist' + path.sep) || file.includes(path.sep + 'build' + path.sep) || file.includes(path.sep + '.next' + path.sep) || file.includes(path.sep + 'coverage' + path.sep) || file.includes('__pycache__')) {
             continue;
           }
@@ -722,7 +842,6 @@ export function createFileTools(options = {}) {
 
             for (let i = 0; i < lines.length; i++) {
               if (matches.length >= maxResults) break;
-
               const line = lines[i];
               if (regex.test(line)) {
                 const contextStart = Math.max(0, i - contextLines);
@@ -732,12 +851,7 @@ export function createFileTools(options = {}) {
                   content: contextLine,
                   isMatch: contextStart + idx === i,
                 }));
-
-                matches.push({
-                  line: i + 1,
-                  content: line.trim(),
-                  context,
-                });
+                matches.push({ line: i + 1, content: line.trim(), context });
               }
             }
 
@@ -749,9 +863,7 @@ export function createFileTools(options = {}) {
                 matches,
               });
             }
-          } catch {
-            // Skip binary or unreadable files
-          }
+          } catch { /* Skip binary or unreadable files */ }
         }
 
         const totalMatches = results.reduce((sum, entry) => sum + entry.matchCount, 0);
@@ -1050,11 +1162,43 @@ export function createFileTools(options = {}) {
           return { success: false, error: `Not a directory: ${resolvedPath}` };
         }
 
+        // Use ripgrep for fast file listing
+        if (await isRgAvailable()) {
+          const args = ['--files', '-g', pattern];
+          for (const p of ignore) args.push('-g', `!${p}`);
+          args.push(resolvedPath);
+
+          const { stdout } = await new Promise((resolve, reject) => {
+            execFile('rg', args, { maxBuffer: 50 * 1024 * 1024, timeout: 15000 }, (err, stdout) => {
+              if (err && err.code !== 1) return reject(err);
+              resolve({ stdout: stdout || '' });
+            });
+          });
+
+          const filePaths = stdout.split('\n').filter(Boolean);
+          const files = [];
+
+          for (const filePath of filePaths) {
+            try {
+              const fullPath = path.resolve(resolvedPath, filePath);
+              const fileStat = await fs.stat(fullPath);
+              files.push({
+                name: path.basename(fullPath),
+                path: fullPath,
+                relativePath: filePath,
+                type: fileStat.isDirectory() ? 'directory' : 'file',
+                size: fileStat.size,
+                modified: fileStat.mtime.toISOString(),
+              });
+            } catch { /* Skip inaccessible files */ }
+          }
+
+          return { success: true, pattern, searchPath: resolvedPath, files, total: files.length };
+        }
+
+        // Fallback: glob-based file finding
         const globPattern = path.join(resolvedPath, pattern).replace(/\\/g, '/');
-        const globOptions = {
-          nodir: false,
-          dot: false,
-        };
+        const globOptions = { nodir: false, dot: false };
 
         if (ignore && ignore.length > 0) {
           globOptions.ignore = ignore.map(p => path.join(resolvedPath, p).replace(/\\/g, '/'));
@@ -1074,18 +1218,10 @@ export function createFileTools(options = {}) {
               size: fileStat.size,
               modified: fileStat.mtime.toISOString(),
             });
-          } catch {
-            // Skip files that can't be accessed
-          }
+          } catch { /* Skip inaccessible files */ }
         }
 
-        return {
-          success: true,
-          pattern,
-          searchPath: resolvedPath,
-          files,
-          total: files.length,
-        };
+        return { success: true, pattern, searchPath: resolvedPath, files, total: files.length };
       } catch (error) {
         return { success: false, error: error.message };
       }
@@ -1397,8 +1533,6 @@ export function createFileTools(options = {}) {
             message: `Would replace ${matchCount} occurrence(s) in ${changes.length} line(s)`,
           };
         }
-        const bakPath = resolvedPath + '.bak';
-        await fs.writeFile(bakPath, content, 'utf-8');
         await fs.writeFile(resolvedPath, newContent, 'utf-8');
         return {
           success: true,
@@ -1408,6 +1542,116 @@ export function createFileTools(options = {}) {
           originalSize: content.length,
           newSize: newContent.length,
           message: `Replaced ${matchCount} occurrence(s) in ${resolvedPath}`,
+        };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
+    },
+  };
+
+  const fileTreeTool = {
+    name: 'file_tree',
+    description: `Get a recursive directory tree with file sizes. Replaces multiple list_directory calls. ${PATH_PREFIX_NOTE}`,
+    category: 'file',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: `Root directory path. ${PATH_PREFIX_NOTE}`,
+        },
+        maxDepth: {
+          type: 'integer',
+          description: 'Maximum depth (default: 3)',
+        },
+        includeHidden: {
+          type: 'boolean',
+          description: 'Include hidden files (default: false)',
+        },
+      },
+      required: ['path'],
+    },
+    async execute({ path: dirPath = '.', maxDepth = 3, includeHidden = false }) {
+      try {
+        const resolvedPath = resolvePathForAgent(dirPath);
+        const pathValidation = validatePath(resolvedPath);
+        if (!pathValidation.valid) {
+          return { success: false, error: pathValidation.error };
+        }
+        if (!await fs.pathExists(resolvedPath)) {
+          return { success: false, error: `Directory not found: ${resolvedPath}` };
+        }
+        const stat = await fs.stat(resolvedPath);
+        if (!stat.isDirectory()) {
+          return { success: false, error: `Not a directory: ${resolvedPath}` };
+        }
+
+        const SKIP_DIRS = new Set(['node_modules', '.git', '.openagent', 'dist', 'build', '.next', '.nuxt', '__pycache__', '.venv', 'venv', '.windop-backups']);
+        const MAX_ENTRIES = 1000;
+        let totalFiles = 0;
+        let totalDirs = 0;
+        let totalSize = 0;
+
+        function formatSize(bytes) {
+          if (bytes < 1024) return bytes + 'B';
+          if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'KB';
+          return (bytes / (1024 * 1024)).toFixed(1) + 'MB';
+        }
+
+        async function buildTree(dir, depth, prefix) {
+          if (depth > maxDepth || totalFiles + totalDirs >= MAX_ENTRIES) return '';
+          let entries;
+          try {
+            entries = await fs.readdir(dir);
+          } catch { return ''; }
+
+          // Filter and sort
+          const filtered = [];
+          for (const name of entries) {
+            if (!includeHidden && name.startsWith('.')) continue;
+            if (SKIP_DIRS.has(name)) continue;
+            filtered.push(name);
+          }
+          filtered.sort((a, b) => a.localeCompare(b));
+
+          let result = '';
+          for (let i = 0; i < filtered.length; i++) {
+            if (totalFiles + totalDirs >= MAX_ENTRIES) {
+              result += `${prefix}... (${filtered.length - i} more entries)\n`;
+              break;
+            }
+            const name = filtered[i];
+            const fullPath = path.join(dir, name);
+            const isLast = i === filtered.length - 1;
+            const connector = isLast ? '└── ' : '├── ';
+            const nextPrefix = prefix + (isLast ? '    ' : '│   ');
+
+            try {
+              const itemStat = await fs.lstat(fullPath);
+              if (itemStat.isDirectory()) {
+                totalDirs++;
+                result += `${prefix}${connector}${name}/\n`;
+                result += await buildTree(fullPath, depth + 1, nextPrefix);
+              } else {
+                totalFiles++;
+                totalSize += itemStat.size;
+                result += `${prefix}${connector}${name} (${formatSize(itemStat.size)})\n`;
+              }
+            } catch { /* skip broken symlinks */ }
+          }
+          return result;
+        }
+
+        const tree = await buildTree(resolvedPath, 1, '');
+        const header = `${path.basename(resolvedPath)}/\n`;
+
+        return {
+          success: true,
+          path: resolvedPath,
+          tree: header + tree,
+          totalFiles,
+          totalDirs,
+          totalSize: formatSize(totalSize),
         };
       } catch (error) {
         return { success: false, error: error.message };
@@ -1429,6 +1673,7 @@ export function createFileTools(options = {}) {
     findFilesTool,
     diffFilesTool,
     previewEditTool,
+    fileTreeTool,
   ];
 }
 
@@ -1448,6 +1693,7 @@ export const [
   findFilesTool,
   diffFilesTool,
   previewEditTool,
+  fileTreeTool,
 ] = defaultFileTools;
 
 export const fileTools = defaultFileTools;

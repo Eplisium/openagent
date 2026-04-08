@@ -7,10 +7,12 @@ import fs from 'fs-extra';
 
 const DEFAULT_MAX_ENTRIES = 500;
 
+const STAT_CACHE_TTL_MS = 5000; // Skip stat() for 5s after last read (same-iteration optimization)
+
 class FileLRUCache {
   constructor(maxEntries = DEFAULT_MAX_ENTRIES) {
     this.maxEntries = maxEntries;
-    this.cache = new Map(); // filePath -> { content, mtime, size }
+    this.cache = new Map(); // filePath -> { content, mtime, size, lastRead }
   }
 
   /**
@@ -34,6 +36,19 @@ class FileLRUCache {
   }
 
   /**
+   * Check if we can skip stat() entirely (file was read very recently).
+   * Returns cached mtime if within TTL, null otherwise.
+   */
+  getRecentMtime(filePath) {
+    const entry = this.cache.get(filePath);
+    if (!entry) return null;
+    if (Date.now() - entry.lastRead < STAT_CACHE_TTL_MS) {
+      return entry.mtime;
+    }
+    return null;
+  }
+
+  /**
    * Store file content in cache.
    */
   set(filePath, content, mtimeMs, size) {
@@ -42,7 +57,7 @@ class FileLRUCache {
       this.cache.delete(filePath);
     }
 
-    this.cache.set(filePath, { content, mtime: mtimeMs, size });
+    this.cache.set(filePath, { content, mtime: mtimeMs, size, lastRead: Date.now() });
 
     // Evict oldest entry if over limit
     if (this.cache.size > this.maxEntries) {
@@ -81,6 +96,15 @@ const fileCache = new FileLRUCache();
  * Returns { content, fromCache: boolean } or throws on error.
  */
 export async function getCachedFile(filePath) {
+  // Fast path: if file was read within last 5s, skip stat() entirely
+  const recentMtime = fileCache.getRecentMtime(filePath);
+  if (recentMtime !== null) {
+    const cached = fileCache.get(filePath, recentMtime);
+    if (cached) {
+      return { content: cached.content, fromCache: true };
+    }
+  }
+
   const stat = await fs.stat(filePath);
   const mtimeMs = stat.mtimeMs;
 
