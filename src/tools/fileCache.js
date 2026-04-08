@@ -93,15 +93,22 @@ const fileCache = new FileLRUCache();
 
 /**
  * Read a file through the LRU cache.
- * Returns { content, fromCache: boolean } or throws on error.
+ * Returns { content, fromCache: boolean, stat?: Stats } or throws on error.
+ * @param {string} filePath
+ * @param {boolean} returnStat - If true, also return the fs.Stats object
  */
-export async function getCachedFile(filePath) {
+export async function getCachedFile(filePath, returnStat = false) {
   // Fast path: if file was read within last 5s, skip stat() entirely
   const recentMtime = fileCache.getRecentMtime(filePath);
   if (recentMtime !== null) {
     const cached = fileCache.get(filePath, recentMtime);
     if (cached) {
-      return { content: cached.content, fromCache: true };
+      const result = { content: cached.content, fromCache: true };
+      if (returnStat) {
+        // Return a minimal stat-like object from cache
+        result.stat = { isDirectory: () => false, size: cached.size, mtimeMs: cached.mtime };
+      }
+      return result;
     }
   }
 
@@ -110,12 +117,16 @@ export async function getCachedFile(filePath) {
 
   const cached = fileCache.get(filePath, mtimeMs);
   if (cached) {
-    return { content: cached.content, fromCache: true };
+    const result = { content: cached.content, fromCache: true };
+    if (returnStat) result.stat = stat;
+    return result;
   }
 
   const content = await fs.readFile(filePath, 'utf-8');
   fileCache.set(filePath, content, mtimeMs, stat.size);
-  return { content, fromCache: false };
+  const result = { content, fromCache: false };
+  if (returnStat) result.stat = stat;
+  return result;
 }
 
 export { fileCache };

@@ -130,12 +130,11 @@ export function createFileTools(options = {}) {
             results.push({ path: filePath, success: false, error: await buildMissingFileError(filePath, resolvedPath) });
             continue;
           }
-          const stat = await fs.stat(resolvedPath);
-          if (stat.isDirectory()) {
+          const { content, stat } = await getCachedFile(resolvedPath, true);
+          if (stat?.isDirectory()) {
             results.push({ path: filePath, success: false, error: 'Path is a directory' });
             continue;
           }
-          const { content } = await getCachedFile(resolvedPath);
           const lines = Platform.splitLines(content);
           const limitedLines = lines.length > MAX_LINES ? lines.slice(0, MAX_LINES) : lines;
           const numbered = limitedLines.map((line, i) => `${i + 1}│ ${line}`).join('\n');
@@ -190,12 +189,10 @@ export function createFileTools(options = {}) {
           return { success: false, error: await buildMissingFileError(filePath, resolvedPath) };
         }
 
-        const stat = await fs.stat(resolvedPath);
-        if (stat.isDirectory()) {
+        const { content, stat } = await getCachedFile(resolvedPath, true);
+        if (stat?.isDirectory()) {
           return { success: false, error: `Path is a directory: ${resolvedPath}` };
         }
-
-        const { content } = await getCachedFile(resolvedPath);
         const lines = Platform.splitLines(content);
         const MAX_LINES = CONFIG.FILE_READ_MAX_LINES;
         const MAX_CHARS = CONFIG.FILE_READ_MAX_CHARS;
