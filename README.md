@@ -75,26 +75,34 @@ openagent    # or just: oagent
 
 ### 🧩 Skills System
 
-Skills are filesystem-based instructions loaded on-demand. They live in `.openagent/skills/<name>/SKILL.md` with YAML frontmatter.
+Skills are filesystem-based instructions loaded on-demand. They support **global** and **project** scopes:
+
+- **Global skills** (`~/.openagent/skills/`) — Available across all projects
+- **Project skills** (`.openagent/skills/`) — Project-specific, override global with same name
 
 ```bash
-# List installed skills
+# List all skills (global + project)
 openagent skills list
 
-# Search for skills
-openagent skills search "code review"
+# List only global or project skills
+openagent skills list --global
+openagent skills list --project
 
-# Install a skill
-openagent skills install skill-id
-
-# Update all skills
-openagent skills update
+# Show skill details
+openagent skills info code-review
 
 # Create a new skill
-openagent skills create my-skill --type tool
-```
+openagent skills create my-skill
+openagent skills create my-skill --global  # Create as global skill
 
-Four skill templates available: **Basic**, **Tool**, **Workflow**, and **Agent**.
+# Remove a skill
+openagent skills remove my-skill
+openagent skills remove my-skill --global
+
+# Transfer a skill between scopes
+openagent skills transfer my-skill --from project --to global
+openagent skills transfer my-skill --from global --to project
+```
 
 Built-in skills: `code-review`, `debug`, `refactor`, `testing` — loaded via `use_skill` tool.
 
@@ -246,7 +254,7 @@ Extend OpenAgent with plugins:
 /tools           - List available tools
 /agents          - Show subagent status
 /stats           - Show statistics
-/skills          - Manage skills
+/skills          - Manage skills (list/info/create/remove/transfer)
 /cost            - Show cost breakdown
 /context         - Show context usage
 /save            - Save session
@@ -355,6 +363,8 @@ openagent/
 │   │   └── HookManager.js        # PreToolUse, PostToolUse, Stop
 │   ├── cli/                      # CLI modules
 │   │   ├── commands.js           # Command registry & aliases
+│   ├── cli/                      # CLI modules
+│   │   ├── commands.js           # Command registry & aliases
 │   │   ├── constants.js          # Templates & health checks
 │   │   ├── display.js            # Visual output & panels
 │   │   ├── sessionOps.js         # Save/load/export/undo
@@ -370,9 +380,8 @@ openagent/
 │   │   ├── health.js             # Environment health checks
 │   │   ├── stats.js              # Statistics tracking
 │   │   ├── ui.js                 # UI components
-│   │   └── templates.js          # Workflow templates
-│   ├── utils/                    # Cross-platform utilities
-│   │   ├── platform.js           # OS detection
+│   │   ├── templates.js          # Workflow templates
+│   │   ├── skills-handler.js     # Skills CLI handler (list/create/remove/transfer)
 │   │   └── terminal.js           # Terminal capabilities
 │   ├── cli.js                    # CLI entry point (42KB)
 │   ├── index.js                  # Library entry point
@@ -426,20 +435,22 @@ npm start
 ### Skills System
 
 ```bash
-# Search for skills in the marketplace
-openagent skills search "docker"
-
-# Install a skill
-openagent skills install docker-management
-
-# List installed skills
+# List all skills (global + project)
 openagent skills list
 
-# Create your own skill
-openagent skills create my-api-wrapper --type tool
-```
+# Show skill details
+openagent skills info code-review
 
-### Programmatic Usage
+# Create a new skill
+openagent skills create my-skill
+openagent skills create my-skill --global
+
+# Remove a skill
+openagent skills remove my-skill
+
+# Transfer between scopes
+openagent skills transfer my-skill --from project --to global
+```
 
 ```javascript
 import { Agent, createDefaultRegistry } from './src/index.js';

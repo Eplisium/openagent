@@ -81,6 +81,7 @@ import {
 } from './cli/sessionOps.js';
 
 import { loadState, saveState } from './cli/stateOps.js';
+import { handleSkillsCommand, handleShellSkillsCommand } from './cli/skills-handler.js';
 
 import {
   showSmartError,
@@ -874,6 +875,7 @@ export class CLI {
       case 'doctor': await this.runDoctor(); break;
       case 'templates': await this.showTemplates(); break;
       case 'help': showHelp(this); break;
+      case 'skills': await handleSkillsCommand(this.workingDir, argStr); break;
       default:
         console.log(chalk.yellow(`⚠ Unknown: /${command}. Type /help`));
     }
@@ -1090,10 +1092,18 @@ const allowFullAccess = args.includes('--full-access') || process.env.OPENAGENT_
 const permissions = { allowFileDelete: true, allowFullAccess };
 
 if (resolvedArgv && resolvedFilename === resolvedArgv) {
-  runCLI({ allowFullAccess, permissions }).catch((error) => {
-    console.error('Fatal error:', error.message);
-    process.exit(1);
-  });
+  // Handle shell subcommands (e.g., openagent skills list)
+  if (args[0] === 'skills') {
+    handleShellSkillsCommand(process.cwd(), args.slice(1)).catch((error) => {
+      console.error('Fatal error:', error.message);
+      process.exit(1);
+    });
+  } else {
+    runCLI({ allowFullAccess, permissions }).catch((error) => {
+      console.error('Fatal error:', error.message);
+      process.exit(1);
+    });
+  }
 }
 
 export default CLI;
