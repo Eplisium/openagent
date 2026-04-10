@@ -499,6 +499,116 @@ To use a skill, call it by name. The skill's instructions will be loaded into co
       withReferences: Array.from(skills.values()).filter(s => s.references.length > 0).length,
     };
   }
+
+  /**
+   * Transfer a skill between global and project scopes
+   * @param {string} name - Skill name
+   * @param {string} fromScope - 'project' or 'global'
+   * @param {string} toScope - 'project' or 'global'
+   * @returns {Promise<{success: boolean, error?: string}>}
+   */
+  async transferSkill(name, fromScope, toScope) {
+    if (fromScope === toScope) {
+      return { success: false, error: 'Source and destination must be different' };
+    }
+
+    const fromDir = fromScope === 'global' ? this.globalSkillsDir : this.projectSkillsDir;
+    const toDir = toScope === 'global' ? this.globalSkillsDir : this.projectSkillsDir;
+    const fromPath = path.join(fromDir, name);
+    const toPath = path.join(toDir, name);
+
+    if (!await fs.pathExists(fromPath)) {
+      return { success: false, error: `Skill not found in ${fromScope}: ${name}` };
+    }
+
+    if (await fs.pathExists(toPath)) {
+      return { success: false, error: `Skill already exists in ${toScope}: ${name}` };
+    }
+
+    await fs.ensureDir(toDir);
+    await fs.copy(fromPath, toPath);
+    await fs.remove(fromPath);
+
+    // Reload skills to reflect the change
+    this._loaded = false;
+    await this.loadAll();
+
+    if (this.verbose) {
+      console.log(chalk.green(`✓ Transferred skill: ${name} (${fromScope} → ${toScope})`));
+    }
+
+    return { success: true, name, from: fromScope, to: toScope };
+  }
+
+  /**
+   * Remove a skill from a specific scope
+   * @param {string} name - Skill name
+   * @param {string} scope - 'project', 'global', or null (search both, project first)
+   * @returns {Promise<{success: boolean, source?: string, error?: string}>}
+   */
+  async removeSkill(name, scope = null) {
+    let targetDir = null;
+    let source = null;
+
+    if (scope === 'global') {
+      const skillDir = path.join(this.globalSkillsDir, name);
+      if (await fs.pathExists(skillDir)) {
+        targetDir = skillDir;
+        source = 'global';
+      }
+    } else if (scope === 'project') {
+      const skillDir = path.join(this.projectSkillsDir, name);
+      if (await fs.pathExists(skillDir)) {
+        targetDir = skillDir;
+        source = 'project';
+      }
+    } else {
+      // Search both (project first)
+      const projectDir = path.join(this.projectSkillsDir, name);
+      const globalDir = path.join(this.globalSkillsDir, name);
+      if (await fs.pathExists(projectDir)) {
+        targetDir = projectDir;
+        source = 'project';
+      } else if (await fs.pathExists(globalDir)) {
+        targetDir = globalDir;
+        source = 'global';
+      }
+    }
+
+    if (!targetDir) {
+      return { success: false, error: `Skill not found: ${name}` };
+    }
+
+    await fs.remove(targetDir);
+
+    // Reload skills to reflect the change
+    this._loaded = false;
+    await this.loadAll();
+
+    if (this.verbose) {
+      console.log(chalk.green(`✓ Removed skill: ${name} (${source})`));
+    }
+
+    return { success: true, name, source };
+  }
+
+  /**
+   * Get a skill's location info
+   * @param {string} name - Skill name
+   * @returns {Promise<{found: boolean, source?: string, dirPath?: string}>}
+   */
+  async getSkillLocation(name) {
+    const projectDir = path.join(this.projectSkillsDir, name);
+    const globalDir = path.join(this.globalSkillsDir, name);
+
+    if (await fs.pathExists(path.join(projectDir, SKILL_FILE))) {
+      return { found: true, source: 'project', dirPath: projectDir };
+    }
+    if (await fs.pathExists(path.join(globalDir, SKILL_FILE))) {
+      return { found: true, source: 'global', dirPath: globalDir };
+    }
+    return { found: false };
+  }
 }
 
 export default SkillManager;

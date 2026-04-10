@@ -1187,7 +1187,11 @@ Task: ${userInput}`;
 
       try {
         for await (const chunk of stream) {
-          if (chunk.type === 'content') {
+          if (chunk.type === 'error') {
+            const err = chunk.error;
+            const errMsg = typeof err === 'string' ? err : (err?.message || JSON.stringify(err));
+            throw new AgentError(`API error: ${errMsg}`, 'API_ERROR', { apiError: err });
+          } else if (chunk.type === 'content') {
             fullContent += chunk.content;
           } else if (chunk.type === 'tool_calls') {
             // Capture tool calls from final stream chunk
@@ -2139,7 +2143,11 @@ Task: ${userInput}`;
       
       for await (const chunk of stream) {
         this.checkAborted();
-        if (chunk.type === 'content') {
+        if (chunk.type === 'error') {
+          const err = chunk.error;
+          const errMsg = typeof err === 'string' ? err : (err?.message || JSON.stringify(err));
+          throw new AgentError(`API error: ${errMsg}`, 'API_ERROR', { apiError: err });
+        } else if (chunk.type === 'content') {
           fullContent += chunk.content;
           yield { type: 'content', content: chunk.content };
         } else if (chunk.type === 'tool_calls') {

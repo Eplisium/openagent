@@ -889,11 +889,11 @@ export class OpenRouterClient {
   handleHTTPError(status, data) {
     switch (status) {
       case 401:
-        return new AuthenticationError('Invalid API key');
+        return new AuthenticationError(data.error?.message || 'Invalid API key', data);
       case 429: {
         // Respect Retry-After header if present, otherwise use fallback
         const retryAfter = data.retry_after || data.retryAfter || null;
-        return new RateLimitError('Rate limit exceeded', retryAfter);
+        return new RateLimitError(data.error?.message || 'Rate limit exceeded', retryAfter, data);
       }
       case 400:
         return new OpenRouterError(data.error?.message || 'Bad request', 'BAD_REQUEST', data);

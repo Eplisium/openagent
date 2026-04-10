@@ -179,6 +179,17 @@ export class Team {
       envBlock,
     ].join('\n');
 
+    // Snapshot costs before any runs so we can compute deltas
+    const getCost = (agent) => {
+      const s = agent?.client?.getStats?.();
+      return s ? { cost: s.totalCost || 0, in: s.totalInputTokens || 0, out: s.totalOutputTokens || 0 } : { cost: 0, in: 0, out: 0 };
+    };
+    const beforeCosts = new Map();
+    beforeCosts.set('supervisor', getCost(this.supervisor));
+    for (const [name, meta] of this.members) {
+      beforeCosts.set(name, getCost(meta.agent));
+    }
+
     const supervisorResult = await this.supervisor.run(initialPlanPrompt, options);
     const supervisorPlan = supervisorResult?.response || '';
 
@@ -296,6 +307,22 @@ export class Team {
       }
     }
 
+    // Compute total team cost from all agents
+    let teamCost = 0;
+    let teamInputTokens = 0;
+    let teamOutputTokens = 0;
+    const allAgents = [{ name: 'supervisor', agent: this.supervisor }];
+    for (const [name, meta] of this.members) {
+      allAgents.push({ name, agent: meta.agent });
+    }
+    for (const { name, agent } of allAgents) {
+      const after = getCost(agent);
+      const before = beforeCosts.get(name) || { cost: 0, in: 0, out: 0 };
+      teamCost += after.cost - before.cost;
+      teamInputTokens += after.in - before.in;
+      teamOutputTokens += after.out - before.out;
+    }
+
     const payload = {
       type: 'team_result',
       source: this.supervisor.name || 'supervisor',
@@ -313,6 +340,9 @@ export class Team {
       memberContributions,
       finalSynthesis,
       members: [...this.members.keys()],
+      cost: teamCost,
+      inputTokens: teamInputTokens,
+      outputTokens: teamOutputTokens,
     };
   }
 

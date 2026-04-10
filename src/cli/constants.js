@@ -149,7 +149,7 @@ export const COMMAND_ENTRIES = [
   ['/undo', 'Undo last file change'],
   ['/diff', 'Show pending file changes'],
   ['/export', 'Export conversation as markdown'],
-  ['/skills', 'Manage skills (list/create/remove/transfer)'],
+  ['/skills', 'Manage skills (list/create/remove/transfer/search/install/update)'],
   ['/help', 'Show all commands'],
   ['/exit', 'Exit'],
 ];

@@ -200,6 +200,9 @@ export class SubagentManager {
       failedTasks: 0,
       totalDuration: 0,
       totalRetries: 0,
+      totalCost: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
       bySpecialization: {},
     };
     
@@ -422,7 +425,7 @@ ${tree}
     }
     
     let lastError = null;
-    
+    let lastSubagentClientStats = null;
     for (let attempt = 0; attempt <= subagentTask.maxRetries; attempt++) {
       let subagent = null;
       try {
@@ -462,9 +465,13 @@ ${tree}
         
         // Run the task
         let result;
+        let subagentClientStats = null;
         try {
           result = await subagent.run(subagentTask.task);
         } finally {
+          // Capture cost/token stats before cleanup
+          subagentClientStats = subagent.client?.getStats?.() || null;
+          lastSubagentClientStats = subagentClientStats;
           // Always clean up the subagent's resources, even on failure
           this.cleanupSubagent(subagent);
           this.activeSubagents.delete(subagent);
@@ -491,6 +498,13 @@ ${tree}
           this.stats.bySpecialization[subagentTask.specialization].completed++;
         }
         
+        // Aggregate subagent cost into manager stats
+        if (subagentClientStats) {
+          this.stats.totalCost += subagentClientStats.totalCost || 0;
+          this.stats.totalInputTokens += subagentClientStats.totalInputTokens || 0;
+          this.stats.totalOutputTokens += subagentClientStats.totalOutputTokens || 0;
+        }
+        
         if (this.onTaskComplete) {
           this.onTaskComplete(subagentTask);
         }
@@ -509,6 +523,7 @@ ${tree}
           retries: subagentTask.retryCount,
           stats: result.stats,
           stopReason: result.stopReason,
+          cost: subagentClientStats?.totalCost || 0,
         };
         
       } catch (error) {
@@ -536,10 +551,16 @@ ${tree}
     subagentTask.state = TaskState.FAILED;
     subagentTask.endTime = Date.now();
     subagentTask.error = lastError.message;
-    
     this.stats.failedTasks++;
     if (this.stats.bySpecialization[subagentTask.specialization]) {
       this.stats.bySpecialization[subagentTask.specialization].failed++;
+    }
+    
+    // Aggregate cost from failed attempts too
+    if (lastSubagentClientStats) {
+      this.stats.totalCost += lastSubagentClientStats.totalCost || 0;
+      this.stats.totalInputTokens += lastSubagentClientStats.totalInputTokens || 0;
+      this.stats.totalOutputTokens += lastSubagentClientStats.totalOutputTokens || 0;
     }
     
     if (this.onTaskError) {
@@ -552,7 +573,6 @@ ${tree}
     if (subagentTask.subagent) {
       this.activeSubagents.delete(subagentTask.subagent);
     }
-    
     return {
       success: false,
       taskId: subagentTask.id,
@@ -562,6 +582,7 @@ ${tree}
       retries: subagentTask.retryCount,
       response: lastError.partialResult?.response,
       stopReason: lastError.partialResult?.stopReason,
+      cost: lastSubagentClientStats?.totalCost || 0,
     };
   }
 

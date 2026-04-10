@@ -647,7 +647,8 @@ export class CLI {
       showSmartError('task_execution', {
         message: error.message,
         task,
-        suggestions: generateErrorSuggestions(error, task)
+        suggestions: generateErrorSuggestions(error, task),
+        errorData: error.details || error.stack || null,
       });
     } finally {
       clearTimeout(progressTimeout);
@@ -728,7 +729,8 @@ export class CLI {
       showSmartError('task_execution', {
         message: error.message,
         task: this.currentTask,
-        suggestions: generateErrorSuggestions(error, this.currentTask)
+        suggestions: generateErrorSuggestions(error, this.currentTask),
+        errorData: error.details || error.stack || null,
       });
     } finally {
       Object.assign(this.session.agent, previousCallbacks);

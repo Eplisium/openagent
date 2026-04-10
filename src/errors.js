@@ -55,16 +55,16 @@ export class OpenRouterError extends Error {
 }
 
 export class RateLimitError extends OpenRouterError {
-  constructor(message, retryAfter) {
-    super(message, 'RATE_LIMIT_ERROR', { retryAfter });
+  constructor(message, retryAfter, data = {}) {
+    super(message, 'RATE_LIMIT_ERROR', { retryAfter, ...data });
     this.name = 'RateLimitError';
     this.retryAfter = retryAfter;
   }
 }
 
 export class AuthenticationError extends OpenRouterError {
-  constructor(message) {
-    super(message, 'AUTH_ERROR');
+  constructor(message, data = {}) {
+    super(message, 'AUTH_ERROR', data);
     this.name = 'AuthenticationError';
   }
 }

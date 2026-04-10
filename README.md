@@ -77,7 +77,7 @@ openagent    # or just: oagent
 
 Skills are filesystem-based instructions loaded on-demand. They support **global** and **project** scopes:
 
-- **Global skills** (`~/.openagent/skills/`) — Available across all projects
+- **Global skills** (`~/.openagent/skills/`) — Available across **all projects** automatically
 - **Project skills** (`.openagent/skills/`) — Project-specific, override global with same name
 
 ```bash
@@ -95,13 +95,19 @@ openagent skills info code-review
 openagent skills create my-skill
 openagent skills create my-skill --global  # Create as global skill
 
-# Remove a skill
+# Remove a skill (from project only by default — global copy stays)
 openagent skills remove my-skill
-openagent skills remove my-skill --global
+openagent skills remove my-skill --project  # Remove from project scope only
+openagent skills remove my-skill --global   # Remove from global scope only
+openagent skills remove my-skill --all      # Remove from ALL scopes (complete delete)
 
 # Transfer a skill between scopes
 openagent skills transfer my-skill --from project --to global
 openagent skills transfer my-skill --from global --to project
+
+# Transfer between projects
+openagent skills transfer my-skill --from project --to /path/to/other-project
+openagent skills transfer my-skill --from /path/to/projectA --to /path/to/projectB
 ```
 
 Built-in skills: `code-review`, `debug`, `refactor`, `testing` — loaded via `use_skill` tool.
@@ -254,7 +260,7 @@ Extend OpenAgent with plugins:
 /tools           - List available tools
 /agents          - Show subagent status
 /stats           - Show statistics
-/skills          - Manage skills (list/info/create/remove/transfer)
+/skills          - Manage skills (list/info/create/remove --all/transfer cross-project)
 /cost            - Show cost breakdown
 /context         - Show context usage
 /save            - Save session
@@ -445,11 +451,18 @@ openagent skills info code-review
 openagent skills create my-skill
 openagent skills create my-skill --global
 
-# Remove a skill
+# Remove a skill (from project only by default — global copy stays)
 openagent skills remove my-skill
+openagent skills remove my-skill --project   # Remove from project scope only
+openagent skills remove my-skill --global    # Remove from global scope only
+openagent skills remove my-skill --all       # Remove from ALL scopes (complete delete)
 
 # Transfer between scopes
 openagent skills transfer my-skill --from project --to global
+openagent skills transfer my-skill --from global --to project
+
+# Transfer between projects
+openagent skills transfer my-skill --from project --to /path/to/other-project
 ```
 
 ```javascript

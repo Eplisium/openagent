@@ -4,10 +4,13 @@
  * 
  * Supports:
  * - /skills list [--global|--project] — List all skills
- * - /skills create <name> [--global] — Create a new skill
- * - /skills remove <name> [--global|--project] — Remove a skill
- * - /skills transfer <name> --from project --to global (or vice versa)
  * - /skills info <name> — Show skill details
+ * - /skills create <name> [--global] — Create a new skill
+ * - /skills remove <name> [--global|--project|--all] — Remove a skill from scope(s)
+ * - /skills transfer <name> --from X --to Y — Move between global, project, or cross-project
+ * - /skills search <query> — Search registry for skills
+ * - /skills install <id> — Install a skill from registry
+ * - /skills update [id] — Update skills (all or specific)
  */
 
 import chalk from 'chalk';
@@ -15,6 +18,8 @@ import fs from 'fs-extra';
 import path from 'path';
 import os from 'os';
 import { SkillManager } from '../skills/SkillManager.js';
+import { SkillRegistry } from '../skills/SkillRegistry.js';
+import { EnhancedSkillParser } from '../skills/EnhancedSkillParser.js';
 
 const SKILLS_DIR = 'skills';
 const SKILL_FILE = 'SKILL.md';
@@ -31,77 +36,52 @@ function getSkillDirs(workingDir) {
 }
 
 /**
- * Scan a skills directory and return skill info
+ * Create a SkillManager instance for the given working directory
  */
-async function scanSkillsDir(dir, source) {
-  const skills = [];
-  if (!await fs.pathExists(dir)) return skills;
-
-  const entries = await fs.readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const skillDir = path.join(dir, entry.name);
-    const skillFile = path.join(skillDir, SKILL_FILE);
-    
-    let description = '';
-    let version = '';
-    let tags = [];
-    
-    if (await fs.pathExists(skillFile)) {
-      try {
-        const content = await fs.readFile(skillFile, 'utf-8');
-        // Parse YAML frontmatter
-        const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
-        if (fmMatch) {
-          const fm = fmMatch[1];
-          // Handle multi-line description (YAML > folded scalar)
-          const descBlockMatch = fm.match(/description:\s*>\n((?:\s+.+\n?)+)/);
-          const descInlineMatch = fm.match(/description:\s*["']?(.+?)["']?\s*$/m);
-          if (descBlockMatch) {
-            description = descBlockMatch[1].split('\n').map(l => l.trim()).filter(Boolean).join(' ');
-          } else if (descInlineMatch) {
-            description = descInlineMatch[1].trim().replace(/^["']|["']$/g, '');
-          }
-          const verMatch = fm.match(/version:\s*["']?([^"'\n]+)["']?/);
-          const tagsMatch = fm.match(/tags:\s*\[(.*?)\]/);
-          if (verMatch) version = verMatch[1].trim();
-          if (tagsMatch) tags = tagsMatch[1].split(',').map(t => t.trim().replace(/^["']|["']$/g, ''));
-        }
-      } catch { /* ignore parse errors */ }
-    }
-    
-    skills.push({
-      name: entry.name,
-      source,
-      dir: skillDir,
-      description,
-      version: version || 'local',
-      tags,
-    });
-  }
-  return skills;
+function createManager(workingDir) {
+  const dirs = getSkillDirs(workingDir);
+  return new SkillManager({
+    workingDir,
+    globalSkillsDir: dirs.global,
+    projectSkillsDir: dirs.project,
+    verbose: false,
+  });
 }
 
 /**
- * List all skills (global + project)
+ * Create a SkillRegistry instance
+ */
+function createRegistry() {
+  return new SkillRegistry({ verbose: false });
+}
+
+/**
+ * List all skills (global + project) using SkillManager
  */
 export async function listSkills(workingDir, options = {}) {
+  const manager = createManager(workingDir);
+  const skills = await manager.getSkills();
   const dirs = getSkillDirs(workingDir);
-  const globalSkills = await scanSkillsDir(dirs.global, 'global');
-  const projectSkills = await scanSkillsDir(dirs.project, 'project');
 
   const showGlobal = !options.projectOnly;
   const showProject = !options.globalOnly;
 
-  const allSkills = [];
-  if (showGlobal) allSkills.push(...globalSkills);
-  if (showProject) allSkills.push(...projectSkills);
+  const globalSkills = [];
+  const projectSkills = [];
+
+  for (const [, skill] of skills) {
+    if (skill.source === 'global' && showGlobal) globalSkills.push(skill);
+    if (skill.source === 'project' && showProject) projectSkills.push(skill);
+  }
+
+  const allSkills = [...globalSkills, ...projectSkills];
 
   if (allSkills.length === 0) {
     console.log(chalk.yellow('\nNo skills installed.'));
     console.log(chalk.gray('  Global skills: ') + chalk.dim(dirs.global));
     console.log(chalk.gray('  Project skills: ') + chalk.dim(dirs.project));
     console.log(chalk.gray('\nUse /skills create <name> to create a skill'));
+    console.log(chalk.gray('Use /skills search <query> to find skills in the registry'));
     return;
   }
 
@@ -128,7 +108,7 @@ export async function listSkills(workingDir, options = {}) {
   }
 
   if (options.json) {
-    console.log(JSON.stringify({ global: globalSkills, project: projectSkills }, null, 2));
+    console.log(JSON.stringify({ global: globalSkills.map(s => s.getMetadata()), project: projectSkills.map(s => s.getMetadata()) }, null, 2));
   }
 }
 
@@ -136,11 +116,9 @@ export async function listSkills(workingDir, options = {}) {
  * Show detailed info about a skill
  */
 export async function showSkillInfo(workingDir, skillName) {
-  const dirs = getSkillDirs(workingDir);
-  const globalSkills = await scanSkillsDir(dirs.global, 'global');
-  const projectSkills = await scanSkillsDir(dirs.project, 'project');
+  const manager = createManager(workingDir);
+  const skill = await manager.getSkill(skillName);
 
-  const skill = [...projectSkills, ...globalSkills].find(s => s.name === skillName);
   if (!skill) {
     console.log(chalk.red(`Skill not found: ${skillName}`));
     console.log(chalk.gray('Use /skills list to see available skills'));
@@ -149,15 +127,27 @@ export async function showSkillInfo(workingDir, skillName) {
 
   const sourceIcon = skill.source === 'global' ? '🌐' : '📁';
   console.log(chalk.blue(`\n${sourceIcon} Skill: ${chalk.bold(skill.name)}\n`));
-  console.log(chalk.gray(`  Source:    ${skill.source}`));
-  console.log(chalk.gray(`  Version:   ${skill.version}`));
-  console.log(chalk.gray(`  Path:      ${skill.dir}`));
+  console.log(chalk.gray(`  Source:      ${skill.source}`));
+  console.log(chalk.gray(`  Version:     ${skill.version}`));
+  console.log(chalk.gray(`  Path:        ${skill.dirPath}`));
+  if (skill.author) console.log(chalk.gray(`  Author:      ${skill.author}`));
   if (skill.description) console.log(chalk.gray(`  Description: ${skill.description}`));
-  if (skill.tags.length > 0) console.log(chalk.gray(`  Tags:      ${skill.tags.join(', ')}`));
+  if (skill.tags.length > 0) console.log(chalk.gray(`  Tags:        ${skill.tags.join(', ')}`));
+  if (skill.triggers.length > 0) console.log(chalk.gray(`  Triggers:    ${skill.triggers.join(', ')}`));
+  if (skill.dependencies.length > 0) console.log(chalk.gray(`  Dependencies: ${skill.dependencies.join(', ')}`));
+
+  // List scripts
+  const scripts = await skill.listScripts();
+  if (scripts.length > 0) {
+    console.log(chalk.blue('\n  Scripts:'));
+    for (const s of scripts) {
+      console.log(chalk.gray(`    ${s.name}`));
+    }
+  }
 
   // List files
   try {
-    const files = await listFilesRecursive(skill.dir, 2);
+    const files = await listFilesRecursive(skill.dirPath, 2);
     console.log(chalk.blue('\n  Files:'));
     for (const f of files) {
       console.log(chalk.gray(`    ${f}`));
@@ -171,7 +161,7 @@ export async function showSkillInfo(workingDir, skillName) {
 async function listFilesRecursive(dir, maxDepth, prefix = '') {
   const files = [];
   if (maxDepth <= 0) return files;
-  
+
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
@@ -261,7 +251,13 @@ ${description}
 }
 
 /**
- * Remove a skill
+ * Remove a skill from a specific scope or entirely
+ * 
+ * Behaviors:
+ * - /skills remove <name> --project  → Remove from project only (global stays)
+ * - /skills remove <name> --global   → Remove from global only (project stays)
+ * - /skills remove <name> --all      → Remove from ALL scopes (complete delete)
+ * - /skills remove <name>            → Remove from project if exists, otherwise global
  */
 export async function removeSkill(workingDir, skillName, options = {}) {
   if (!skillName) {
@@ -270,48 +266,81 @@ export async function removeSkill(workingDir, skillName, options = {}) {
   }
 
   const dirs = getSkillDirs(workingDir);
-  
-  // Find the skill
-  let targetDir = null;
-  let source = null;
+  const projectDir = path.join(dirs.project, skillName);
+  const globalDir = path.join(dirs.global, skillName);
+  const inProject = await fs.pathExists(projectDir);
+  const inGlobal = await fs.pathExists(globalDir);
 
-  if (options.global) {
-    const skillDir = path.join(dirs.global, skillName);
-    if (await fs.pathExists(skillDir)) {
-      targetDir = skillDir;
-      source = 'global';
-    }
-  } else if (options.project) {
-    const skillDir = path.join(dirs.project, skillName);
-    if (await fs.pathExists(skillDir)) {
-      targetDir = skillDir;
-      source = 'project';
-    }
-  } else {
-    // Search both
-    const projectDir = path.join(dirs.project, skillName);
-    const globalDir = path.join(dirs.global, skillName);
-    if (await fs.pathExists(projectDir)) {
-      targetDir = projectDir;
-      source = 'project';
-    } else if (await fs.pathExists(globalDir)) {
-      targetDir = globalDir;
-      source = 'global';
-    }
-  }
-
-  if (!targetDir) {
+  if (!inProject && !inGlobal) {
     console.log(chalk.red(`Skill not found: ${skillName}`));
     console.log(chalk.gray('Use /skills list to see available skills'));
     return;
   }
 
-  await fs.remove(targetDir);
-  console.log(chalk.green(`✓ Removed skill: ${skillName} (${source})`));
+  // --all: remove from every scope
+  if (options.all) {
+    const removed = [];
+    if (inProject) {
+      await fs.remove(projectDir);
+      removed.push('project');
+    }
+    if (inGlobal) {
+      await fs.remove(globalDir);
+      removed.push('global');
+    }
+    console.log(chalk.green(`✓ Completely removed skill: ${skillName}`));
+    console.log(chalk.gray(`  Removed from: ${removed.join(', ')}`));
+    return;
+  }
+
+  // --global: only remove from global
+  if (options.global) {
+    if (!inGlobal) {
+      console.log(chalk.yellow(`Skill "${skillName}" not found in global scope`));
+      if (inProject) console.log(chalk.gray(`  It exists in project scope. Use --project or --all to remove it there.`));
+      return;
+    }
+    await fs.remove(globalDir);
+    console.log(chalk.green(`✓ Removed skill from global: ${skillName}`));
+    if (inProject) console.log(chalk.gray(`  Project copy still available.`));
+    return;
+  }
+
+  // --project: only remove from project
+  if (options.project) {
+    if (!inProject) {
+      console.log(chalk.yellow(`Skill "${skillName}" not found in project scope`));
+      if (inGlobal) console.log(chalk.gray(`  It exists in global scope and is still available to all projects.`));
+      return;
+    }
+    await fs.remove(projectDir);
+    console.log(chalk.green(`✓ Removed skill from project: ${skillName}`));
+    if (inGlobal) console.log(chalk.gray(`  Global copy still available to all projects.`));
+    return;
+  }
+
+  // No flag: remove from project first, fall back to global
+  if (inProject) {
+    await fs.remove(projectDir);
+    console.log(chalk.green(`✓ Removed skill from project: ${skillName}`));
+    if (inGlobal) console.log(chalk.gray(`  Global copy still available. Use --all to remove completely.`));
+  } else {
+    await fs.remove(globalDir);
+    console.log(chalk.green(`✓ Removed skill from global: ${skillName}`));
+    console.log(chalk.gray(`  This skill was only in global scope and is now deleted.`));
+  }
 }
 
+
 /**
- * Transfer a skill between global and project
+ * Transfer a skill between scopes
+ * 
+ * Supports:
+ * - /skills transfer <name> --from global --to project  (global → project)
+ * - /skills transfer <name> --from project --to global  (project → global)
+ * - /skills transfer <name> --from project --to <other-project-dir>  (project → other project)
+ * 
+ * When --to is a path (not 'global' or 'project'), copies to that project's .openagent/skills/ dir.
  */
 export async function transferSkill(workingDir, skillName, options = {}) {
   if (!skillName) {
@@ -328,8 +357,32 @@ export async function transferSkill(workingDir, skillName, options = {}) {
     return;
   }
 
-  const fromDir = fromScope === 'global' ? dirs.global : dirs.project;
-  const toDir = toScope === 'global' ? dirs.global : dirs.project;
+  // Resolve source directory
+  let fromDir;
+  if (fromScope === 'global') {
+    fromDir = dirs.global;
+  } else if (fromScope === 'project') {
+    fromDir = dirs.project;
+  } else {
+    // Treat as a project path
+    fromDir = path.join(fromScope, '.openagent', SKILLS_DIR);
+  }
+
+  // Resolve destination directory
+  let toDir;
+  let toLabel;
+  if (toScope === 'global') {
+    toDir = dirs.global;
+    toLabel = 'global';
+  } else if (toScope === 'project') {
+    toDir = dirs.project;
+    toLabel = 'project';
+  } else {
+    // Treat as a project path — transfer to another project
+    toDir = path.join(toScope, '.openagent', SKILLS_DIR);
+    toLabel = `project: ${toScope}`;
+  }
+
   const fromPath = path.join(fromDir, skillName);
   const toPath = path.join(toDir, skillName);
 
@@ -339,8 +392,8 @@ export async function transferSkill(workingDir, skillName, options = {}) {
   }
 
   if (await fs.pathExists(toPath)) {
-    console.log(chalk.red(`Skill already exists in ${toScope}: ${skillName}`));
-    console.log(chalk.gray('Remove it first with /skills remove <name> --' + toScope));
+    console.log(chalk.red(`Skill already exists in ${toLabel}: ${skillName}`));
+    console.log(chalk.gray('Remove it first with /skills remove <name> --' + (toScope === 'global' ? 'global' : 'project')));
     return;
   }
 
@@ -349,7 +402,144 @@ export async function transferSkill(workingDir, skillName, options = {}) {
   await fs.remove(fromPath);
 
   console.log(chalk.green(`✓ Transferred skill: ${skillName}`));
-  console.log(chalk.gray(`  ${fromScope} → ${toScope}`));
+  console.log(chalk.gray(`  ${fromScope} → ${toLabel}`));
+}
+
+/**
+ * Search the registry for skills
+ */
+export async function searchSkills(query, options = {}) {
+  if (!query) {
+    console.log(chalk.red('Please provide a search query'));
+    return;
+  }
+
+  const registry = createRegistry();
+  console.log(chalk.blue(`Searching for: ${query}...`));
+
+  try {
+    const result = await registry.search(query, { limit: options.limit || 10 });
+
+    if (result.skills.length === 0) {
+      console.log(chalk.yellow('No skills found'));
+      if (result.fromCache) {
+        console.log(chalk.gray('(Results from offline cache)'));
+      }
+      return;
+    }
+
+    console.log(chalk.blue(`\\nFound ${result.skills.length} skill(s):\\n`));
+
+    for (const skill of result.skills) {
+      console.log(chalk.green(`  ${skill.name} v${skill.version}`));
+      console.log(chalk.gray(`    ${skill.description}`));
+      console.log(chalk.gray(`    Author: ${skill.author} | Downloads: ${skill.downloads}`));
+      if (skill.tags.length > 0) {
+        console.log(chalk.gray(`    Tags: ${skill.tags.join(', ')}`));
+      }
+      console.log();
+    }
+
+    if (result.fromCache) {
+      console.log(chalk.gray('(Results from offline cache)'));
+    }
+  } catch (error) {
+    console.error(chalk.red(`Search failed: ${error.message}`));
+  }
+}
+
+/**
+ * Install a skill from the registry
+ */
+export async function installSkill(skillId, options = {}) {
+  if (!skillId) {
+    console.log(chalk.red('Please specify a skill ID to install'));
+    return;
+  }
+
+  const registry = createRegistry();
+  const parser = new EnhancedSkillParser({ verbose: false });
+
+  try {
+    console.log(chalk.blue(`Fetching info for ${skillId}...`));
+    const info = await registry.getSkillInfo(skillId);
+
+    if (!info.success) {
+      console.error(chalk.red(`Skill not found: ${skillId}`));
+      return;
+    }
+
+    const skill = info.skill;
+    console.log(chalk.blue(`\nSkill: ${skill.name}`));
+    console.log(chalk.gray(`Description: ${skill.description}`));
+    console.log(chalk.gray(`Version: ${skill.version}`));
+    console.log(chalk.gray(`Author: ${skill.author}`));
+
+    if (skill.dependencies.length > 0) {
+      console.log(chalk.yellow(`\nDependencies: ${skill.dependencies.join(', ')}`));
+    }
+
+    console.log(chalk.blue(`\nInstalling ${skill.name}...`));
+    const result = await registry.install(skillId, { version: options.version || 'latest', force: options.force });
+
+    if (result.success) {
+      console.log(chalk.green(`✓ Successfully installed ${skill.name} v${result.version}`));
+      console.log(chalk.gray(`Location: ${result.path}`));
+
+      // Check compatibility
+      const enhanced = await parser.loadEnhancedSkill(result.path);
+      if (enhanced && !enhanced.isCompatible()) {
+        console.log(chalk.yellow(`⚠ Skill may not be compatible with your system`));
+      }
+    } else {
+      console.error(chalk.red(`Installation failed: ${result.error}`));
+    }
+  } catch (error) {
+    console.error(chalk.red(`Installation error: ${error.message}`));
+  }
+}
+
+/**
+ * Update skills
+ */
+export async function updateSkills(skillId, options = {}) {
+  const registry = createRegistry();
+
+  try {
+    if (skillId) {
+      console.log(chalk.blue(`Updating ${skillId}...`));
+      const result = await registry.install(skillId, { force: true });
+
+      if (result.success) {
+        console.log(chalk.green(`✓ Updated ${skillId} to v${result.version}`));
+      } else {
+        console.error(chalk.red(`Update failed: ${result.error}`));
+      }
+    } else {
+      console.log(chalk.blue('Checking for updates...'));
+      const { updates } = await registry.checkForUpdates();
+
+      if (updates.length === 0) {
+        console.log(chalk.green('All skills are up to date'));
+        return;
+      }
+
+      console.log(chalk.yellow(`Found ${updates.length} skill(s) with updates:`));
+      for (const update of updates) {
+        console.log(chalk.gray(`  ${update.skillId}: ${update.currentVersion} → ${update.availableVersion}`));
+      }
+
+      console.log(chalk.blue('\nUpdating skills...'));
+      const result = await registry.update();
+
+      console.log(chalk.green(`\n✓ Updated ${result.updated} skill(s)`));
+      if (result.failed > 0) {
+        console.log(chalk.red(`✗ Failed to update ${result.failed} skill(s)`));
+      }
+    }
+  } catch (error) {
+    console.error(chalk.red(`Update error: ${error.message}`));
+  }
 }
 
 /**
@@ -358,9 +548,9 @@ export async function transferSkill(workingDir, skillName, options = {}) {
 function parseArgs(argStr) {
   const args = [];
   const options = {};
-  
+
   if (!argStr) return { args, options };
-  
+
   const parts = argStr.trim().split(/\s+/);
   let i = 0;
   while (i < parts.length) {
@@ -371,14 +561,22 @@ function parseArgs(argStr) {
         options.json = true;
       } else if (key === 'global') {
         options.globalOnly = true;
+        options.global = true;
       } else if (key === 'project') {
         options.projectOnly = true;
-      } else if (key === 'from' || key === 'to' || key === 'desc') {
+        options.project = true;
+      } else if (key === 'force') {
+        options.force = true;
+      } else if (key === 'all') {
+        options.all = true;
+      } else if (key === 'from' || key === 'to' || key === 'desc' || key === 'limit' || key === 'version') {
         i++;
         if (i < parts.length) {
           if (key === 'from') options.from = parts[i];
           else if (key === 'to') options.to = parts[i];
           else if (key === 'desc') options.description = parts[i];
+          else if (key === 'limit') options.limit = parseInt(parts[i], 10);
+          else if (key === 'version') options.version = parts[i];
         }
       }
     } else {
@@ -386,7 +584,7 @@ function parseArgs(argStr) {
     }
     i++;
   }
-  
+
   return { args, options };
 }
 
@@ -426,14 +624,32 @@ export async function handleSkillsCommand(workingDir, argStr) {
       await transferSkill(workingDir, name, options);
       break;
 
+    case 'search':
+    case 'find':
+      await searchSkills(name, options);
+      break;
+
+    case 'install':
+    case 'get':
+      await installSkill(name, options);
+      break;
+
+    case 'update':
+    case 'upgrade':
+      await updateSkills(name, options);
+      break;
+
     case 'help':
     default:
       console.log(chalk.blue('\n📋 Skills Commands:\n'));
-      console.log(chalk.gray('  /skills list [--global|--project]  ') + chalk.dim('List all skills'));
-      console.log(chalk.gray('  /skills info <name>                ') + chalk.dim('Show skill details'));
-      console.log(chalk.gray('  /skills create <name> [--global]   ') + chalk.dim('Create a new skill'));
-      console.log(chalk.gray('  /skills remove <name> [--global]   ') + chalk.dim('Remove a skill'));
-      console.log(chalk.gray('  /skills transfer <name> --from X --to Y') + chalk.dim('Move skill between scopes'));
+      console.log(chalk.gray('  /skills list [--global|--project]       ') + chalk.dim('List all skills'));
+      console.log(chalk.gray('  /skills info <name>                     ') + chalk.dim('Show skill details'));
+      console.log(chalk.gray('  /skills create <name> [--global] [--desc <text>]') + chalk.dim('Create a new skill'));
+      console.log(chalk.gray('  /skills remove <name> [--global|--project|--all]') + chalk.dim('Remove a skill'));
+      console.log(chalk.gray('  /skills transfer <name> --from X --to Y ') + chalk.dim('Move skill (global↔project, project↔project)'));
+      console.log(chalk.gray('  /skills search <query> [--limit N]      ') + chalk.dim('Search registry for skills'));
+      console.log(chalk.gray('  /skills install <id> [--version V]      ') + chalk.dim('Install from registry'));
+      console.log(chalk.gray('  /skills update [id]                     ') + chalk.dim('Update skills'));
       console.log();
       break;
   }

@@ -493,7 +493,16 @@ export function registerSkillsCommands(program) {
     .action(async (skillId, options) => {
       await skillsCLI.remove(skillId, options);
     });
+  // Transfer
+  skillsCommand.command('transfer <name>')
+    .description('Transfer a skill between global and project')
+    .option('--from <scope>', 'Source scope (project or global)', 'project')
+    .option('--to <scope>', 'Destination scope (project or global)', 'global')
+    .action(async (name, options) => {
+      await skillsCLI.transfer(name, options);
+    });
   
+  // Update
   // Update
   skillsCommand.command('update [skillId]')
     .description('Update skills (all or specific)')

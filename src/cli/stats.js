@@ -35,7 +35,8 @@ export function showStats(session) {
       `${chalk.cyan('Completed:')} ${subagentStats.completedTasks}\n` +
       `${chalk.cyan('Failed:')} ${subagentStats.failedTasks}\n` +
       `${chalk.cyan('Success Rate:')} ${subagentStats.successRate}\n` +
-      `${chalk.cyan('Avg Duration:')} ${subagentStats.avgDuration}`;
+      `${chalk.cyan('Avg Duration:')} ${subagentStats.avgDuration}` +
+      (subagentStats.totalCost > 0 ? `\n${chalk.cyan('Subagent Cost:')} $${subagentStats.totalCost.toFixed(6)}` : '');
   }
 
   console.log(boxen(content, { ...box.stats, title: '📊 Stats' }));
@@ -49,21 +50,30 @@ export function showStats(session) {
  */
 export function showCost(session, sessionStartTime, taskCount) {
   const clientStats = session.agent.client.getStats();
+  const subagentStats = session.subagentManager?.getStats() || {};
   const sessionDuration = Date.now() - sessionStartTime;
   const sessionMinutes = Math.floor(sessionDuration / 60000);
 
-  console.log(boxen(
-    `${chalk.bold('Session Cost')}\n\n` +
+  const subagentCost = subagentStats.totalCost || 0;
+  const totalCost = clientStats.totalCost + subagentCost;
+
+  let content = `${chalk.bold('Session Cost')}\n\n` +
     `${chalk.cyan('Session Duration:')} ${sessionMinutes} minutes\n` +
+    `${chalk.cyan('Main Agent Cost:')} $${clientStats.totalCost.toFixed(6)}\n`;
+
+  if (subagentCost > 0) {
+    content += `${chalk.cyan('Subagent Cost:')} $${subagentCost.toFixed(6)}\n`;
+  }
+
+  content += `${chalk.bold('Total Cost:')} $${totalCost.toFixed(6)}\n` +
+    `${chalk.cyan('Budget Used:')} $${clientStats.budgetUsed.toFixed(6)} / $${clientStats.budgetLimit}\n` +
+    `${chalk.cyan('Budget Remaining:')} $${clientStats.budgetRemaining.toFixed(6)}\n` +
     `${chalk.cyan('Total Requests:')} ${clientStats.requestCount}\n` +
-    `${chalk.cyan('Total Cost:')} $${clientStats.totalCost}\n` +
-    `${chalk.cyan('Budget Used:')} $${clientStats.budgetUsed} / $${clientStats.budgetLimit}\n` +
-    `${chalk.cyan('Budget Remaining:')} $${clientStats.budgetRemaining}\n` +
     `${chalk.cyan('Avg Duration:')} ${clientStats.avgDuration}\n` +
     `${chalk.cyan('Cache Size:')} ${clientStats.cacheSize} entries\n` +
-    `${chalk.cyan('Tasks Completed:')} ${taskCount}`,
-    { ...box.stats, title: '💰 Cost' }
-  ));
+    `${chalk.cyan('Tasks Completed:')} ${taskCount}`;
+
+  console.log(boxen(content, { ...box.stats, title: '💰 Cost' }));
 }
 
 /**
@@ -85,11 +95,11 @@ export function showAgents(session) {
   const successBar = stats.totalTasks > 0
     ? miniBar(stats.completedTasks, stats.totalTasks)
     : chalk.dim('no tasks yet');
-
   let content = `${chalk.bold.white('📊 Stats')}` +
     `\n  Tasks: ${chalk.white(stats.totalTasks)} total ${chalk.dim('│')} ${chalk.green(stats.completedTasks)} done ${chalk.dim('│')} ${chalk.red(stats.failedTasks)} failed ${chalk.dim('│')} ${chalk.cyan(stats.runningTasks)} running` +
     `\n  Rate:  ${successBar}  ${chalk.white(stats.successRate)}` +
-    `\n  Speed: ${chalk.white(stats.avgDuration)} avg ${stats.totalRetries > 0 ? chalk.dim(`│ ${stats.totalRetries} retries`) : ''}`;
+    `\n  Speed: ${chalk.white(stats.avgDuration)} avg ${stats.totalRetries > 0 ? chalk.dim(`│ ${stats.totalRetries} retries`) : ''}` +
+    (stats.totalCost > 0 ? `\n  Cost:  ${chalk.white('$' + stats.totalCost.toFixed(6))} total` : '');
 
   // Per-specialization breakdown if we have data
   if (stats.bySpecialization && Object.keys(stats.bySpecialization).length > 0) {
