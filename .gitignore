@@ -18,7 +18,11 @@ node_modules/
 
 # Backups
 .windop-backups/
+.windop/
 *.bak
+
+# Tool cache
+.tool-cache/
 
 # OS files
 .DS_Store
