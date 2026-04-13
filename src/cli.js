@@ -15,7 +15,7 @@
 
 import chalk from './utils/chalk-compat.js';
 import { parseXmlToolCalls, hasXmlToolCalls } from './tools/xmlToolParser.js';
-import ora from './utils/ora-compat.js';
+import { spinner } from './utils/spinners.js';
 import boxen from 'boxen';
 import gradient from 'gradient-string';
 import fs from './utils/fs-compat.js';
@@ -169,14 +169,14 @@ export class CLI {
 
     // Initialize model browser
     this.modelBrowser = new ModelBrowser();
-    const modelSpinner = ora({ text: chalk.gray('Loading models from OpenRouter...'), spinner: 'dots', color: 'cyan' }).start();
+    const modelSpinner = spinner(chalk.gray('Loading models from OpenRouter...'), { color: 'cyan' });
     try {
       await this.modelBrowser.init();
       const sourceSuffix = this.modelBrowser.lastLoadSource === 'cache' || this.modelBrowser.lastLoadSource === 'stale-cache'
         ? ' from cache' : '';
-      modelSpinner.succeed(chalk.green(`Loaded ${this.modelBrowser.models.length} models${sourceSuffix}`));
+      modelSpinner.success(chalk.green(`Loaded ${this.modelBrowser.models.length} models${sourceSuffix}`));
     } catch (e) {
-      modelSpinner.fail(chalk.red(`Failed to load models: ${e.message}`));
+      modelSpinner.error(chalk.red(`Failed to load models: ${e.message}`));
       console.log(chalk.yellow('⚠️ Cannot continue without models. Check your API key and internet connection.'));
       process.exit(1);
     }
@@ -185,14 +185,13 @@ export class CLI {
     if (this.state.firstRun) {
       await runOnboarding(this.state, () => this.saveState(), this.modelBrowser);
     }
-
     const selectedModel = await this.selectModel();
-    const spinner = ora({ text: chalk.gray('Initializing session...'), spinner: 'dots', color: 'cyan' }).start();
+    const initSpinner = spinner(chalk.gray('Initializing session...'), { color: 'cyan' });
     try {
       this.createSession({ modelId: selectedModel });
-      spinner.succeed(chalk.green('Session initialized'));
+      initSpinner.success(chalk.green('Session initialized'));
     } catch (error) {
-      spinner.fail(chalk.red(`Failed to initialize session: ${error.message}`));
+      initSpinner.error(chalk.red(`Failed to initialize session: ${error.message}`));
       process.exit(1);
     }
 
@@ -805,15 +804,16 @@ export class CLI {
         console.log(chalk.red(`\n✗ ${error.message}`));
       }
     } else {
-      const spinner = ora({ text: chalk.gray('Thinking...'), spinner: 'dots', color: 'cyan' }).start();
+      const thinkSpinner = spinner(chalk.gray('Thinking...'), { color: 'cyan' });
       try {
         const result = await this.session.agent.chat(message);
-        spinner.stop();
+        thinkSpinner.stop();
         printAIResponse(this, result.content);
         succeeded = true;
       } catch (error) {
-        spinner.fail(chalk.red(`Error: ${error.message}`));
+        thinkSpinner.error(chalk.red(`Error: ${error.message}`));
       }
+    }
     }
 
     const duration = Date.now() - startTime;
@@ -975,21 +975,21 @@ export class CLI {
   async runDoctor() {
     console.log(chalk.cyan('\n🏥 Running health checks...\n'));
     const results = [];
-
     for (const [key, check] of Object.entries(HEALTH_CHECKS)) {
-      const spinner = ora({ text: chalk.gray(check.name), spinner: 'dots' }).start();
+      const checkSpinner = spinner(chalk.gray(check.name));
       try {
         const result = await check.check(this.session);
-        spinner.stop();
+        checkSpinner.stop();
         const icon = result.status === 'healthy' ? chalk.green('✓') :
                      result.status === 'warning' ? chalk.yellow('⚠') : chalk.red('✗');
         console.log(`${icon} ${chalk.white(check.name)}: ${result.message}`);
         if (result.details) console.log(chalk.dim(`  └─ ${result.details}`));
         results.push({ check: key, ...result });
       } catch (error) {
-        spinner.fail(chalk.red(`${check.name}: ${error.message}`));
+        checkSpinner.error(chalk.red(`${check.name}: ${error.message}`));
         results.push({ check: key, status: 'error', message: error.message });
       }
+    }
     }
 
     const healthy = results.filter(r => r.status === 'healthy').length;

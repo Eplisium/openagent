@@ -7,7 +7,7 @@ import chalk from '../utils/chalk-compat.js';
 import boxen from 'boxen';
 import fs from '../utils/fs-compat.js';
 import path from 'path';
-import ora from '../utils/ora-compat.js';
+import { spinner } from '../utils/spinners.js';
 import { AgentSession } from '../agent/AgentSession.js';
 import { boxStyles } from '../utils.js';
 import { promptWithTerminalReset } from './terminal.js';
@@ -420,14 +420,11 @@ export async function resetSession(cli) {
  * Run a shell command and display results
  */
 export async function runShellCommand(cli, command) {
-  const spinner = ora({
-    text: chalk.gray(`Running: ${command}`),
-    spinner: 'dots',
-  }).start();
+  const s = spinner(chalk.gray(`Running: ${command}`));
 
   try {
     const result = await cli.session.toolRegistry.execute('exec', { command });
-    spinner.stop();
+    s.stop();
 
     if (result.success) {
       console.log(boxen(
@@ -443,6 +440,6 @@ export async function runShellCommand(cli, command) {
       ));
     }
   } catch (error) {
-    spinner.fail(chalk.red(`Error: ${error.message}`));
+    s.error(chalk.red(`Error: ${error.message}`));
   }
 }

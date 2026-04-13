@@ -18,6 +18,7 @@ import {
   shortenModelLabel,
   getRelativeTime
 } from './formatting.js';
+import { getSpinnerFrame, thinkingSpinner, respondingIndicator } from '../utils/spinners.js';
 
 const g = gradients;
 const box = boxStyles;
@@ -117,33 +118,14 @@ export function printAIResponse(cli, content) {
  * Show thinking spinner during LLM response time
  */
 export function showThinkingSpinner() {
-  const frames = ['🤔', '🤔.', '🤔..', '🤔...'];
-  let frame = 0;
-  const interval = setInterval(() => {
-    process.stdout.write(`\r${chalk.gray(frames[frame])} `);
-    frame = (frame + 1) % frames.length;
-  }, 300);
-
-  return {
-    stop: () => {
-      clearInterval(interval);
-      process.stdout.write('\r' + ' '.repeat(10) + '\r');
-    }
-  };
+  return thinkingSpinner();
 }
 
 /**
  * Show AI responding indicator
  */
 export function showRespondingIndicator() {
-  const indicator = chalk.cyan('💬 ') + chalk.gray('AI responding...');
-  process.stdout.write(indicator + ' ');
-
-  return {
-    clear: () => {
-      process.stdout.write('\r' + ' '.repeat(indicator.length + 5) + '\r');
-    }
-  };
+  return respondingIndicator();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -185,8 +167,7 @@ export function printEnhancedToolCallStart(cli, toolName, args, count, taskStart
     return;
   }
 
-  const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-  const frame = spinnerFrames[count % spinnerFrames.length];
+  const frame = getSpinnerFrame(count, 'dots');
 
   const argPreview = formatToolArgs(toolName, args);
 

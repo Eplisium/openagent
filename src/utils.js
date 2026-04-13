@@ -4,7 +4,7 @@
  */
 
 import chalk from './utils/chalk-compat.js';
-import ora from './utils/ora-compat.js';
+import { spinner } from './utils/spinners.js';
 import boxen from 'boxen';
 import gradient from 'gradient-string';
 import Table from 'cli-table3';
@@ -137,11 +137,7 @@ export function printInfo(message) {
  * 🔄 Create Spinner
  */
 export function createSpinner(text) {
-  return ora({
-    text: colors.muted(text),
-    spinner: 'dots',
-    color: 'cyan',
-  });
+  return spinner(colors.muted(text), { color: 'cyan' });
 }
 
 /**
