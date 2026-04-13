@@ -19,6 +19,7 @@ import { CONFIG } from './config.js';
 import { logger } from './logger.js';
 import { OpenRouterError, RateLimitError, AuthenticationError, AbortError } from './errors.js';
 import { parseXmlToolCalls, hasXmlToolCalls } from './tools/xmlToolParser.js';
+import { ToolFormatAdapter } from './tools/ToolFormatAdapter.js';
 import { Agent as UndiciAgent } from 'undici';
 
 // Shared HTTP connection pool for keep-alive reuse across all client instances
@@ -367,6 +368,7 @@ export class OpenRouterClient {
   async *chatStream(messages, options = {}) {
     const { onToolCallReady, ...streamOptions } = options;
     const requestId = this.generateRequestId();
+    const startTime = Date.now();
     const payload = this.buildPayload(messages, { ...streamOptions, stream: true });
     
     const { controller, cleanup } = this.createController();
@@ -431,11 +433,20 @@ export class OpenRouterClient {
               const data = trimmed.substring(DATA_PREFIX_LEN).trim();
               
               if (data === doneMarker) {
-                // Emit accumulated tool calls
+                // Emit only remaining un-emitted tool calls (onToolCallReady already dispatched the rest)
                 if (toolCallAccumulator.size > 0) {
-                  yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(toolCallAccumulator), requestId };
+                  const remaining = new Map();
+                  for (const [idx, tc] of toolCallAccumulator) {
+                    if (!tc._emitted) remaining.set(idx, tc);
+                  }
+                  if (remaining.size > 0) {
+                    yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(remaining), requestId };
+                  }
                 }
                 fullContent = contentChunks.length > 0 ? contentChunks.join('') : fullContent;
+                // Track cost for streaming request
+                const duration = Date.now() - startTime;
+                this.trackRequest(requestId, payload, { usage }, duration);
                 yield { type: 'done', content: fullContent, usage, requestId, finishReason: lastFinishReason };
                 return;
               }
@@ -518,6 +529,9 @@ export class OpenRouterClient {
               yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(remaining), requestId };
             }
           }
+          // Track cost for streaming request that ended without [DONE]
+          const duration = Date.now() - startTime;
+          this.trackRequest(requestId, payload, { usage }, duration);
           yield { type: 'done', content: fullContent, usage, requestId, finishReason: lastFinishReason };
         }
       } finally {
@@ -626,14 +640,7 @@ export class OpenRouterClient {
     
     const payload = this.buildPayload(messages, {
       ...options,
-      tools: tools.map(t => ({
-        type: 'function',
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.parameters,
-        },
-      })),
+      tools,
       tool_choice: options.tool_choice || 'auto',
     });
     
@@ -649,7 +656,7 @@ export class OpenRouterClient {
       throw new OpenRouterError('No message in response', 'EMPTY_RESPONSE', { data: response });
     }
     
-    const toolCalls = this.parseToolCalls(message.tool_calls || []);
+    const toolCalls = this.parseToolCalls(message.tool_calls || [], response.model);
     const finishReason = response.choices?.[0]?.finish_reason;
     
     const result = {
@@ -670,23 +677,12 @@ export class OpenRouterClient {
   /**
    * Parse tool calls with robust JSON handling
    */
-  parseToolCalls(rawToolCalls) {
+  parseToolCalls(rawToolCalls, model = '') {
+    const provider = ToolFormatAdapter.detectProvider(model);
     return rawToolCalls.map(tc => {
-      let args = {};
-      try {
-        args = JSON.parse(tc.function.arguments);
-      } catch {
-        try {
-          let fixed = tc.function.arguments.trim();
-          fixed = fixed.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
-          if (!fixed.endsWith('}')) fixed += '}';
-          args = JSON.parse(fixed);
-        } catch {
-          args = { _raw: tc.function.arguments, _error: 'Could not parse arguments' };
-        }
-      }
-      return { id: tc.id, name: tc.function.name, arguments: args };
-    });
+      const normalized = ToolFormatAdapter.normalizeToolCall(tc, provider);
+      return normalized;
+    }).filter(Boolean);
   }
   
   /**
@@ -935,8 +931,21 @@ export class OpenRouterClient {
     };
     
     if (reasoning_effort) payload.reasoning_effort = reasoning_effort;
-    if (tools) payload.tools = tools;
-    if (tool_choice) payload.tool_choice = tool_choice;
+    if (tools) {
+      // Detect provider from model to adapt tool format
+      const targetModel = model || this.defaultModel;
+      const detectedProvider = ToolFormatAdapter.detectProvider(targetModel);
+      const adaptedTools = ToolFormatAdapter.formatToolDefinitions(tools, detectedProvider);
+      // For Google Gemini, tools come as a single object with function_declarations
+      payload.tools = adaptedTools;
+    }
+    if (tool_choice) {
+      const targetModel = model || this.defaultModel;
+      const detectedProvider = ToolFormatAdapter.detectProvider(targetModel);
+      payload.tool_choice = typeof tool_choice === 'string'
+        ? ToolFormatAdapter.getToolChoice(detectedProvider, tool_choice)
+        : tool_choice;
+    }
     if (response_format) payload.response_format = response_format;
     if (plugins) {
       payload.plugins = plugins.map(p =>
@@ -1040,6 +1049,10 @@ export class OpenRouterClient {
     let toolCalls = choice?.message?.tool_calls || [];
     let content = rawContent;
 
+    // Detect provider from response model for normalization
+    const responseModel = data.model || '';
+    const detectedProvider = ToolFormatAdapter.detectProvider(responseModel);
+
     if ((!toolCalls || toolCalls.length === 0) && content && hasXmlToolCalls(content)) {
       const parsed = parseXmlToolCalls(content);
       if (parsed.toolCalls.length > 0) {
@@ -1053,13 +1066,18 @@ export class OpenRouterClient {
         content = parsed.cleanContent || null;
       }
     }
+
+    // Normalize all tool calls to internal standard: { id, name, arguments: OBJECT }
+    const normalizedToolCalls = toolCalls.map(tc =>
+      ToolFormatAdapter.normalizeToolCall(tc, detectedProvider)
+    ).filter(Boolean);
     
     return {
       id: data.id,
       requestId,
       content,
       role: choice?.message?.role,
-      toolCalls,
+      toolCalls: normalizedToolCalls,
       finishReason: choice?.finish_reason,
       model: data.model,
       usage: data.usage,

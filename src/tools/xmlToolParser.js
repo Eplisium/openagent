@@ -1,6 +1,7 @@
 /**
  * XML Tool Call Parser - Enhanced
- * Supports: canonical, inline, Anthropic invoke, function_calls, tool_use formats
+ * Supports: canonical, inline, Anthropic invoke, function_calls, tool_use formats,
+ *           attribute-style tool_call, JSON-in-code-block, bare function call formats
  */
 
 const TOOL_CALL_BLOCK_RE = /<tool_call>([\s\S]*?)<\/tool_call>/gi;

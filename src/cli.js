@@ -463,8 +463,13 @@ export class CLI {
 
     const stats = this.session.agent.getStats();
     const clientStats = this.session.agent.client.getStats();
-    const costStr = clientStats.totalCost > 0
-      ? chalk.yellow(`$${clientStats.totalCost.toFixed(2)}`)
+    const subagentStats = this.session.subagentManager?.getStats() || {};
+    const autoGenStats = this.session.autoGenBridge?.getStats?.() || {};
+    const subagentCost = subagentStats.totalCost || 0;
+    const teamCost = autoGenStats.totalTeamCost || 0;
+    const totalCost = (clientStats.totalCost || 0) + subagentCost + teamCost;
+    const costStr = totalCost > 0
+      ? chalk.yellow(`$${totalCost.toFixed(2)}`)
       : chalk.dim('$0.00');
 
     const elapsedMs = Date.now() - this.sessionStartTime;
@@ -1094,8 +1099,43 @@ const allowFullAccess = args.includes('--full-access') || process.env.OPENAGENT_
 const permissions = { allowFileDelete: true, allowFullAccess };
 
 if (resolvedArgv && resolvedFilename === resolvedArgv) {
+  // Handle --daemon flag: run as headless gateway server
+  if (args.includes('--daemon')) {
+    const daemonPort = parseInt(args[args.indexOf('--port') + 1], 10) || undefined;
+    const daemonChannels = args.includes('--channels')
+      ? args[args.indexOf('--channels') + 1]
+      : undefined;
+
+    import('./gateway/GatewayDaemon.js').then(({ GatewayDaemon }) => {
+      const daemon = new GatewayDaemon({
+        ...(daemonPort && { port: daemonPort }),
+        ...(daemonChannels && { channels: daemonChannels.split(',').map(s => s.trim()) }),
+        sessionDefaults: { allowFullAccess, permissions },
+      });
+      return daemon.start();
+    }).catch((error) => {
+      console.error('Fatal error:', error.message);
+      process.exit(1);
+    });
+
+  // Handle --companion flag: start companion WebSocket server alongside CLI
+  } else if (args.includes('--companion')) {
+    const companionPort = parseInt(args[args.indexOf('--port') + 1], 10) || 3200;
+
+    import('./gateway/CompanionServer.js').then(async ({ CompanionServer }) => {
+      const companion = new CompanionServer({ port: companionPort });
+      await companion.start();
+      const cli = await runCLI({ allowFullAccess, permissions });
+      if (cli?.session) {
+        companion.attachSession(cli.session);
+      }
+    }).catch((error) => {
+      console.error('Fatal error:', error.message);
+      process.exit(1);
+    });
+
   // Handle shell subcommands (e.g., openagent skills list)
-  if (args[0] === 'skills') {
+  } else if (args[0] === 'skills') {
     handleShellSkillsCommand(process.cwd(), args.slice(1)).catch((error) => {
       console.error('Fatal error:', error.message);
       process.exit(1);

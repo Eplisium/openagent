@@ -18,6 +18,18 @@ export class AutoGenBridge {
     this.groupChats = new Map();
     this.teams = new Map();
     this.tempAgents = new Map();
+    this.totalTeamCost = 0;
+  }
+
+  /**
+   * Get cumulative stats for the AutoGen bridge
+   */
+  getStats() {
+    return {
+      totalTeamCost: this.totalTeamCost,
+      teamCount: this.teams.size,
+      groupChatCount: this.groupChats.size,
+    };
   }
 
   createGroupChat(options = {}) {
@@ -238,6 +250,7 @@ export class AutoGenBridge {
           const team = this.teams.get(id);
           if (!team) return { success: false, error: `Team not found: ${id}` };
           const result = withFeedback ? await team.runWithFeedback(task) : await team.run(task);
+          if (result?.cost) this.totalTeamCost += result.cost;
           return { success: true, ...result };
         },
       },

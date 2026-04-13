@@ -230,7 +230,9 @@ export function createGitTools(options = {}) {
       required: ['message'],
     },
     async execute({ cwd = '.', message, amend = false }) {
-      const cmd = `commit -m "${message.replace(/"/g, '\\"')}" ${amend ? '--amend' : ''}`;
+      // Sanitize commit message to prevent command injection
+      const sanitizedMessage = sanitizeGitArgs(message.replace(/"/g, '\\"'));
+      const cmd = `commit -m "${sanitizedMessage}" ${amend ? '--amend' : ''}`;
       const result = await runGit(cmd, cwd);
       return {
         success: result.success,

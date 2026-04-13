@@ -422,7 +422,11 @@ function parseDeepCheckResponse(rawResponse) {
     // Try to extract a JSON object from the response
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      parsed = JSON.parse(jsonMatch[0]);
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch (e) {
+        throw new Error(`LLM response JSON extraction failed: ${e.message}`);
+      }
     } else {
       throw new Error('LLM response did not contain valid JSON');
     }

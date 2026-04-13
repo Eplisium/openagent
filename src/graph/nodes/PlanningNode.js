@@ -94,7 +94,11 @@ function extractJSON(text) {
   // Strip markdown code fences (```json ... ``` or ``` ... ```)
   const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenceMatch) {
-    return JSON.parse(fenceMatch[1].trim());
+    try {
+      return JSON.parse(fenceMatch[1].trim());
+    } catch (e) {
+      throw new SyntaxError(`extractJSON: invalid JSON in code fence: ${e.message}`);
+    }
   }
 
   // Find the first '{' and match its closing '}'
@@ -480,3 +484,4 @@ export function createPlanningNode(options = {}) {
 }
 
 export default createPlanningNode;
+ngNode;

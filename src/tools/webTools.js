@@ -654,7 +654,8 @@ async function searchTavily(query, maxResults) {
     throw createHttpError('tavily search', response, body);
   }
 
-  const data = JSON.parse(body);
+  let data;
+  try { data = JSON.parse(body); } catch (e) { throw new Error(`Tavily returned invalid JSON: ${e.message}`); }
   return {
     results: (data?.results || []).map(r => ({
       title: r.title,
@@ -685,8 +686,8 @@ async function searchSerper(query, maxResults) {
   if (!response.ok) {
     throw createHttpError('serper search', response, body);
   }
-
-  const data = JSON.parse(body);
+  let data;
+  try { data = JSON.parse(body); } catch (e) { throw new Error(`Serper returned invalid JSON: ${e.message}`); }
   return (data?.organic || []).slice(0, maxResults).map(r => ({
     title: r.title,
     url: r.link,
@@ -715,7 +716,8 @@ async function searchBrave(query, maxResults) {
     throw createHttpError('brave search', response, body);
   }
 
-  const data = JSON.parse(body);
+  let data;
+  try { data = JSON.parse(body); } catch (e) { throw new Error(`Brave returned invalid JSON: ${e.message}`); }
   return (data?.web?.results || []).slice(0, maxResults).map(r => ({
     title: r.title,
     url: r.url,

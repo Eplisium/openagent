@@ -489,6 +489,24 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     }
   }
 
+  /**
+   * Inject additional text into the system prompt without replacing it.
+   * Appends the text to the existing system message (or creates one).
+   * @param {string} text - Text to append to the system prompt
+   */
+  injectSystemMessage(text) {
+    if (!text) return;
+    const systemMessageIndex = this.messages.findIndex(m => m.role === 'system');
+    if (systemMessageIndex >= 0) {
+      this.messages[systemMessageIndex].content += '\n\n' + text;
+      this.systemPrompt = this.messages[systemMessageIndex].content;
+      this.recalculateEstimatedTokens();
+    } else if (this.systemPrompt) {
+      this.systemPrompt += '\n\n' + text;
+      this.setMessages([{ role: 'system', content: this.systemPrompt }, ...this.messages]);
+    }
+  }
+
   setMaxContextTokens(maxContextTokens) {
     if (Number.isFinite(maxContextTokens) && maxContextTokens > 0) {
       this.maxContextTokens = maxContextTokens;
@@ -891,7 +909,13 @@ Task: ${userInput}`;
         }
       }
 
-      const plan = JSON.parse(jsonStr);
+      let plan;
+      try {
+        plan = JSON.parse(jsonStr);
+      } catch (e) {
+        logger.warn('Failed to parse plan JSON:', e.message);
+        return null;
+      }
 
       if (!Array.isArray(plan) || plan.length === 0) return null;
 
@@ -1158,13 +1182,11 @@ Task: ${userInput}`;
           const idx = allToolCalls.length;
           allToolCalls.push(toolCall);
 
-          if (this.onToolStart) this.onToolStart(toolCall.name, toolCall.arguments);
-
           // Dispatch immediately — don't wait for other tool calls
+          // (executeSingleToolCall fires onToolStart/onToolEnd internally)
           const promise = this.executeSingleToolCall(toolCall)
             .then(result => {
               completedResults.set(idx, result);
-              if (this.onToolEnd) this.onToolEnd(toolCall.name, result.result);
               return result;
             })
             .catch(err => {
@@ -1175,7 +1197,6 @@ Task: ${userInput}`;
                 result: { success: false, error: err.message },
               };
               completedResults.set(idx, errResult);
-              if (this.onToolEnd) this.onToolEnd(toolCall.name, errResult.result);
               return errResult;
             });
 
@@ -1295,11 +1316,10 @@ Task: ${userInput}`;
       for (let i = 0; i < finalToolCalls.length; i++) {
         if (!dispatchedPromises.has(i)) {
           const tc = finalToolCalls[i];
-          if (this.onToolStart) this.onToolStart(tc.name, tc.arguments);
+          // executeSingleToolCall fires onToolStart/onToolEnd internally
           const promise = this.executeSingleToolCall(tc)
             .then(result => {
               completedResults.set(i, result);
-              if (this.onToolEnd) this.onToolEnd(tc.name, result.result);
               return result;
             })
             .catch(err => {
@@ -1310,7 +1330,6 @@ Task: ${userInput}`;
                 result: { success: false, error: err.message },
               };
               completedResults.set(i, errResult);
-              if (this.onToolEnd) this.onToolEnd(tc.name, errResult.result);
               return errResult;
             });
           dispatchedPromises.set(i, promise);

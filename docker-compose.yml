@@ -1,0 +1,55 @@
+# OpenAgent — Docker Compose Configuration
+# Usage:
+#   docker compose up -d              # Start in daemon mode
+#   docker compose up -d --build      # Rebuild and start
+#   docker compose logs -f openagent  # View logs
+#   docker compose down               # Stop
+
+services:
+  openagent:
+    build: .
+    container_name: openagent
+    restart: unless-stopped
+
+    # Run in gateway daemon mode
+    command: ["--daemon", "--port", "3000"]
+
+    ports:
+      - "${GATEWAY_PORT:-3000}:3000"   # HTTP API
+      - "${AGUI_PORT:-3100}:3100"       # AG-UI SSE
+      - "${COMPANION_PORT:-3200}:3200"  # Companion WebSocket
+
+    environment:
+      - NODE_ENV=production
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - GATEWAY_PORT=3000
+      - GATEWAY_HOST=0.0.0.0
+      - GATEWAY_MAX_SESSIONS=${GATEWAY_MAX_SESSIONS:-10}
+      - GATEWAY_SESSION_TIMEOUT_MS=${GATEWAY_SESSION_TIMEOUT_MS:-1800000}
+      - GATEWAY_AUTH_TOKEN=${GATEWAY_AUTH_TOKEN:-}
+      - GATEWAY_CHANNELS=${GATEWAY_CHANNELS:-http}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - DAILY_BUDGET_USD=${DAILY_BUDGET_USD:-50}
+
+    volumes:
+      # Persist sessions, memory, outcomes across restarts
+      - openagent-data:/home/openagent/.openagent
+
+      # Mount your project directory for file access
+      - ${PROJECT_DIR:-./workspace}:/workspace
+
+    working_dir: /workspace
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+        reservations:
+          memory: 256M
+          cpus: "0.5"
+
+volumes:
+  openagent-data:
+    driver: local

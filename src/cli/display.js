@@ -512,15 +512,21 @@ export function printSessionStats(cli) {
   const stats = cli.session.agent.getStats();
   const contextStats = cli.session.agent.getContextStats();
   const clientStats = cli.session.agent.client.getStats();
+  const subagentStats = cli.session.subagentManager?.getStats() || {};
+  const autoGenStats = cli.session.autoGenBridge?.getStats?.() || {};
   const elapsedMs = Date.now() - cli.sessionStartTime;
   const elapsedStr = formatElapsedTime(elapsedMs);
   const t = cli.theme;
+
+  const subagentCost = subagentStats.totalCost || 0;
+  const teamCost = autoGenStats.totalTeamCost || 0;
+  const totalCost = (clientStats.totalCost || 0) + subagentCost + teamCost;
 
   console.log('');
   console.log(chalk.hex(t.header)(`  ══ Session Stats ══`));
   console.log(`  ${chalk.hex(t.text)('Tokens:')}   ${chalk.white(stats.totalTokensUsed.toLocaleString())}`);
   console.log(`  ${chalk.hex(t.text)('Context:')}   ${chalk.white(contextStats.usedTokens.toLocaleString())}/${chalk.white(contextStats.maxTokens.toLocaleString())} (${contextStats.percent}%)`);
-  console.log(`  ${chalk.hex(t.text)('Cost:')}      ${chalk.yellow('$' + (clientStats.totalCost || 0).toFixed(4))}`);
+  console.log(`  ${chalk.hex(t.text)('Cost:')}      ${chalk.yellow('$' + totalCost.toFixed(4))}`);
   console.log(`  ${chalk.hex(t.text)('Tools:')}     ${chalk.white(stats.toolExecutions)} calls`);
   console.log(`  ${chalk.hex(t.text)('Iterations:')} ${chalk.white(stats.iterations)}`);
   console.log(`  ${chalk.hex(t.text)('Time:')}      ${chalk.white(elapsedStr)}`);
@@ -758,21 +764,35 @@ export function showHelp(_cli) {
  */
 export function showCost(cli) {
   const clientStats = cli.session.agent.client.getStats();
+  const subagentStats = cli.session.subagentManager?.getStats() || {};
+  const autoGenStats = cli.session.autoGenBridge?.getStats?.() || {};
   const sessionDuration = Date.now() - cli.sessionStartTime;
   const sessionMinutes = Math.floor(sessionDuration / 60000);
 
-  console.log(boxen(
-    `${chalk.bold('Session Cost')}\n\n` +
+  const subagentCost = subagentStats.totalCost || 0;
+  const teamCost = autoGenStats.totalTeamCost || 0;
+  const totalCost = clientStats.totalCost + subagentCost + teamCost;
+
+  let content = `${chalk.bold('Session Cost')}\n\n` +
     `${chalk.cyan('Session Duration:')} ${sessionMinutes} minutes\n` +
+    `${chalk.cyan('Main Agent Cost:')} $${clientStats.totalCost.toFixed(6)}\n`;
+
+  if (subagentCost > 0) {
+    content += `${chalk.cyan('Subagent Cost:')} $${subagentCost.toFixed(6)}\n`;
+  }
+  if (teamCost > 0) {
+    content += `${chalk.cyan('Team Cost:')} $${teamCost.toFixed(6)}\n`;
+  }
+
+  content += `${chalk.bold('Total Cost:')} $${totalCost.toFixed(6)}\n` +
+    `${chalk.cyan('Budget Used:')} $${clientStats.budgetUsed.toFixed(6)} / $${clientStats.budgetLimit}\n` +
+    `${chalk.cyan('Budget Remaining:')} $${clientStats.budgetRemaining.toFixed(6)}\n` +
     `${chalk.cyan('Total Requests:')} ${clientStats.requestCount}\n` +
-    `${chalk.cyan('Total Cost:')} $${clientStats.totalCost}\n` +
-    `${chalk.cyan('Budget Used:')} $${clientStats.budgetUsed} / $${clientStats.budgetLimit}\n` +
-    `${chalk.cyan('Budget Remaining:')} $${clientStats.budgetRemaining}\n` +
     `${chalk.cyan('Avg Duration:')} ${clientStats.avgDuration}\n` +
     `${chalk.cyan('Cache Size:')} ${clientStats.cacheSize} entries\n` +
-    `${chalk.cyan('Tasks Completed:')} ${cli.taskCount}`,
-    { ...box.stats, title: '💰 Cost' }
-  ));
+    `${chalk.cyan('Tasks Completed:')} ${cli.taskCount}`;
+
+  console.log(boxen(content, { ...box.stats, title: '💰 Cost' }));
 }
 
 /**

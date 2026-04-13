@@ -165,6 +165,16 @@ export const CONFIG = {
   CLIENT_REQUEST_HISTORY_TRIM: 50, // Reduced from 100
   CLIENT_RATE_LIMIT_DEFAULT_WAIT_MS: 1000,
   CLIENT_RATE_LIMIT_MAX_WAIT_MS: 10000,
+
+  // ═══════════════════════════════════════════════════════════════
+  // 🚀 Gateway Daemon
+  // ═══════════════════════════════════════════════════════════════
+  GATEWAY_PORT: parseInt(process.env.GATEWAY_PORT, 10) || 3000,
+  GATEWAY_HOST: process.env.GATEWAY_HOST || '0.0.0.0',
+  GATEWAY_MAX_SESSIONS: parseInt(process.env.GATEWAY_MAX_SESSIONS, 10) || 10,
+  GATEWAY_SESSION_TIMEOUT_MS: parseInt(process.env.GATEWAY_SESSION_TIMEOUT_MS, 10) || 30 * 60 * 1000,
+  GATEWAY_AUTH_TOKEN: process.env.GATEWAY_AUTH_TOKEN || null,
+  GATEWAY_CHANNELS: process.env.GATEWAY_CHANNELS || 'http',
 };
 
 /**

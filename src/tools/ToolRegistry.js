@@ -13,6 +13,7 @@
 
 import chalk from 'chalk';
 import { ToolErrorType } from '../errors.js';
+import { ToolFormatAdapter } from './ToolFormatAdapter.js';
 
 export { ToolErrorType } from '../errors.js';
 
@@ -139,6 +140,18 @@ export class ToolRegistry {
     }
     this._cachedToolDefs = defs;
     return defs;
+  }
+
+  /**
+   * Get tool definitions formatted for a specific provider.
+   * Uses ToolFormatAdapter to convert from internal format to provider-specific format.
+   * 
+   * @param {string} provider - Target provider ('openai', 'anthropic', 'google', 'mistral', etc.)
+   * @returns {Array<Object>|Object} Tool definitions in provider-specific format
+   */
+  getFunctionDefinitionsForProvider(provider) {
+    const internalDefs = this.getToolDefinitions();
+    return ToolFormatAdapter.formatToolDefinitions(internalDefs, provider);
   }
 
   /**

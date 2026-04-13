@@ -30,6 +30,8 @@ import { createGraphTools } from '../tools/graphTools.js';
 import { AutoGenBridge } from '../autogen/AutoGenBridge.js';
 import { WorkflowGraph } from '../graph/index.js';
 import { FileCheckpointer as GraphFileCheckpointer } from '../graph/checkpointers/FileCheckpointer.js';
+import { OutcomeTracker } from './OutcomeTracker.js';
+import { PromptEvolutionEngine } from './PromptEvolutionEngine.js';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -88,6 +90,9 @@ export class AgentSession {
       workingDir: this.workingDir,
       activeWorkspaceDir: this.activeWorkspace?.workspaceDir || null,
     };
+    this.channelContext = options.channelContext || { type: 'cli', id: 'local' };
+    this._activeSkill = options.activeSkill || 'none';
+    this._activeSpecialization = options.activeSpecialization || 'general';
 
     const toolPathOptions = {
       getBaseDir: () => this.workingDir,
@@ -203,6 +208,19 @@ export class AgentSession {
     // ─── AutoGen Integration Layer ───────────────────────────────
     this.autoGenBridge = new AutoGenBridge(this);
     this.autoGenBridge.registerTools(this.toolRegistry);
+
+    // ─── Self-Improvement Layer (Outcome Tracking + Prompt Evolution) ──
+    this.outcomeTracker = new OutcomeTracker({
+      outcomesDir: this.workspaceManager.openAgentDir,
+    });
+    this.promptEvolution = new PromptEvolutionEngine(this.outcomeTracker, {
+      evolutionsDir: path.join(this.workspaceManager.openAgentDir, 'evolutions'),
+    });
+    // Load persisted data (async — don't block constructor)
+    this._initPromise = Promise.all([
+      this.outcomeTracker.load(),
+      this.promptEvolution.load(),
+    ]).catch(err => console.warn('[AgentSession] Self-improvement init warning:', err.message));
   }
 
   // ─── Graph Workflow Methods ──────────────────────────────────────
@@ -457,6 +475,9 @@ export class AgentSession {
    * Run a task
    */
   async run(task) {
+    // Ensure self-improvement data is loaded
+    if (this._initPromise) await this._initPromise;
+
     await this.prepareTaskWorkspace(task);
     this.metadata.updated = new Date().toISOString();
     this.metadata.lastTask = task.substring(0, 100);
@@ -464,8 +485,21 @@ export class AgentSession {
     // Load hooks
     await this.hookManager.load();
     
+    // Inject evolved prompt guidance from past outcomes
+    const evolutionGuidance = this.promptEvolution.analyze({
+      skill: this._activeSkill || 'none',
+      specialization: this._activeSpecialization || 'general',
+      taskType: this._classifyTaskType(task),
+    });
+    if (evolutionGuidance) {
+      await this.agent.injectSystemMessage(evolutionGuidance);
+    }
+
     // Create checkpoint before running
     this.createCheckpoint('before_task');
+
+    const startTime = Date.now();
+    const taskType = this._classifyTaskType(task);
     
     try {
       const result = await this.agent.run(task);
@@ -476,11 +510,45 @@ export class AgentSession {
       
       // Create checkpoint after successful run
       this.createCheckpoint('after_task');
+
+      // Record successful outcome
+      await this.outcomeTracker.record({
+        skill: this._activeSkill || 'none',
+        specialization: this._activeSpecialization || 'general',
+        taskType,
+        success: true,
+        durationMs: Date.now() - startTime,
+        taskSummary: task.substring(0, 200),
+      });
+      await this.outcomeTracker.flush();
       
       return result;
     } catch (error) {
       // Run stop hooks on error
       await this.hookManager.runStop({ reason: 'error', error: error.message });
+
+      // Record failed outcome
+      await this.outcomeTracker.record({
+        skill: this._activeSkill || 'none',
+        specialization: this._activeSpecialization || 'general',
+        taskType,
+        success: false,
+        durationMs: Date.now() - startTime,
+        errorCategory: this._classifyError(error),
+        errorMessage: error.message,
+        taskSummary: task.substring(0, 200),
+      });
+      await this.outcomeTracker.flush();
+
+      // Learn from the failure
+      await this.promptEvolution.learn({
+        skill: this._activeSkill,
+        specialization: this._activeSpecialization,
+        taskType,
+        success: false,
+        failureReason: error.message,
+      });
+
       throw error;
     }
   }
@@ -965,6 +1033,44 @@ export class AgentSession {
         teams: this.autoGenBridge?.teams?.size || 0,
       },
     };
+  }
+
+  // ─── Self-Improvement Helpers ──────────────────────────────────
+
+  /**
+   * Classify a task into a type category for outcome tracking
+   * @private
+   */
+  _classifyTaskType(task) {
+    const lower = task.toLowerCase();
+    if (/git\s+(commit|push|pull|branch|merge|rebase)/.test(lower)) return 'git-operation';
+    if (/write|create|implement|build|add/.test(lower) && /file|function|class|module|component/.test(lower)) return 'code-write';
+    if (/edit|fix|update|modify|refactor|change/.test(lower)) return 'code-edit';
+    if (/test|spec|jest|vitest|mocha/.test(lower)) return 'testing';
+    if (/review|audit|check|analyze/.test(lower)) return 'code-review';
+    if (/search|find|grep|look/.test(lower)) return 'search';
+    if (/install|npm|yarn|pnpm|pip|cargo/.test(lower)) return 'dependency';
+    if (/deploy|build|compile|bundle/.test(lower)) return 'build-deploy';
+    if (/read|show|list|explain|describe|what is/.test(lower)) return 'exploration';
+    if (/debug|error|fix|bug|issue|problem/.test(lower)) return 'debugging';
+    return 'general';
+  }
+
+  /**
+   * Classify an error into a category for outcome tracking
+   * @private
+   */
+  _classifyError(error) {
+    const msg = (error.message || '').toLowerCase();
+    if (msg.includes('timeout') || msg.includes('timed out')) return 'TIMEOUT';
+    if (msg.includes('permission') || msg.includes('eacces') || msg.includes('forbidden')) return 'PERMISSION';
+    if (msg.includes('enoent') || msg.includes('not found') || msg.includes('no such file')) return 'NOT_FOUND';
+    if (msg.includes('network') || msg.includes('econnrefused') || msg.includes('fetch failed')) return 'NETWORK';
+    if (msg.includes('rate limit') || msg.includes('429')) return 'RATE_LIMIT';
+    if (msg.includes('parse') || msg.includes('json')) return 'PARSE_ERROR';
+    if (msg.includes('edit mismatch') || msg.includes('text not found')) return 'EDIT_MISMATCH';
+    if (msg.includes('budget') || msg.includes('cost')) return 'BUDGET_EXCEEDED';
+    return 'UNKNOWN';
   }
 }
 
