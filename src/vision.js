@@ -3,7 +3,7 @@
  * Handles image encoding, MIME type detection, and multimodal message building
  */
 
-import fs from 'fs-extra';
+import fs from './utils/fs-compat.js';
 import path from 'path';
 
 /**

@@ -3,13 +3,13 @@
  * Dynamic model fetching from OpenRouter with favorites, sorting, and caching
  */
 
-import fs from 'fs-extra';
+import fs from './utils/fs-compat.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import chalk from 'chalk';
+import chalk from './utils/chalk-compat.js';
 // ora removed — not used
 import boxen from 'boxen';
-import inquirer from 'inquirer';
+import inquirer from './utils/inquirer-compat.js';
 import { promptWithTerminalReset } from './cli/terminal.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

@@ -3,7 +3,7 @@
  * Workflow templates, command definitions, health checks, and UI constants.
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // 🎯 Workflow Templates
@@ -255,7 +255,7 @@ export const HEALTH_CHECKS = {
     name: 'Disk Space',
     check: async () => {
       try {
-        const fs = await import('fs-extra');
+        const fs = await import('../utils/fs-compat.js');
         await fs.default.stat(process.cwd());
         return { status: 'healthy', message: 'Disk access OK' };
       } catch (error) {

@@ -8,10 +8,10 @@
  * - Backward compatible with existing code
  */
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 import os from 'os';
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import { EnhancedSkillParser } from './EnhancedSkillParser.js';
 
 // ═══════════════════════════════════════════════════════════════════

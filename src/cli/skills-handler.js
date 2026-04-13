@@ -13,8 +13,8 @@
  * - /skills update [id] — Update skills (all or specific)
  */
 
-import chalk from 'chalk';
-import fs from 'fs-extra';
+import chalk from '../utils/chalk-compat.js';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 import os from 'os';
 import { SkillManager } from '../skills/SkillManager.js';

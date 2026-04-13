@@ -3,8 +3,8 @@
  * Persistent local state management for CLI preferences and history.
  */
 
-import chalk from 'chalk';
-import fs from 'fs-extra';
+import chalk from '../utils/chalk-compat.js';
+import fs from '../utils/fs-compat.js';
 import { VERSION, STATE_DIR, STATE_FILE, DEFAULT_STATE } from './state.js';
 
 /**

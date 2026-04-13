@@ -2,7 +2,7 @@
  * Health check diagnostics for OpenAgent CLI
  */
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // 🏥 Health Check Diagnostics

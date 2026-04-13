@@ -3,8 +3,8 @@
  * Making the CLI experience beautiful and functional
  */
 
-import chalk from 'chalk';
-import ora from 'ora';
+import chalk from './utils/chalk-compat.js';
+import ora from './utils/ora-compat.js';
 import boxen from 'boxen';
 import gradient from 'gradient-string';
 import Table from 'cli-table3';

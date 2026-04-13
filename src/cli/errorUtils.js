@@ -3,7 +3,7 @@
  * Error categorization, smart suggestions, and error display.
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import boxen from 'boxen';
 import { boxStyles } from '../utils.js';
 

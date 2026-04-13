@@ -1,5 +1,5 @@
-import chalk from 'chalk';
-import fs from 'fs-extra';
+import chalk from '../utils/chalk-compat.js';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 import { EventBus } from './EventBus.js';
 import { ConversationManager } from './ConversationManager.js';

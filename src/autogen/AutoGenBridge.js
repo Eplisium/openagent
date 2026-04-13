@@ -1,4 +1,4 @@
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import { EventBus } from './EventBus.js';
 import { GroupChat } from './GroupChat.js';
 import { Team } from './Team.js';

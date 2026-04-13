@@ -3,7 +3,7 @@
  * Provides rich terminal output with proper formatting for code, headers, links, etc.
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import { marked } from 'marked';
 import { highlightCode } from './syntaxHighlight.js';
 

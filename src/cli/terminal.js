@@ -1,4 +1,4 @@
-import inquirer from 'inquirer';
+import inquirer from '../utils/inquirer-compat.js';
 
 const TERMINAL_RESET_DELAY_MS = 20;
 

@@ -11,11 +11,11 @@
  * They're configured in .openagent/hooks.json
  */
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 
 const execAsync = promisify(exec);
 

@@ -125,6 +125,15 @@ export class OpenRouterClient {
     // Response time tracking for adaptive timeouts
     this._recentResponseTimes = [];
     this._maxResponseTimeSamples = 20;
+
+    // Circuit breaker for upstream failure protection
+    this.circuitBreaker = {
+      state: 'closed', // closed, open, half-open
+      failureCount: 0,
+      failureThreshold: 5,
+      resetTimeoutMs: 30000,
+      lastFailureTime: null,
+    };
   }
   
   /**
@@ -284,6 +293,73 @@ export class OpenRouterClient {
     }
     this.activeControllers.clear();
   }
+
+  // ═══════════════════════════════════════════════════════════════
+  // ⚡ Circuit Breaker
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Check circuit breaker state before making a request.
+   * Throws OpenRouterError with code 'CIRCUIT_OPEN' if the circuit is open
+   * and the reset timeout has not yet elapsed.
+   */
+  checkCircuitBreaker() {
+    const cb = this.circuitBreaker;
+    if (cb.state === 'closed') return;
+
+    if (cb.state === 'open') {
+      const elapsed = Date.now() - cb.lastFailureTime;
+      if (elapsed < cb.resetTimeoutMs) {
+        throw new OpenRouterError(
+          `Circuit breaker is open — upstream failures detected. Retry after ${Math.ceil((cb.resetTimeoutMs - elapsed) / 1000)}s`,
+          'CIRCUIT_OPEN',
+          {
+            failureCount: cb.failureCount,
+            resetTimeoutMs: cb.resetTimeoutMs,
+            elapsed,
+          }
+        );
+      }
+      // Cooldown elapsed — transition to half-open for a probe request
+      cb.state = 'half-open';
+      logger.info('Circuit breaker transitioning to half-open (probe request)');
+    }
+    // half-open: allow the request through (it's a probe)
+  }
+
+  /**
+   * Record a successful request — resets the circuit breaker to closed.
+   */
+  recordCircuitSuccess() {
+    const cb = this.circuitBreaker;
+    if (cb.state === 'half-open') {
+      logger.info('Circuit breaker probe succeeded — closing circuit');
+    }
+    cb.state = 'closed';
+    cb.failureCount = 0;
+    cb.lastFailureTime = null;
+  }
+
+  /**
+   * Record a failed request — increments failure count and may open the circuit.
+   */
+  recordCircuitFailure() {
+    const cb = this.circuitBreaker;
+    cb.failureCount++;
+    cb.lastFailureTime = Date.now();
+
+    if (cb.state === 'half-open') {
+      // Probe failed — re-open immediately
+      cb.state = 'open';
+      logger.warn('Circuit breaker probe failed — re-opening circuit');
+      return;
+    }
+
+    if (cb.failureCount >= cb.failureThreshold) {
+      cb.state = 'open';
+      logger.warn(`Circuit breaker opened after ${cb.failureCount} consecutive failures`);
+    }
+  }
   
   /**
    * 🎯 Main Chat Completion Method
@@ -334,25 +410,33 @@ export class OpenRouterClient {
    * Execute the actual chat request with retry logic
    */
   async executeChatRequest(payload, requestId, startTime, cacheKey) {
+    // Circuit breaker gate — throws if circuit is open
+    this.checkCircuitBreaker();
+
     try {
       const response = await this.executeWithRetry(
         () => this.postJSON('/chat/completions', payload),
         this.maxRetries
       );
-      
+
       const duration = Date.now() - startTime;
       const result = this.processResponse(response, requestId, duration);
-      
+
       // Track request and cost
       this.trackRequest(requestId, payload, result, duration);
-      
+
       // Cache successful responses
       if (result.content) {
         this.storeInCache(cacheKey, result);
       }
-      
+
+      // Circuit breaker: success resets failure count
+      this.recordCircuitSuccess();
+
       return result;
     } catch (error) {
+      // Circuit breaker: failure increments count, may open circuit
+      this.recordCircuitFailure();
       throw this.enhanceError(error, requestId);
     }
   }
@@ -386,14 +470,14 @@ export class OpenRouterClient {
           ...this.headers,
         },
         body: JSON.stringify(payload),
-        signal: controller.signal,
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(this.timeout)]),
         dispatcher: httpAgent,
       });
       
       // Handle non-streaming errors
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw this.handleHTTPError(response.status, errorData);
+        throw this.handleHTTPError(response.status, errorData, response);
       }
       
       if (!response.body) {
@@ -818,7 +902,7 @@ export class OpenRouterClient {
           ...this.headers,
         },
         body: JSON.stringify(body),
-        signal: controller.signal,
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]),
         dispatcher: httpAgent,
       });
       
@@ -828,7 +912,7 @@ export class OpenRouterClient {
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw this.handleHTTPError(response.status, errorData);
+        throw this.handleHTTPError(response.status, errorData, response);
       }
       
       return await response.json();
@@ -859,13 +943,13 @@ export class OpenRouterClient {
           'Connection': 'keep-alive',
           ...this.headers,
         },
-        signal: controller.signal,
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]),
         dispatcher: httpAgent,
       });
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw this.handleHTTPError(response.status, errorData);
+        throw this.handleHTTPError(response.status, errorData, response);
       }
       
       return await response.json();
@@ -882,13 +966,21 @@ export class OpenRouterClient {
   /**
    * Handle HTTP errors into typed errors
    */
-  handleHTTPError(status, data) {
+  handleHTTPError(status, data, response = null) {
     switch (status) {
       case 401:
         return new AuthenticationError(data.error?.message || 'Invalid API key', data);
       case 429: {
-        // Respect Retry-After header if present, otherwise use fallback
-        const retryAfter = data.retry_after || data.retryAfter || null;
+        // Respect Retry-After header if present, otherwise use fallback from body
+        let retryAfter = data.retry_after || data.retryAfter || null;
+        // Parse Retry-After response header (can be seconds or HTTP-date)
+        if (!retryAfter && response) {
+          const headerVal = response.headers?.get?.('retry-after');
+          if (headerVal) {
+            const asNum = Number(headerVal);
+            retryAfter = Number.isFinite(asNum) ? asNum : headerVal; // seconds or ISO/date string
+          }
+        }
         return new RateLimitError(data.error?.message || 'Rate limit exceeded', retryAfter, data);
       }
       case 400:
@@ -1191,8 +1283,24 @@ export class OpenRouterClient {
     this.clearCache();
     this.inFlightRequests.clear();
     this.startCacheCleanup();
+    this.startCacheCleanup();
   }
-  
+
+  /**
+   * 🏥 Health Check — minimal API probe
+   * Returns { healthy, latencyMs, error } without throwing.
+   */
+  async healthCheck() {
+    const start = Date.now();
+    try {
+      // Minimal call: list models (cheap, no token cost)
+      await this.getJSON('/models', 10000);
+      return { healthy: true, latencyMs: Date.now() - start, error: null };
+    } catch (error) {
+      return { healthy: false, latencyMs: Date.now() - start, error: error.message };
+    }
+  }
+
   /**
    * 🔒 Destroy the client - cleanup all resources
    * Call this when done with the client to prevent memory leaks

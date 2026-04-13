@@ -51,17 +51,30 @@ export class Logger {
     this.prefix = options.prefix || 'openagent';
     this.timestamp = options.timestamp !== false;
     this._colors = isTTY() ? getColors() : {};
+    this.correlationId = null;
   }
 
   /**
    * Create child logger with additional prefix
    */
   child(additionalPrefix) {
-    return new Logger({
+    const child = new Logger({
       level: this.level,
       prefix: this.prefix + ':' + additionalPrefix,
       timestamp: this.timestamp,
     });
+    child.correlationId = this.correlationId;
+    return child;
+  }
+
+  /**
+   * Create a logger bound to a correlation ID
+   */
+  withCorrelation(id) {
+    const child = new Logger(this.prefix);
+    child.level = this.level;
+    child.correlationId = id;
+    return child;
   }
 
   /**
@@ -80,6 +93,7 @@ export class Logger {
       level: level.toUpperCase(),
       msg,
       prefix: this.prefix,
+      correlationId: this.correlationId || undefined,
     };
 
     if (data !== undefined) {

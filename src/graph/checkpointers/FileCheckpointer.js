@@ -5,7 +5,7 @@
  */
 
 import path from 'path';
-import fs from 'fs-extra';
+import fs from '../../utils/fs-compat.js';
 import { BaseCheckpointer } from './BaseCheckpointer.js';
 
 /** Maximum number of checkpoints retained per thread file. */

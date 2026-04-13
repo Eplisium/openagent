@@ -5,7 +5,7 @@
  * Specification: https://a2aprotocol.io
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import http from 'http';
 // https removed — not used
 import { URL } from 'url';

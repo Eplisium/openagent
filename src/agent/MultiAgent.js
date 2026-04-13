@@ -10,7 +10,7 @@ import { createFileTools } from '../tools/fileTools.js';
 import { createShellTools } from '../tools/shellTools.js';
 import { webTools } from '../tools/webTools.js';
 import { createGitTools } from '../tools/gitTools.js';
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 
 /**
  * Specialized agent roles

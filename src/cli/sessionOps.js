@@ -3,11 +3,11 @@
  * Save, load, export, undo, diff, checkpoints, and session management.
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import boxen from 'boxen';
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
-import ora from 'ora';
+import ora from '../utils/ora-compat.js';
 import { AgentSession } from '../agent/AgentSession.js';
 import { boxStyles } from '../utils.js';
 import { promptWithTerminalReset } from './terminal.js';
@@ -23,6 +23,8 @@ const box = boxStyles;
  * Save the current session
  */
 export async function saveSession(cli) {
+  // Sync CLI-level cost/session state before saving
+  if (cli._syncSessionCostMeta) cli._syncSessionCostMeta();
   const result = await cli.session.save();
   if (result.success) {
     cli.lastSaveTime = Date.now();
@@ -72,6 +74,16 @@ export async function loadSession(cli) {
   if (loaded) {
     cli.session = loaded;
     cli.syncSessionModelState(cli.session.agent.model);
+
+    // Restore CLI-level session tracking from loaded session
+    if (loaded._cliSessionMeta) {
+      const meta = loaded._cliSessionMeta;
+      if (meta.sessionStartTime) cli.sessionStartTime = meta.sessionStartTime;
+      if (meta.totalCost != null) cli.totalCost = meta.totalCost;
+      if (meta.totalTokens != null) cli.totalTokens = meta.totalTokens;
+      if (meta.taskCount != null) cli.taskCount = meta.taskCount;
+    }
+
     console.log(chalk.green(`✓ Loaded ${sessionId}`));
     console.log(chalk.gray(`  Model: ${chalk.cyan(cli.session.agent.model)}`));
     if (cli.session.activeWorkspace?.workspaceDir) {
@@ -132,6 +144,8 @@ async function sessionSaveWithName(cli, name) {
   const checkpointId = cli.session.createCheckpoint(label);
   console.log(chalk.green(`✓ Checkpoint created: ${chalk.cyan(checkpointId)}`));
 
+  // Sync CLI-level cost/session state before saving
+  if (cli._syncSessionCostMeta) cli._syncSessionCostMeta();
   await cli.session.save();
   console.log(chalk.green(`✓ Session saved`));
 }

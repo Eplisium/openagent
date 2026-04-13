@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import fs from 'fs-extra';
+import fs from '../src/utils/fs-compat.js';
 import os from 'os';
 import path from 'path';
 

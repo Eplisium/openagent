@@ -10,10 +10,10 @@
  * - Progressive loading: First 200 lines of MEMORY.md auto-load
  */
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 import os from 'os';
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // 📋 Constants

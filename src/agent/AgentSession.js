@@ -4,7 +4,7 @@
  */
 
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 import { CONFIG } from '../config.js';
 import { Agent } from './Agent.js';
@@ -221,6 +221,28 @@ export class AgentSession {
       this.outcomeTracker.load(),
       this.promptEvolution.load(),
     ]).catch(err => console.warn('[AgentSession] Self-improvement init warning:', err.message));
+  }
+
+  /**
+   * Full cleanup for memory leak prevention.
+   * Tears down subagent manager, aborts all active requests, and clears timers.
+   */
+  cleanup() {
+    // Clean up subagent manager (aborts subagents, clears timers, stops cleanup interval)
+    try {
+      this.subagentManager?.cleanup();
+    } catch { /* best-effort */ }
+
+    // Stop OpenRouter client cache cleanup and abort in-flight requests
+    try {
+      this.agent?.client?.stopCacheCleanup?.();
+    } catch { /* best-effort */ }
+    try {
+      this.agent?.client?.abortAll?.();
+    } catch { /* best-effort */ }
+
+    // Clear active graph executions
+    this.activeGraphs.clear();
   }
 
   // ─── Graph Workflow Methods ──────────────────────────────────────
@@ -671,6 +693,14 @@ export class AgentSession {
       baseCheckpointId: prevCheckpoint?.id || null,
       totalMessages: currentMessages.length,
       totalHistory: currentHistory.length,
+      costSnapshot: (() => {
+        const cs = this.agent?.client?.getStats?.() || {};
+        return {
+          totalCost: cs.totalCost || 0,
+          budgetUsed: cs.budgetUsed || 0,
+          requestCount: cs.requestCount || 0,
+        };
+      })(),
     };
 
     this.checkpoints.push(checkpoint);
@@ -772,6 +802,9 @@ export class AgentSession {
   async save() {
     await this.workspaceManager.ensureBaseDirs();
     
+    const subagentStats = this.subagentManager?.getStats?.() || {};
+    const autoGenStats = this.autoGenBridge?.getStats?.() || {};
+
     const sessionData = {
       sessionId: this.sessionId,
       metadata: this.metadata,
@@ -780,6 +813,25 @@ export class AgentSession {
       workingDir: this.workingDir,
       activeWorkspace: this.activeWorkspace,
       workspaceManager: this.workspaceManager.getInfo(),
+      cost: {
+        subagent: {
+          totalCost: subagentStats.totalCost || 0,
+          totalInputTokens: subagentStats.totalInputTokens || 0,
+          totalOutputTokens: subagentStats.totalOutputTokens || 0,
+          totalTasks: subagentStats.totalTasks || 0,
+          completedTasks: subagentStats.completedTasks || 0,
+          failedTasks: subagentStats.failedTasks || 0,
+        },
+        autoGen: {
+          totalTeamCost: autoGenStats.totalTeamCost || 0,
+          teamCount: autoGenStats.teamCount || 0,
+          groupChatCount: autoGenStats.groupChatCount || 0,
+        },
+      },
+      // CLI-level session tracking (bridged via setCLISessionMeta)
+      cliSession: this._cliSessionMeta || null,
+      // Aggregated cost snapshot for easy querying
+      sessionCost: this._buildSessionCostSnapshot(subagentStats, autoGenStats),
     };
     
     const filePath = path.join(this.saveDir, `${this.sessionId}.json`);
@@ -831,13 +883,32 @@ export class AgentSession {
     session.activeWorkspace = data.activeWorkspace || null;
     session.taskManager.setWorkspaceDir(session.activeWorkspace?.workspaceDir || null);
     session.subagentManager.setWorkspaceDir(session.activeWorkspace?.workspaceDir || null);
+
+    // Restore cost data from saved session
+    if (data.cost?.subagent && session.subagentManager?.stats) {
+      session.subagentManager.stats.totalCost = data.cost.subagent.totalCost || 0;
+      session.subagentManager.stats.totalInputTokens = data.cost.subagent.totalInputTokens || 0;
+      session.subagentManager.stats.totalOutputTokens = data.cost.subagent.totalOutputTokens || 0;
+      session.subagentManager.stats.totalTasks = data.cost.subagent.totalTasks || 0;
+      session.subagentManager.stats.completedTasks = data.cost.subagent.completedTasks || 0;
+      session.subagentManager.stats.failedTasks = data.cost.subagent.failedTasks || 0;
+    }
+    if (data.cost?.autoGen && session.autoGenBridge) {
+      session.autoGenBridge.totalTeamCost = data.cost.autoGen.totalTeamCost || 0;
+    }
+
+    // Restore CLI-level session metadata
+    if (data.cliSession) {
+      session._cliSessionMeta = data.cliSession;
+    }
+
     await session.refreshSystemPrompt();
-    
+
     return session;
   }
 
   /**
-   * Read the lightweight _meta.json file for fast session recovery checks.
+   * Read the lightweight _meta.json file for fast startup recovery checks.
    * Returns null if no meta file exists or it cannot be parsed.
    */
   static async getLastSessionMeta(workingDir, options = {}) {
@@ -1009,6 +1080,53 @@ export class AgentSession {
 
     // Sort by most recently updated
     return results.sort((a, b) => new Date(b.updated) - new Date(a.updated));
+  }
+
+  /**
+   * Set CLI-level session metadata for persistence.
+   * Bridges the gap between CLI state and session storage.
+   */
+  setCLISessionMeta({ sessionStartTime, totalCost, totalTokens, taskCount }) {
+    this._cliSessionMeta = {
+      sessionStartTime: sessionStartTime || Date.now(),
+      totalCost: totalCost || 0,
+      totalTokens: totalTokens || 0,
+      taskCount: taskCount || 0,
+    };
+  }
+
+  /** @private */
+  _buildSessionCostSnapshot(subagentStats, autoGenStats) {
+    const clientStats = this.agent?.client?.getStats?.() || {};
+    const mainCost = clientStats.totalCost || 0;
+    const subCost = subagentStats.totalCost || 0;
+    const teamCost = autoGenStats.totalTeamCost || 0;
+    return {
+      mainAgent: {
+        totalCost: mainCost,
+        budgetUsed: clientStats.budgetUsed || 0,
+        budgetLimit: clientStats.budgetLimit || 0,
+        budgetRemaining: (clientStats.budgetLimit || 0) - (clientStats.budgetUsed || 0),
+        requestCount: clientStats.requestCount || 0,
+        totalInputTokens: clientStats.totalInputTokens || 0,
+        totalOutputTokens: clientStats.totalOutputTokens || 0,
+      },
+      subagent: {
+        totalCost: subCost,
+        totalInputTokens: subagentStats.totalInputTokens || 0,
+        totalOutputTokens: subagentStats.totalOutputTokens || 0,
+        totalTasks: subagentStats.totalTasks || 0,
+        completedTasks: subagentStats.completedTasks || 0,
+        failedTasks: subagentStats.failedTasks || 0,
+      },
+      autoGen: {
+        totalTeamCost: teamCost,
+        teamCount: autoGenStats.teamCount || 0,
+        groupChatCount: autoGenStats.groupChatCount || 0,
+      },
+      totalCost: mainCost + subCost + teamCost,
+      savedAt: new Date().toISOString(),
+    };
   }
 
   /**

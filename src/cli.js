@@ -13,12 +13,12 @@
  *     cli/errorUtils.js  — error categorization & suggestions
  */
 
-import chalk from 'chalk';
+import chalk from './utils/chalk-compat.js';
 import { parseXmlToolCalls, hasXmlToolCalls } from './tools/xmlToolParser.js';
-import ora from 'ora';
+import ora from './utils/ora-compat.js';
 import boxen from 'boxen';
 import gradient from 'gradient-string';
-import fs from 'fs-extra';
+import fs from './utils/fs-compat.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { AgentSession } from './agent/AgentSession.js';
@@ -241,108 +241,114 @@ export class CLI {
 
   async mainLoop() {
     while (true) {
-      const statusLine = this.buildPromptStatusLine();
-      const promptStr = chalk.cyan('❯ ');
-
-      let input;
-      this.promptActive = true;
       try {
-        input = await multilinePrompt({
-          prompt: promptStr,
-          statusLine: statusLine,
-          placeholder: 'Type your message... (Enter sends, Ctrl+O newline, Ctrl+L clear, Ctrl+T theme)',
-        });
-      } finally {
-        this.promptActive = false;
-      }
-      this.promptCount++;
+        const statusLine = this.buildPromptStatusLine();
+        const promptStr = chalk.cyan('❯ ');
 
-      if (input === MultilineInput.CANCEL) break;
-
-      if (input === MultilineInput.CLEAR_SCREEN) { console.clear(); continue; }
-      if (input === MultilineInput.CYCLE_THEME) {
-        this.currentTheme = nextTheme(this.currentTheme);
-        this.theme = getTheme(this.currentTheme);
-        console.log(chalk.hex(this.theme.accent)(`🎨 Theme: ${this.theme.name}`));
-        continue;
-      }
-      if (input === MultilineInput.SHOW_STATS) {
-        printSessionStats(this);
-        continue;
-      }
-
-      const trimmed = input.trim();
-      if (!trimmed) continue;
-
-      // Process input for drag-and-drop detection
-      const processed = await processInput(trimmed, { validateExistence: true });
-
-      if (processed.type === 'paths' && processed.paths.length > 0) {
-        const dropResults = [];
-        const imageResults = [];
-        for (const dropPath of processed.paths) {
-          try {
-            const result = await readDroppedFile(dropPath);
-            if (result.type === 'image') { imageResults.push(result); } else { dropResults.push(result); }
-            console.log(chalk.dim(`  Detected: ${result.name || path.basename(dropPath)} (${result.type})`));
-          } catch (err) { console.log(chalk.yellow(`  Could not read: ${dropPath} - ${err.message}`)); }
+        let input;
+        this.promptActive = true;
+        try {
+          input = await multilinePrompt({
+            prompt: promptStr,
+            statusLine: statusLine,
+            placeholder: 'Type your message... (Enter sends, Ctrl+O newline, Ctrl+L clear, Ctrl+T theme)',
+          });
+        } finally {
+          this.promptActive = false;
         }
-        let contextText = formatDroppedContent(dropResults);
-        if (imageResults.length > 0) {
-          const modelId = this.session?.agent?.model || '';
-          if (isVisionModel(modelId)) {
-            const images = imageResults.map(img => ({ base64: img.base64, mimeType: img.mimeType }));
-            const textPart = contextText + '\n\nAnalyze attached images: ' + imageResults.map(i => i.name).join(', ');
-            const multimodalMsg = buildMultimodalMessage(textPart, images);
-            console.log(chalk.green(`  ${imageResults.length} image(s) attached for vision`));
-            this.taskCount++; await this.runAgentTaskWithContext(multimodalMsg); continue;
-          } else {
-            contextText += '\n\nImages dropped: ' + imageResults.map(i => `${i.name} (${i.mimeType})`).join(', ');
+        this.promptCount++;
+
+        if (input === MultilineInput.CANCEL) break;
+
+        if (input === MultilineInput.CLEAR_SCREEN) { console.clear(); continue; }
+        if (input === MultilineInput.CYCLE_THEME) {
+          this.currentTheme = nextTheme(this.currentTheme);
+          this.theme = getTheme(this.currentTheme);
+          console.log(chalk.hex(this.theme.accent)(`🎨 Theme: ${this.theme.name}`));
+          continue;
+        }
+        if (input === MultilineInput.SHOW_STATS) {
+          printSessionStats(this);
+          continue;
+        }
+
+        const trimmed = input.trim();
+        if (!trimmed) continue;
+
+        // Process input for drag-and-drop detection
+        const processed = await processInput(trimmed, { validateExistence: true });
+
+        if (processed.type === 'paths' && processed.paths.length > 0) {
+          const dropResults = [];
+          const imageResults = [];
+          for (const dropPath of processed.paths) {
+            try {
+              const result = await readDroppedFile(dropPath);
+              if (result.type === 'image') { imageResults.push(result); } else { dropResults.push(result); }
+              console.log(chalk.dim(`  Detected: ${result.name || path.basename(dropPath)} (${result.type})`));
+            } catch (err) { console.log(chalk.yellow(`  Could not read: ${dropPath} - ${err.message}`)); }
           }
-        }
-        if (contextText) { this.taskCount++; await this.runAgentTask('Analyze dropped content:\n\n' + contextText); }
-        continue;
-      }
-
-      if (processed.type === 'mixed' && processed.paths.length > 0) {
-        const dropResults = [];
-        const imageResults = [];
-        for (const dropPath of processed.paths) {
-          try {
-            const result = await readDroppedFile(dropPath);
-            if (result.type === 'image') { imageResults.push(result); } else { dropResults.push(result); }
-          } catch { /* skip unreadable dropped files */ }
-        }
-        const contextText = formatDroppedContent(dropResults);
-        if (imageResults.length > 0) {
-          const modelId = this.session?.agent?.model || '';
-          if (isVisionModel(modelId)) {
-            const images = imageResults.map(img => ({ base64: img.base64, mimeType: img.mimeType }));
-            const fullText = (contextText ? contextText + '\n\n' : '') + processed.text;
-            const multimodalMsg = buildMultimodalMessage(fullText, images);
-            console.log(chalk.green(`  ${imageResults.length} image(s) attached`));
-            this.taskCount++; await this.runAgentTaskWithContext(multimodalMsg); continue;
+          let contextText = formatDroppedContent(dropResults);
+          if (imageResults.length > 0) {
+            const modelId = this.session?.agent?.model || '';
+            if (isVisionModel(modelId)) {
+              const images = imageResults.map(img => ({ base64: img.base64, mimeType: img.mimeType }));
+              const textPart = contextText + '\\n\\nAnalyze attached images: ' + imageResults.map(i => i.name).join(', ');
+              const multimodalMsg = buildMultimodalMessage(textPart, images);
+              console.log(chalk.green(`  ${imageResults.length} image(s) attached for vision`));
+              this.taskCount++; await this.runAgentTaskWithContext(multimodalMsg); continue;
+            } else {
+              contextText += '\\n\\nImages dropped: ' + imageResults.map(i => `${i.name} (${i.mimeType})`).join(', ');
+            }
           }
+          if (contextText) { this.taskCount++; await this.runAgentTask('Analyze dropped content:\\n\\n' + contextText); }
+          continue;
         }
-        const fullTask = contextText ? `Context from dropped files:\n\n${contextText}\n\n---\n\nUser request: ${processed.text}` : processed.text;
-        this.taskCount++; await this.runAgentTask(fullTask); continue;
+
+        if (processed.type === 'mixed' && processed.paths.length > 0) {
+          const dropResults = [];
+          const imageResults = [];
+          for (const dropPath of processed.paths) {
+            try {
+              const result = await readDroppedFile(dropPath);
+              if (result.type === 'image') { imageResults.push(result); } else { dropResults.push(result); }
+            } catch { /* skip unreadable dropped files */ }
+          }
+          const contextText = formatDroppedContent(dropResults);
+          if (imageResults.length > 0) {
+            const modelId = this.session?.agent?.model || '';
+            if (isVisionModel(modelId)) {
+              const images = imageResults.map(img => ({ base64: img.base64, mimeType: img.mimeType }));
+              const fullText = (contextText ? contextText + '\\n\\n' : '') + processed.text;
+              const multimodalMsg = buildMultimodalMessage(fullText, images);
+              console.log(chalk.green(`  ${imageResults.length} image(s) attached`));
+              this.taskCount++; await this.runAgentTaskWithContext(multimodalMsg); continue;
+            }
+          }
+          const fullTask = contextText ? `Context from dropped files:\\n\\n${contextText}\\n\\n---\\n\\nUser request: ${processed.text}` : processed.text;
+          this.taskCount++; await this.runAgentTask(fullTask); continue;
+        }
+
+        const command = trimmed.startsWith('/') ? resolveCommand(trimmed) : trimmed;
+
+        if (command.startsWith('/')) {
+          const shouldContinue = await this.handleCommand(command);
+          if (!shouldContinue) break;
+          continue;
+        }
+
+        if (command.startsWith('!')) {
+          await runShellCommand(this, command.slice(1));
+          continue;
+        }
+
+        this.taskCount++;
+        await this.runAgentTask(trimmed);
+      } catch (error) {
+        console.error(chalk.red('\n💥 Unexpected error:'), error.message);
+        if (process.env.DEBUG) console.error(error.stack);
+        console.log(chalk.yellow('⚠️  The CLI encountered an error but will continue running.'));
       }
-
-      const command = trimmed.startsWith('/') ? resolveCommand(trimmed) : trimmed;
-
-      if (command.startsWith('/')) {
-        const shouldContinue = await this.handleCommand(command);
-        if (!shouldContinue) break;
-        continue;
-      }
-
-      if (command.startsWith('!')) {
-        await runShellCommand(this, command.slice(1));
-        continue;
-      }
-
-      this.taskCount++;
-      await this.runAgentTask(trimmed);
     }
 
     await printGoodbye(this);
@@ -406,6 +412,7 @@ export class CLI {
       if (!this.session || this.sessionSaveInFlight) return;
       if (Date.now() - this.lastSaveTime < this.autoSaveInterval) return;
       try {
+        this._syncSessionCostMeta();
         this.sessionSaveInFlight = this.session.save();
         await this.sessionSaveInFlight;
         this.lastSaveTime = Date.now();
@@ -423,6 +430,18 @@ export class CLI {
     if (this.autoSaveTimer) {
       clearInterval(this.autoSaveTimer);
       this.autoSaveTimer = null;
+    }
+  }
+
+  /** Sync CLI-level cost/session state into the AgentSession for persistence */
+  _syncSessionCostMeta() {
+    if (this.session?.setCLISessionMeta) {
+      this.session.setCLISessionMeta({
+        sessionStartTime: this.sessionStartTime,
+        totalCost: this.totalCost,
+        totalTokens: this.totalTokens,
+        taskCount: this.taskCount,
+      });
     }
   }
 
@@ -817,7 +836,7 @@ export class CLI {
       case 'exit': case 'quit': case 'q':
         this.stopAutoSave();
         if (this.autoSave) {
-          try { await this.session.save(); this.lastSaveTime = Date.now(); console.log(chalk.dim('💾 Session auto-saved')); } catch { /* save on exit is best-effort */ }
+          try { this._syncSessionCostMeta(); await this.session.save(); this.lastSaveTime = Date.now(); console.log(chalk.dim('💾 Session auto-saved')); } catch { /* save on exit is best-effort */ }
         }
         return false;
 
@@ -1030,12 +1049,19 @@ export class CLI {
         this.sessionSaveInFlight = null;
       }
     }
-
     if (this.session) {
       try {
+        this._syncSessionCostMeta();
         await this.session.save();
       } catch {
         // Ignore best-effort save failures during shutdown.
+      }
+
+      // Full cleanup: abort subagents, stop timers, clear in-flight requests
+      try {
+        this.session.cleanup();
+      } catch {
+        // Ignore cleanup failures during shutdown.
       }
 
       try {
@@ -1077,6 +1103,22 @@ export async function runCLI(options = {}) {
   process.on('SIGINT', signalHandler);
   process.on('SIGTERM', signalHandler);
 
+  process.on('uncaughtException', (error) => {
+    console.error(chalk.red('\n💥 Uncaught Exception:'), error.message);
+    if (process.env.DEBUG) console.error(error.stack);
+    // Don't exit — try to continue
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    console.error(chalk.red('\n💥 Unhandled Rejection:'), reason?.message || reason);
+    if (process.env.DEBUG) console.error(reason?.stack);
+    // Don't exit — try to continue
+  });
+
+  process.on('SIGPIPE', () => {
+    process.exit(0); // Clean exit on broken pipe
+  });
+
   try {
     await cli.start();
   } finally {
@@ -1097,6 +1139,36 @@ try { if (argvPath && fs.existsSync(argvPath)) resolvedArgv = fs.realpathSync(ar
 const args = process.argv.slice(2);
 const allowFullAccess = args.includes('--full-access') || process.env.OPENAGENT_FULL_ACCESS === 'true';
 const permissions = { allowFileDelete: true, allowFullAccess };
+
+// Handle --help / -h
+if (args.includes('--help') || args.includes('-h')) {
+  console.log(`
+  \x1b[1mOpenAgent\x1b[0m v0.1.20 — AI agent with 400+ models & tool support
+
+  \x1b[1mUsage:\x1b[0m
+    openagent [options]              Start interactive CLI
+    openagent skills <command>       Manage skills
+
+  \x1b[1mOptions:\x1b[0m
+    --full-access                    Allow full filesystem access (no sandbox)
+    --daemon                         Run as headless gateway server
+    --companion                      Start companion WebSocket server alongside CLI
+    --port <number>                  Port for daemon/companion (default: daemon=auto, companion=3200)
+    --channels <list>                Daemon channels (comma-separated)
+    -h, --help                       Show this help message
+
+  \x1b[1mEnvironment:\x1b[0m
+    OPENAGENT_FULL_ACCESS=true       Same as --full-access
+    OPENROUTER_API_KEY               Your OpenRouter API key
+
+  \x1b[1mExamples:\x1b[0m
+    openagent                        Start interactive session
+    openagent --full-access          Start with unrestricted file access
+    openagent --daemon --port 8080   Run as gateway on port 8080
+    openagent skills list            List available skills
+`);
+  process.exit(0);
+}
 
 if (resolvedArgv && resolvedFilename === resolvedArgv) {
   // Handle --daemon flag: run as headless gateway server

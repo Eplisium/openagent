@@ -3,7 +3,7 @@
  * Read, write, edit, search, and manage files
  */
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';

@@ -3,7 +3,7 @@
  * Clean visual output formatting for subagent execution.
  */
 
-import chalk from 'chalk';
+import chalk from '../../utils/chalk-compat.js';
 
 /** Strip ANSI codes for length calculation */
 function stripAnsi(str) {

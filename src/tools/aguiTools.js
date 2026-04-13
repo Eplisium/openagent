@@ -3,7 +3,7 @@
  * Enable OpenAgent to stream events to frontends via AG-UI protocol
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import { AGUIServer, EventType } from '../protocols/agui.js';
 
 // Store active AG-UI server

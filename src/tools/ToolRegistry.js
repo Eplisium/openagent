@@ -11,7 +11,7 @@
  * - Error categorization
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import { ToolErrorType } from '../errors.js';
 import { ToolFormatAdapter } from './ToolFormatAdapter.js';
 
@@ -44,6 +44,9 @@ export class ToolRegistry {
       totalDuration: 0,
       toolUsageCount: {},
     };
+    
+    // Per-tool execution metrics
+    this.toolMetrics = {}; // { toolName: { calls, successes, failures, totalDuration, avgDuration, lastError } }
   }
 
   /**
@@ -61,8 +64,13 @@ export class ToolRegistry {
     }
     
     // Validate parameters schema if provided
-    if (tool.parameters && tool.parameters.type !== 'object') {
-      console.warn(chalk.yellow(`⚠️ Tool '${tool.name}' parameters should be of type 'object'`));
+    if (tool.parameters) {
+      if (tool.parameters.type !== 'object') {
+        console.warn(chalk.yellow(`⚠️ Tool '${tool.name}' parameters should be of type 'object'`));
+      }
+      if (tool.parameters.properties && typeof tool.parameters.properties !== 'object') {
+        console.warn(chalk.yellow(`⚠️ Tool '${tool.name}' parameters.properties should be an object`));
+      }
     }
     
     this.tools.set(tool.name, {
@@ -262,8 +270,21 @@ export class ToolRegistry {
       }
       this.stats.totalDuration += duration;
       
+      // Safely serialize result to catch circular references
+      let safeResult;
+      try {
+        JSON.stringify(result);
+        safeResult = result;
+      } catch (serializationError) {
+        safeResult = {
+          success: result.success !== false,
+          data: this.safeSerialize(result),
+          _serializationWarning: 'Result contained non-serializable data (possible circular references)',
+        };
+      }
+      
       return {
-        ...result,
+        ...safeResult,
         _meta: { tool: toolName, duration },
       };
     } catch (error) {
@@ -337,6 +358,28 @@ export class ToolRegistry {
     if (this.executionHistory.length > this.maxHistorySize) {
       this.executionHistory = this.executionHistory.slice(-Math.floor(this.maxHistorySize / 2));
     }
+    
+    // Update per-tool metrics
+    if (!this.toolMetrics[toolName]) {
+      this.toolMetrics[toolName] = {
+        calls: 0,
+        successes: 0,
+        failures: 0,
+        totalDuration: 0,
+        avgDuration: 0,
+        lastError: null,
+      };
+    }
+    const m = this.toolMetrics[toolName];
+    m.calls++;
+    if (success) {
+      m.successes++;
+    } else {
+      m.failures++;
+      m.lastError = error;
+    }
+    m.totalDuration += duration;
+    m.avgDuration = Math.round(m.totalDuration / m.calls);
   }
   
   /**
@@ -446,6 +489,89 @@ export class ToolRegistry {
    */
   getAvailableTools() {
     return this.list();
+  }
+
+  /**
+   * Execute a tool safely — never throws. Always returns { success, result/error, _meta }.
+   * @param {string} toolName - Tool to execute
+   * @param {Object} args - Tool arguments
+   * @returns {Promise<{success: boolean, result?: any, error?: string, _meta: Object}>}
+   */
+  async executeSafe(toolName, args = {}) {
+    try {
+      const result = await this.execute(toolName, args);
+      return result;
+    } catch (err) {
+      return {
+        success: false,
+        error: err.message || 'Unknown execution error',
+        _meta: { tool: toolName, duration: 0, safe: true },
+      };
+    }
+  }
+
+  /**
+   * Get execution metrics for a specific tool or all tools
+   * @param {string} [toolName] - Tool name (omit for all)
+   * @returns {Object} Metrics object
+   */
+  getToolMetrics(toolName) {
+    if (toolName) {
+      return this.toolMetrics[toolName] || null;
+    }
+    return { ...this.toolMetrics };
+  }
+
+  /**
+   * Get success rate for a specific tool or across all tools
+   * @param {string} [toolName] - Tool name (omit for global rate)
+   * @returns {number} Success rate between 0 and 1
+   */
+  getSuccessRate(toolName) {
+    if (toolName) {
+      const m = this.toolMetrics[toolName];
+      if (!m || m.calls === 0) return 0;
+      return m.successes / m.calls;
+    }
+    const total = this.stats.totalExecutions;
+    if (total === 0) return 0;
+    return this.stats.successfulExecutions / total;
+  }
+
+  /**
+   * Disable a tool by name
+   * @param {string} name - Tool name
+   * @returns {boolean} True if tool was found and disabled
+   */
+  disableTool(name) {
+    return this.setToolEnabled(name, false);
+  }
+
+  /**
+   * Enable a tool by name
+   * @param {string} name - Tool name
+   * @returns {boolean} True if tool was found and enabled
+   */
+  enableTool(name) {
+    return this.setToolEnabled(name, true);
+  }
+
+  /**
+   * Safely serialize an object, handling circular references
+   * @param {any} obj - Object to serialize
+   * @returns {any} Safe serializable representation
+   */
+  safeSerialize(obj) {
+    const seen = new WeakSet();
+    return JSON.parse(JSON.stringify(obj, (_key, value) => {
+      if (typeof value === 'object' && value !== null) {
+        if (seen.has(value)) return '[Circular]';
+        seen.add(value);
+      }
+      if (typeof value === 'function') return '[Function]';
+      if (typeof value === 'symbol') return value.toString();
+      return value;
+    }));
   }
 }
 

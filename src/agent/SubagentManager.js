@@ -26,7 +26,7 @@
 
 import { Agent } from './Agent.js';
 import path from 'path';
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
 import { createFileTools } from '../tools/fileTools.js';
 import { createShellTools } from '../tools/shellTools.js';
@@ -35,7 +35,7 @@ import { createGitTools } from '../tools/gitTools.js';
 import { createMcpTools } from '../tools/mcpTools.js';
 import { createA2ATools } from '../tools/a2aTools.js';
 import { createAGUITools } from '../tools/aguiTools.js';
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import { SUBAGENT_SPECIALIZATIONS } from './subagents/specializations.js';
 import { UI } from './subagents/subagentUI.js';
 import { SubagentTask, TaskState } from './subagents/SubagentTask.js';
@@ -265,7 +265,55 @@ export class SubagentManager {
     this.abortController = null;
     this.activeSubagents.clear();
   }
-  
+
+  /**
+   * Full cleanup for memory leak prevention.
+   * Aborts all running subagents, clears all internal state, and stops the periodic cleanup interval.
+   */
+  cleanup() {
+    // Abort all active subagents
+    for (const subagent of this.activeSubagents) {
+      try {
+        if (typeof subagent.abort === 'function') {
+          subagent.abort();
+        }
+      } catch { /* best-effort */ }
+    }
+    this.activeSubagents.clear();
+
+    // Clear all subagent timeout timers
+    for (const [, timer] of this.subagentTimers) {
+      clearTimeout(timer);
+    }
+    this.subagentTimers.clear();
+
+    // Clear task tracking
+    this.tasks.clear();
+    this.runningTasks.clear();
+    this.completedTasks.length = 0;
+
+    // Clear message bus and shared context
+    this.messageBus.clear();
+    this.sharedContext.clear();
+
+    // Clear background task tracking
+    this.backgroundTasks.clear();
+
+    // Clear file locks
+    this.fileLocks.clear();
+    this.fileLockQueue.clear();
+
+    // Stop the periodic cleanup interval
+    if (this._cleanupInterval) {
+      clearInterval(this._cleanupInterval);
+      this._cleanupInterval = null;
+    }
+
+    // Reset abort state
+    this.aborted = false;
+    this.abortController = null;
+  }
+
   /**
    * Check if aborted
    */
@@ -274,7 +322,6 @@ export class SubagentManager {
       throw new Error('SubagentManager was aborted');
     }
   }
-
   // ─── Task ID Generation ────────────────────────────────────────
 
   generateTaskId() {

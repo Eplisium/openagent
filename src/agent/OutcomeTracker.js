@@ -7,7 +7,7 @@
  * Persists to .openagent/outcomes.json for cross-session learning.
  */
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 import { CONFIG } from '../config.js';
 

@@ -10,7 +10,7 @@
  * for deeper evaluation when one is available.
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // 📋 Constants

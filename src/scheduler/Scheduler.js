@@ -10,7 +10,7 @@
  *   scheduler.at('2026-04-14T10:00:00Z', 'Deploy staging');
  */
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 import { EventEmitter } from 'events';
 

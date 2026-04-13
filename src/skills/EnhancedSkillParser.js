@@ -11,7 +11,7 @@
  * - Example usage blocks
  */
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 
 // ═══════════════════════════════════════════════════════════════════

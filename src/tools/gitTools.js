@@ -257,8 +257,12 @@ export function createGitTools(options = {}) {
       },
     },
     async execute({ cwd = '.', remote = 'origin', branch, force = false, setUpstream = false }) {
+      // Remote name validation
+      if (remote && !/^[a-zA-Z0-9_.-]+$/.test(remote)) {
+        return { success: false, error: 'Invalid remote name' };
+      }
+
       let cmd = `push ${remote}`;
-      if (branch) cmd += ` ${branch}`;
       if (force) cmd += ' --force';
       if (setUpstream) cmd += ' --set-upstream';
 
@@ -285,6 +289,11 @@ export function createGitTools(options = {}) {
       },
     },
     async execute({ cwd = '.', remote, branch, rebase = false }) {
+      // Remote name validation
+      if (remote && !/^[a-zA-Z0-9_.-]+$/.test(remote)) {
+        return { success: false, error: 'Invalid remote name' };
+      }
+
       let cmd = 'pull';
       if (rebase) cmd += ' --rebase';
       if (remote) cmd += ` ${remote}`;
@@ -312,6 +321,11 @@ export function createGitTools(options = {}) {
       },
     },
     async execute({ cwd = '.', action = 'list', name }) {
+      // Branch name validation
+      if (name && !/^[a-zA-Z0-9_/.-]+$/.test(name)) {
+        return { success: false, error: 'Invalid branch name. Use only alphanumeric characters, hyphens, underscores, dots, and slashes.' };
+      }
+
       let cmd;
       switch (action) {
         case 'list':

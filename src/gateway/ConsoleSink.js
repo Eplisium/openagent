@@ -2,7 +2,7 @@
  * 🖥️ Console Output Adapter — Routes output to process.stdout (current CLI behavior)
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import { OutputAdapter } from './OutputAdapter.js';
 
 export class ConsoleSink extends OutputAdapter {

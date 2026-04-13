@@ -9,7 +9,7 @@ import { logger } from '../logger.js';
 import { ContextAllocator } from './contextAllocator.js';
 import { normalizeOptionalLimit, normalizePositiveInt, estimateTokens } from '../utils.js';
 // chalk removed — not used in this file
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 
 export { AgentError, ToolExecutionError, ContextOverflowError, AgentAbortError } from '../errors.js';
@@ -796,7 +796,10 @@ When done, provide a clear summary: what changed, why, what was verified, and an
       case 'max_tool_calls':
         return `I stopped after reaching the configured tool-call limit (${this.maxToolCalls}).\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
       case 'stalled':
+      case 'stalled':
         return `I stopped because I appeared to be repeating the same tool workflow without making progress.\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+      case 'consecutive_api_errors':
+        return `I stopped after 3 consecutive API errors. The model API may be experiencing issues.\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
       case 'aborted':
         return 'Agent execution was aborted.';
       default:
@@ -1245,9 +1248,23 @@ Task: ${userInput}`;
         }
 
         // Use non-streaming fallback for this iteration
-        const response = await this.getLLMResponseWithRetry(0, messagesForLLM);
+        let response;
+        try {
+          response = await this.getLLMResponseWithRetry(0, messagesForLLM);
+        } catch (apiError) {
+          this.consecutiveApiErrors++;
+          if (this.consecutiveApiErrors >= 3) {
+            this.stopReason = 'consecutive_api_errors';
+            if (this.shouldEmitVerboseLogs()) {
+              logger.error('Stopping: 3 consecutive API errors (streaming fallback)', { error: apiError.message });
+            }
+            finalResponse = this.buildStopMessage('consecutive_api_errors', runHistory, startTime);
+            break;
+          }
+          throw apiError;
+        }
+        this.consecutiveApiErrors = 0;
         if (!response) throw new AgentError('No response from model', 'NO_RESPONSE');
-        this.updateUsageStats(response.usage);
 
         const toolCalls = response.toolCalls || [];
         if (toolCalls.length === 0) {
@@ -1437,10 +1454,9 @@ Task: ${userInput}`;
     this.aborted = false;
     this.stopReason = null;
     this.lastToolCallSignature = null;
-    this.repeatedToolRoundCount = 0;
     this.noActionTrapCount = 0;
     this.abortController = new AbortController();
-    
+    this.consecutiveApiErrors = 0;
     // Add user message (skip if already pushed, e.g. multimodal messages)
     if (userInput !== undefined && userInput !== null) {
       this.maybeResetWorkingSet(userInput);
@@ -1534,8 +1550,22 @@ Task: ${userInput}`;
         const messagesForLLM = await this.prepareMessagesForLLM();
 
         // Get LLM response with tools (with retry logic)
-        const response = await this.getLLMResponseWithRetry(0, messagesForLLM);
-        
+        let response;
+        try {
+          response = await this.getLLMResponseWithRetry(0, messagesForLLM);
+        } catch (apiError) {
+          this.consecutiveApiErrors++;
+          if (this.consecutiveApiErrors >= 3) {
+            this.stopReason = 'consecutive_api_errors';
+            if (this.shouldEmitVerboseLogs()) {
+              logger.error('Stopping: 3 consecutive API errors', { error: apiError.message });
+            }
+            break;
+          }
+          throw apiError;
+        }
+        this.consecutiveApiErrors = 0;
+
         if (!response) {
           throw new AgentError('No response from model', 'NO_RESPONSE');
         }
@@ -1659,6 +1689,11 @@ Task: ${userInput}`;
           max_tokens: maxTokens,
         }
       );
+      
+      // Validate response has expected structure
+      if (!result || (result.choices && result.choices.length === 0)) {
+        throw new AgentError('Empty or malformed response from model (no choices)', 'EMPTY_RESPONSE', { response: result });
+      }
       
       // Track usage
       this.updateUsageStats(result.usage);
@@ -2431,6 +2466,7 @@ Task: ${userInput}`;
    * Export conversation with full state
    */
   export() {
+    const clientStats = this.client?.getStats?.() || {};
     return {
       model: this.model,
       systemPrompt: this.systemPrompt,
@@ -2442,6 +2478,14 @@ Task: ${userInput}`;
       stopReason: this.stopReason,
       timestamp: new Date().toISOString(),
       version: '4.0',
+      cost: {
+        totalCost: clientStats.totalCost || 0,
+        budgetUsed: clientStats.budgetUsed || 0,
+        budgetLimit: clientStats.budgetLimit || 0,
+        requestCount: clientStats.requestCount || 0,
+        totalInputTokens: clientStats.totalInputTokens || 0,
+        totalOutputTokens: clientStats.totalOutputTokens || 0,
+      },
     };
   }
 
@@ -2460,6 +2504,17 @@ Task: ${userInput}`;
     this.contextStats.lastPromptTokens = 0;
     this.contextStats.lastCompletionTokens = 0;
     this.contextStats.lastTotalTokens = 0;
+
+    // Restore cost data to the client
+    if (data.cost && this.client) {
+      this.client.totalCost = data.cost.totalCost || 0;
+      this.client.budgetUsed = data.cost.budgetUsed || 0;
+      if (data.cost.budgetLimit) this.client.budgetLimit = data.cost.budgetLimit;
+      this.client.requestCount = data.cost.requestCount || 0;
+      this.client.totalInputTokens = data.cost.totalInputTokens || 0;
+      this.client.totalOutputTokens = data.cost.totalOutputTokens || 0;
+    }
+
     return this;
   }
   

@@ -1,4 +1,4 @@
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 
 const TOKEN_COLORS = {
   keyword: chalk.magenta,      // const, let, function, if, return, import, export, class, async, await

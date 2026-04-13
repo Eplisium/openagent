@@ -3,7 +3,7 @@
  * Enable OpenAgent to interact with other A2A agents
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import { A2AAgent, A2AClient } from '../protocols/a2a.js';
 
 // Store active A2A server instance

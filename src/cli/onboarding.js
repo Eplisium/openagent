@@ -3,7 +3,7 @@
  * A polished first-run experience to get users set up quickly
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import boxen from 'boxen';
 import gradient from 'gradient-string';
 import { promptWithTerminalReset } from './terminal.js';
@@ -70,7 +70,7 @@ export async function runOnboarding(state, saveState, modelBrowser = null) {
     // Save the API key to .env
     if (apiKey && apiKey.trim()) {
       try {
-        const fs = await import('fs-extra');
+        const fs = await import('../utils/fs-compat.js');
         const path = await import('path');
         const { fileURLToPath } = await import('url');
         const __dirname = path.dirname(fileURLToPath(import.meta.url));

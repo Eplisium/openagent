@@ -12,7 +12,7 @@
  *   - Deep  (LLM)   : full probe-generate → verify → repair cycle
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 
 // ─────────────────────────────────────────────
 // Prompt templates

@@ -10,9 +10,9 @@
  * - End-to-end verification requirements
  */
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import { getDefaultTaskStateDir } from '../paths.js';
 // CONFIG removed — not used in this file
 

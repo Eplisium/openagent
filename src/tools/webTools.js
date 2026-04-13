@@ -1447,6 +1447,24 @@ export const fetchUrlTool = {
   },
   async execute({ url, method = 'GET', headers = {}, body }) {
     try {
+      // URL protocol validation
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        return { success: false, error: 'Only http:// and https:// URLs are allowed' };
+      }
+
+      // SSRF protection — block private/internal IP ranges
+      try {
+        const parsed = new URL(url);
+        const hostname = parsed.hostname;
+        if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' ||
+            hostname.startsWith('10.') || hostname.startsWith('172.16.') || hostname.startsWith('192.168.') ||
+            hostname === '169.254.169.254') {
+          return { success: false, error: 'Fetching internal/private URLs is not allowed for security reasons' };
+        }
+      } catch (e) {
+        return { success: false, error: 'Invalid URL format' };
+      }
+
       const doFetch = async () => {
         const fetchOptions = {
           method,

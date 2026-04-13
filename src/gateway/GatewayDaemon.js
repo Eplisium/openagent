@@ -11,7 +11,7 @@
  *   openagent --daemon --channels http,discord
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import { SessionPool } from './SessionPool.js';
 import { ChannelRouter } from './ChannelRouter.js';
 import { HttpChannel } from './channels/HttpChannel.js';

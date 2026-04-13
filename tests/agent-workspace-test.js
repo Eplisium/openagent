@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import fs from 'fs-extra';
+import fs from '../src/utils/fs-compat.js';
 import { Agent } from '../src/agent/Agent.js';
 import { TaskManager } from '../src/agent/TaskManager.js';
 import { WorkspaceManager } from '../src/agent/WorkspaceManager.js';

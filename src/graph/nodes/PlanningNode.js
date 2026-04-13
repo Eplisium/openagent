@@ -14,8 +14,8 @@
  * spawning a minimal AgentSession (following the AgentNode.js pattern).
  */
 
-import chalk from 'chalk';
-import fs from 'fs-extra';
+import chalk from '../../utils/chalk-compat.js';
+import fs from '../../utils/fs-compat.js';
 import path from 'path';
 import AgentSession from '../../agent/AgentSession.js';
 

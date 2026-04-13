@@ -4,7 +4,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { SkillManager, Skill } from '../../src/skills/SkillManager.js';
-import fs from 'fs-extra';
+import fs from '../../src/utils/fs-compat.js';
 import path from 'path';
 import os from 'os';
 

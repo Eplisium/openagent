@@ -3,13 +3,13 @@
  * Marketplace integration for skill management
  */
 
-import chalk from 'chalk';
-import inquirer from 'inquirer';
+import chalk from '../utils/chalk-compat.js';
+import inquirer from '../utils/inquirer-compat.js';
 import { SkillRegistry } from '../skills/SkillRegistry.js';
 import { EnhancedSkillParser } from '../skills/EnhancedSkillParser.js';
 import path from 'path';
 import os from 'os';
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // 🎯 Skills CLI

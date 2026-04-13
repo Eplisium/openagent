@@ -2,7 +2,7 @@
  * UI helpers and styles for OpenAgent CLI
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import boxen from 'boxen';
 import gradient from 'gradient-string';
 import { renderMarkdown as _renderMarkdown } from './markdown.js';

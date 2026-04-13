@@ -7,7 +7,7 @@
 
 import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 
 /**
  * @typedef {import('events').EventEmitter} EventEmitter

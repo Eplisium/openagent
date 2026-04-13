@@ -3,7 +3,7 @@
  * Caches file reads with mtime validation for instant re-reads
  */
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 
 const DEFAULT_MAX_ENTRIES = 500;
 

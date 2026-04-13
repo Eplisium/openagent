@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { SkillRegistry, SkillPackage } from '../../src/skills/SkillRegistry.js';
-import fs from 'fs-extra';
+import fs from '../../src/utils/fs-compat.js';
 import path from 'path';
 import os from 'os';
 
@@ -9,8 +9,8 @@ vi.mock('node-fetch', () => ({
   default: vi.fn(),
 }));
 
-// Mock fs-extra
-vi.mock('fs-extra', () => ({
+// Mock fs-compat (replaces fs-extra)
+vi.mock('../../src/utils/fs-compat.js', () => ({
   default: {
     ensureDir: vi.fn(),
     pathExists: vi.fn(),

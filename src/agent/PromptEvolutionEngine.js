@@ -8,7 +8,7 @@
  * its own mistakes and gets better over time.
  */
 
-import fs from 'fs-extra';
+import fs from '../utils/fs-compat.js';
 import path from 'path';
 
 export class PromptEvolutionEngine {

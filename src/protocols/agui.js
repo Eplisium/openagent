@@ -5,7 +5,7 @@
  * Specification: https://github.com/agentprotocol/ag-ui
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import http from 'http';
 
 /** @typedef {import('http').Server} Server */

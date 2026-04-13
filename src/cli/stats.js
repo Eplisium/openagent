@@ -2,7 +2,7 @@
  * Session stats and cost display for OpenAgent CLI
  */
 
-import chalk from 'chalk';
+import chalk from '../utils/chalk-compat.js';
 import boxen from 'boxen';
 import { box, formatCompactNumber, miniBar } from './ui.js';
 
