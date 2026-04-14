@@ -81,7 +81,7 @@ export class ChannelRouter extends EventEmitter {
   async stop() {
     this._running = false;
 
-    for (const [name, adapter] of this.channels) {
+    for (const [, adapter] of this.channels) {
       try {
         await adapter.stop();
       } catch { /* ignore */ }

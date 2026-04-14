@@ -45,7 +45,6 @@ export const DIVIDER = () => chalk.dim('─'.repeat(getTerminalWidth()));
  * @returns {string} Clean string without ANSI codes
  */
 export function stripAnsi(str) {
-  // eslint-disable-next-line no-control-regex
   return str.replace(/\u001b\[[0-9;]*m/g, '');
 }
 

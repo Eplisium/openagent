@@ -16,7 +16,7 @@
  */
 
 import difflib from '../utils/difflib.js';
-import { Platform } from '../utils/platform.js';
+// Platform not needed in this module
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Indentation Detection & Preservation
@@ -52,12 +52,12 @@ export function detectIndentation(content) {
   }
 
   // Find most common space indent size
-  let mostCommonSize = 2;
+  let _mostCommonSize = 2;
   let mostCommonCount = 0;
   for (const [size, count] of Object.entries(spaceSizes)) {
     if (count > mostCommonCount) {
       mostCommonCount = count;
-      mostCommonSize = parseInt(size, 10);
+      _mostCommonSize = parseInt(size, 10);
     }
   }
 
@@ -381,7 +381,7 @@ export function parseSearchReplaceBlocks(text) {
 
   let match;
   while ((match = blockRegex.exec(text)) !== null) {
-    let filePath = match[1].trim();
+    const filePath = match[1].trim();
     let searchContent = match[2];
     const replaceContent = match[3];
 

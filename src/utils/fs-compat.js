@@ -177,7 +177,6 @@ const compat = {
   pathExists,
   copy,
   remove,
-  rename: fsp.rename,
 
   // fs-extra compat methods (sync)
   readJSONSync,

@@ -263,6 +263,7 @@ export function createGitTools(options = {}) {
       }
 
       let cmd = `push ${remote}`;
+      if (branch) cmd += ` ${branch}`;
       if (force) cmd += ' --force';
       if (setUpstream) cmd += ' --set-upstream';
 

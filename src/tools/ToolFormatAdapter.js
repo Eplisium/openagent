@@ -108,7 +108,7 @@ export class ToolFormatAdapter {
    * @param {string} provider - Source provider name
    * @returns {{ id: string, name: string, arguments: Object }} Normalized tool call
    */
-  static normalizeToolCall(toolCall, provider) {
+  static normalizeToolCall(toolCall, _provider) {
     if (!toolCall) return null;
 
     // Already in internal standard format (from XML parser or previous normalization)

@@ -12,17 +12,15 @@
 import fs from '../utils/fs-compat.js';
 import path from 'path';
 import { createPathContext } from '../paths.js';
-import { Platform } from '../utils/platform.js';
+// Platform not needed in this module
 import {
   parsePatch,
   applyPatchToContent,
   parseSearchReplaceBlocks,
   applySearchReplace,
-  applyMultiFileEdits,
   generateUnifiedDiff,
   generateCompactDiff,
   detectIndentation,
-  fuzzyFind,
 } from './EditEngine.js';
 
 const PATH_PREFIX_NOTE = 'Supports absolute paths plus the special prefixes project:, workdir:, workspace:, and openagent:.';
@@ -32,7 +30,7 @@ export function createAdvancedEditTools(options = {}) {
   const resolvePathForAgent = pathContext.resolvePath;
   const allowFullAccess = options.allowFullAccess === true || options.permissions?.allowFullAccess === true || process.env.OPENAGENT_FULL_ACCESS === 'true';
 
-  function validatePath(resolvedPath, { access = 'read' } = {}) {
+  function validatePath(resolvedPath, { access: _access = 'read' } = {}) {
     const baseDir = pathContext.getBaseDir();
     const workspaceDir = pathContext.getWorkspaceDir();
     const canonicalPath = path.resolve(resolvedPath);
@@ -515,7 +513,7 @@ Best for:
               totalFailed++;
               // Rollback ALL files
               if (!dryRun) {
-                for (const [fPath, fInfo] of fileContents) {
+                for (const [, fInfo] of fileContents) {
                   try {
                     await fs.writeFile(fInfo.resolvedPath, fInfo.original, 'utf-8');
                   } catch { /* best effort */ }
@@ -562,7 +560,7 @@ Best for:
         }
 
         // Write all files
-        for (const [filePath, fileInfo] of fileContents) {
+        for (const [, fileInfo] of fileContents) {
           if (fileInfo.current) {
             await fs.writeFile(fileInfo.resolvedPath, fileInfo.current, 'utf-8');
           }

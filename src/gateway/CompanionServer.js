@@ -251,7 +251,7 @@ export class CompanionServer extends EventEmitter {
       running: this._running,
       port: this.port,
       clients: this.wsSink.clientCount,
-      sessionAttached: !!this.session,
+      sessionAttached: Boolean(this.session),
     };
   }
 }

@@ -12,7 +12,7 @@ export class OutputAdapter {
    * @param {string} content - The text content to output
    * @param {object} metadata - Optional metadata (type, channel, tool info, etc.)
    */
-  write(content, metadata = {}) {
+  write(content, _metadata = {}) {
     throw new Error('OutputAdapter.write() must be implemented by subclass');
   }
 
@@ -21,7 +21,7 @@ export class OutputAdapter {
    * @param {string} eventType - Event type identifier
    * @param {object} data - Event data payload
    */
-  writeEvent(eventType, data = {}) {
+  writeEvent(eventType, _data = {}) {
     throw new Error('OutputAdapter.writeEvent() must be implemented by subclass');
   }
 

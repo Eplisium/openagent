@@ -958,7 +958,6 @@ When done, provide a clear summary: what changed, why, what was verified, and an
       case 'max_tool_calls':
         return `I stopped after reaching the configured tool-call limit (${this.maxToolCalls}).\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
       case 'stalled':
-      case 'stalled':
         return `I stopped because I appeared to be repeating the same tool workflow without making progress.\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
       case 'consecutive_api_errors':
         return `I stopped after 3 consecutive API errors. The model API may be experiencing issues.\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
@@ -2737,7 +2736,7 @@ Task: ${userInput}`;
    * Sleep utility
    */
   sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise(resolve => { setTimeout(resolve, ms); });
   }
   
   /**

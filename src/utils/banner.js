@@ -58,7 +58,7 @@ export async function renderAsciiArt(text, fontName = 'slick') {
   const font = await loadFont(fontName);
   if (font) {
     // Use figlet with custom font
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve, _reject) => {
       figlet.text(text, { font: fontName }, (err, data) => {
         if (err) {
           // Try loading font manually

@@ -1461,7 +1461,7 @@ export const fetchUrlTool = {
             hostname === '169.254.169.254') {
           return { success: false, error: 'Fetching internal/private URLs is not allowed for security reasons' };
         }
-      } catch (e) {
+      } catch (_e) {
         return { success: false, error: 'Invalid URL format' };
       }
 

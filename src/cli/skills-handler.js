@@ -502,7 +502,7 @@ export async function installSkill(skillId, options = {}) {
 /**
  * Update skills
  */
-export async function updateSkills(skillId, options = {}) {
+export async function updateSkills(skillId, _options = {}) {
   const registry = createRegistry();
 
   try {

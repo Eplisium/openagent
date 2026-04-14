@@ -794,11 +794,11 @@ export class OpenRouterClient {
         usage: response.usage,
         model: response.model,
       };
-    } catch (e) {
+    } catch (_e) {
       throw new OpenRouterError(
         'Failed to parse structured output',
         'PARSE_ERROR',
-        { content, error: e.message }
+        { content, error: _e.message }
       );
     }
   }
@@ -1282,7 +1282,6 @@ export class OpenRouterClient {
     this.budgetUsed = 0;
     this.clearCache();
     this.inFlightRequests.clear();
-    this.startCacheCleanup();
     this.startCacheCleanup();
   }
 

@@ -275,7 +275,7 @@ export class ToolRegistry {
       try {
         JSON.stringify(result);
         safeResult = result;
-      } catch (serializationError) {
+      } catch (_serializationError) {
         safeResult = {
           success: result.success !== false,
           data: this.safeSerialize(result),

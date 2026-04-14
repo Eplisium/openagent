@@ -43,7 +43,7 @@ export class ChannelAdapter extends EventEmitter {
    * @param {object} metadata - Optional metadata
    * @returns {Promise<void>}
    */
-  async sendMessage(targetId, content, metadata = {}) {
+  async sendMessage(targetId, content, _metadata = {}) {
     throw new Error(`ChannelAdapter[${this.name}].sendMessage() must be implemented by subclass`);
   }
 

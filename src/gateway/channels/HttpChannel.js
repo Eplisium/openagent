@@ -108,7 +108,7 @@ export class HttpChannel extends ChannelAdapter {
             // Also handle errors
             stream.on('error', () => {
               this.sseClients.delete(clientId);
-              reject();
+              reject(new Error('SSE stream error'));
             });
           });
         } catch {
@@ -145,7 +145,7 @@ export class HttpChannel extends ChannelAdapter {
           fetch: this.app.fetch,
           port: this.port,
           hostname: this.host,
-        }, (info) => {
+        }, (_info) => {
           this._running = true;
           console.log(`[HTTP] Channel started on ${this.host}:${this.port}`);
           resolve();

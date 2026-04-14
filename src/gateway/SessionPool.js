@@ -45,7 +45,7 @@ export class SessionPool {
       clearInterval(this._cleanupTimer);
       this._cleanupTimer = null;
     }
-    for (const [id, entry] of this.sessions) {
+    for (const [, entry] of this.sessions) {
       try {
         if (entry.session.agent) entry.session.agent.abort();
       } catch { /* ignore */ }

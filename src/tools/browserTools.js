@@ -37,7 +37,7 @@ async function getPage(pageId) {
   return page;
 }
 
-export function createBrowserTools(options = {}) {
+export function createBrowserTools(_options = {}) {
   return [
     {
       name: 'browser_launch',
@@ -53,7 +53,7 @@ export function createBrowserTools(options = {}) {
         },
         required: ['url'],
       },
-      async execute({ url, headless = true }) {
+      async execute({ url, headless: _headless = true }) {
         try {
           const browser = await getBrowser();
           const context = await browser.newContext();
@@ -281,7 +281,7 @@ export function createBrowserTools(options = {}) {
           const page = await getPage(pageId);
           await page.waitForSelector(selector, { timeout: timeoutMs });
           return { success: true, message: `Element "${selector}" appeared` };
-        } catch (error) {
+        } catch (_error) {
           return { success: false, error: `Timed out waiting for "${selector}"` };
         }
       },

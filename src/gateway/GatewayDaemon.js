@@ -15,7 +15,7 @@ import chalk from '../utils/chalk-compat.js';
 import { SessionPool } from './SessionPool.js';
 import { ChannelRouter } from './ChannelRouter.js';
 import { HttpChannel } from './channels/HttpChannel.js';
-import { CONFIG } from '../config.js';
+// CONFIG not needed — all config comes from options
 
 export class GatewayDaemon {
   /**

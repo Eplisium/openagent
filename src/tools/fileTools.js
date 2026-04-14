@@ -13,7 +13,7 @@ import { encodeImageToBase64, getImageMimeType } from '../vision.js';
 import { CONFIG } from '../config.js';
 import { Platform } from '../utils/platform.js';
 import { getCachedFile } from './fileCache.js';
-import { fuzzyFind, detectIndentation, reindentBlock, getIndentLevel } from './EditEngine.js';
+import { fuzzyFind, detectIndentation, reindentBlock } from './EditEngine.js';
 
 const PATH_PREFIX_NOTE = 'Supports absolute paths plus the special prefixes project:, workdir:, workspace:, and openagent:.';
 
@@ -875,7 +875,7 @@ export function createFileTools(options = {}) {
 
           results.sort((a, b) => a.file.localeCompare(b.file));
           const totalMatches = results.reduce((sum, r) => sum + r.matchCount, 0);
-          let resultStr = JSON.stringify(results);
+          const resultStr = JSON.stringify(results);
           let truncated = false;
 
           if (resultStr.length > CONFIG.SEARCH_RESULTS_MAX_CHARS) {

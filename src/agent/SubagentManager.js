@@ -1026,7 +1026,7 @@ Please synthesize these results into a single coherent, well-organized response.
     }
 
     // Build parallel tasks from file groups
-    const tasks = fileGroups.map((group, i) => {
+    const tasks = fileGroups.map((group, _i) => {
       const fileList = group.files.map(f => `project:${f}`).join(', ');
       return {
         task: `${group.description}\n\nFiles to modify: ${fileList}\n\nContext: ${task}\n\nIMPORTANT: Only modify the files listed above. Do NOT modify other files.`,

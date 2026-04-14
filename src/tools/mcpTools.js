@@ -735,7 +735,7 @@ const mcpConnections = new Map();
  * @param {object} options
  * @returns {object[]}
  */
-export function createMcpTools(options = {}) {
+export function createMcpTools(_options = {}) {
   /**
    * Connect to an MCP server (with automatic OAuth support)
    */
