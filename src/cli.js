@@ -814,7 +814,6 @@ export class CLI {
         thinkSpinner.error(chalk.red(`Error: ${error.message}`));
       }
     }
-    }
 
     const duration = Date.now() - startTime;
     if (succeeded) {
@@ -989,7 +988,6 @@ export class CLI {
         checkSpinner.error(chalk.red(`${check.name}: ${error.message}`));
         results.push({ check: key, status: 'error', message: error.message });
       }
-    }
     }
 
     const healthy = results.filter(r => r.status === 'healthy').length;

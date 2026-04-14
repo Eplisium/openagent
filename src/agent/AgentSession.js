@@ -23,7 +23,8 @@ import { SkillManager } from '../skills/SkillManager.js';
 import { HookManager } from '../hooks/HookManager.js';
 import { createMemoryTools } from '../tools/memoryTools.js';
 import { createSkillTools } from '../tools/skillTools.js';
-import { createMcpTools } from '../tools/mcpTools.js';
+import { createMcpTools, autoConnectServers } from '../tools/mcpTools.js';
+import chalk from '../utils/chalk-compat.js';
 import { createA2ATools } from '../tools/a2aTools.js';
 import { createAGUITools } from '../tools/aguiTools.js';
 import { createGraphTools } from '../tools/graphTools.js';
@@ -145,6 +146,13 @@ export class AgentSession {
     this.toolRegistry.registerAll(createMcpTools({ baseDir: this.workingDir }));
     this.toolRegistry.registerAll(createA2ATools());
     this.toolRegistry.registerAll(createAGUITools());
+
+    // Auto-connect saved MCP servers (non-blocking)
+    autoConnectServers().then(({ connected, total }) => {
+      if (connected > 0) {
+        console.log(chalk.cyan(`[MCP] Auto-connected ${connected}/${total} servers`));
+      }
+    }).catch(() => {});
 
     // Initialize memory manager
     this.memoryManager = new MemoryManager({

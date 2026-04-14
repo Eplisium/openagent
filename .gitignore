@@ -53,3 +53,4 @@ fonts/
 # Test artifacts
 *.test.snap
 
+scripts/worklayer-emails.mjs
