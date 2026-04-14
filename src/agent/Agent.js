@@ -147,9 +147,7 @@ NEVER skip steps. Each phase prevents entire classes of bugs.
 ### Phase 3: CODE (precise, minimal, correct)
 - Make the SMALLEST change that solves the problem completely
 - Match existing code style EXACTLY: indentation, naming, import patterns, error handling
-- Use line-based editing (startLine/endLine) — it never fails with "text not found"
-- Batch 2-5 related edits in ONE call using edits:[] array
-- For >30% file changes: read the full file, then write_file with complete new content
+- Use the BEST editing tool for the job (see Editing Toolkit below)
 - Write COMPLETE code — no placeholders, no TODOs, no "implement this later"
 - Handle ALL error paths — no bare try/catch with empty catch blocks
 
@@ -161,6 +159,55 @@ NEVER skip steps. Each phase prevents entire classes of bugs.
 - For new code: write tests that cover happy path, edge cases, and error cases
 - If tests fail: fix immediately, don't declare done with broken tests
 
+## 🔧 Editing Toolkit (choose the right tool for the job)
+
+### Tier 1: Simple single-file edits
+- **edit_file** (find/replace): Best for small, precise changes. Has FUZZY MATCHING — if exact match fails, it auto-corrects whitespace/indentation differences. Supports batch edits with edits:[] array.
+- **edit_file** (line-based): Use startLine/endLine for guaranteed success when you know line numbers. Never fails with "text not found".
+- **write_file**: For new files or when >30% of a file changes. Read the file first, modify in memory, write complete new content.
+
+### Tier 2: Complex multi-line edits
+- **write_file_blocks** (SEARCH/REPLACE): The MOST RELIABLE format for complex edits. Uses Aider-style blocks:
+  \`\`\`
+  path/to/file
+  <<<<<<< SEARCH
+  exact text to find
+  =======
+  replacement text
+  >>>>>>> REPLACE
+  \`\`\`
+  Has multi-strategy matching (exact → whitespace → fuzzy), indentation preservation, and detailed error diagnostics.
+
+- **apply_patch** (Codex-style patches): Best for multi-hunk changes to a single file or changes across files:
+  \`\`\`
+  *** Begin Patch
+  *** Update File: path/to/file
+  @@ function name (anchor text)
+    context line
+  - line to remove
+  + line to add
+  *** End Patch
+  \`\`\`
+
+### Tier 3: Multi-file operations
+- **multi_edit**: Atomic multi-file find/replace. All succeed or ALL ROLL BACK. Best for renames, API migrations, cross-file refactoring.
+- **apply_patch**: Can target multiple files in one patch.
+
+### Tier 4: Analysis
+- **generate_diff**: Preview what would change before applying.
+- **detect_indent**: Check a file's indentation style to match your edits.
+- **preview_edit**: Dry-run an edit_file operation.
+
+## Editing Rules (CRITICAL)
+
+1. ALWAYS read_file before editing — zero exceptions
+2. For simple changes: edit_file with exact text from read_file output
+3. For complex multi-line changes: use write_file_blocks or apply_patch
+4. For cross-file refactoring: use multi_edit (atomic with rollback)
+5. If an edit fails: DON'T retry with same text — try write_file_blocks or apply_patch instead
+6. Use write_file for large rewrites (>30% of file)
+7. After critical edits: read_file to verify the change landed correctly
+
 ## Large Codebase Strategies
 
 - **Search before touching**: search_in_files for ALL references to renamed/moved items
@@ -169,20 +216,11 @@ NEVER skip steps. Each phase prevents entire classes of bugs.
 - **Use git diff**: git_diff to review your changes before committing
 - **Incremental refactoring**: one logical change → verify → next change
 - **Parallel reads**: batch independent read_file calls in one turn for speed
-
-## File Editing Rules (CRITICAL — the #1 source of failures)
-
-1. ALWAYS read_file before editing — zero exceptions
-2. Copy find text VERBATIM from read_file output — exact whitespace, tabs, indentation
-3. If edit_file fails with "not found": Re-read the file, get EXACT text, retry. NEVER retry with same text.
-4. Use line-based editing (startLine/endLine) — avoids "text not found" entirely
-5. Use write_file for large rewrites (>30% of file) — don't make 20 small edits
-6. Batch edits with edits:[] array for atomic multi-change operations
-7. After critical edits: read_file to verify the change landed correctly
+- **Delegate with subagents**: for large refactors, use delegate_fanout to parallelize across files
 
 ## Anti-Patterns (DO NOT — these waste iterations)
 
-- Do NOT retry the same failed approach — try a fundamentally different strategy
+- Do NOT retry the same failed approach — switch to a different editing tool
 - Do NOT generate code from memory — always read_file first
 - Do NOT assume file contents — verify with read_file
 - Do NOT ignore error messages — they contain the exact solution
@@ -198,6 +236,7 @@ NEVER skip steps. Each phase prevents entire classes of bugs.
 - Use exec_background for long-running processes (servers, watchers)
 - For builds/tests: use exec with appropriate timeout (60s+ for large projects)
 - Minimize round-trips: combine exploration steps when possible
+- For massive refactors: use delegate_fanout to parallelize across files
 
 ## Git Workflow
 
@@ -205,6 +244,14 @@ NEVER skip steps. Each phase prevents entire classes of bugs.
 - git_diff to review changes before committing
 - Descriptive commit messages: "feat: add user auth" not "update files"
 - git_log to understand recent history and conventions
+
+## Subagent Delegation
+
+For complex multi-step tasks, use subagents:
+- **delegate_task**: One focused task to a specialist (coder, reviewer, tester)
+- **delegate_parallel**: Multiple independent tasks at once
+- **delegate_fanout**: Split a large refactor across files, each file gets its own coder
+- **delegate_pipeline**: Plan → Code → Test → Review sequential workflow
 
 ## Skills
 If available skills match this task, use the use_skill tool to load specialized instructions.

@@ -15,6 +15,8 @@ export { createMcpTools } from './mcpTools.js';
 export { createA2ATools } from './a2aTools.js';
 export { createAGUITools } from './aguiTools.js';
 export { createGraphTools } from './graphTools.js';
+export { createAdvancedEditTools, advancedEditTools } from './advancedEditTools.js';
+export { default as EditEngine } from './EditEngine.js';
 
 // Local imports for factory functions
 import { ToolRegistry as _ToolRegistry } from './ToolRegistry.js';
@@ -26,6 +28,7 @@ import { createMcpTools as _createMcpTools } from './mcpTools.js';
 import { createA2ATools as _createA2ATools } from './a2aTools.js';
 import { createAGUITools as _createAGUITools } from './aguiTools.js';
 import { createGraphTools as _createGraphTools } from './graphTools.js';
+import { createAdvancedEditTools as _createAdvancedEditTools } from './advancedEditTools.js';
 
 /**
  * Create a fully-configured tool registry
@@ -44,6 +47,7 @@ export function createDefaultRegistry(options = {}) {
     ..._createMcpTools(options),
     ..._createA2ATools(options),
     ..._createAGUITools(options),
+    ..._createAdvancedEditTools(options),
   ]);
   
   if (options.permissions) {

@@ -13,6 +13,7 @@ import { encodeImageToBase64, getImageMimeType } from '../vision.js';
 import { CONFIG } from '../config.js';
 import { Platform } from '../utils/platform.js';
 import { getCachedFile } from './fileCache.js';
+import { fuzzyFind, detectIndentation, reindentBlock, getIndentLevel } from './EditEngine.js';
 
 const PATH_PREFIX_NOTE = 'Supports absolute paths plus the special prefixes project:, workdir:, workspace:, and openagent:.';
 
@@ -282,7 +283,7 @@ export function createFileTools(options = {}) {
 
   const editFileTool = {
     name: 'edit_file',
-    description: `Edit a file by finding and replacing text. Supports: exact match, line-based editing (startLine/endLine), batch edits, regex, dry-run, and undo. ${PATH_PREFIX_NOTE}`,
+    description: `Edit a file by finding and replacing text. Supports: exact match, FUZZY MATCHING (auto-corrects whitespace/indentation differences), line-based editing (startLine/endLine), batch edits, regex, dry-run, and undo. If exact match fails, fuzzy matching kicks in automatically. For complex multi-line edits, consider write_file_blocks or apply_patch. ${PATH_PREFIX_NOTE}`,
     category: 'file',
     permission: 'write',
     parameters: {
@@ -396,33 +397,63 @@ export function createFileTools(options = {}) {
               return { content, changed: false, error: `Invalid regex "${editFind}": ${err.message}` };
             }
           } else {
-            if (!content.includes(editFind)) {
-              // Provide helpful context: show the first 200 chars of what was searched
-              const searchedPreview = editFind.length > 200 ? editFind.substring(0, 200) + '...' : editFind;
-              // Try to find the closest matching line for debugging
-              const searchLines = Platform.splitLines(editFind);
-              const firstLine = searchLines[0].trim();
-              const contentLines = Platform.splitLines(content);
-              const similarLines = contentLines
-                .map((line, i) => ({ line: i + 1, text: line.trim(), similarity: firstLine.length > 0 && line.includes(firstLine.substring(0, Math.min(20, firstLine.length))) ? 1 : 0 }))
-                .filter(l => l.similarity > 0)
-                .slice(0, 3);
-              
-              let hint = `Text not found in file.\n\nSearched for (${editFind.length} chars):\n"${searchedPreview}"`;
-              if (similarLines.length > 0) {
-                hint += `\n\nSimilar lines found in file:`;
-                for (const sl of similarLines) {
-                  hint += `\n  Line ${sl.line}: "${sl.text.substring(0, 100)}"`;
-                }
-                hint += `\n\nTIP: Use read_file with startLine/endLine to get the exact text, then retry with the verbatim content.`;
-              } else {
-                hint += `\n\nTIP: Re-read the file with read_file to get the current content, then use the EXACT text from the file.`;
-              }
-              return { content, changed: false, error: hint, suggestion: 'Re-read the file with read_file and use the EXACT text as find, or use startLine/endLine for line-based editing.' };
+            // Strategy 1: Exact match
+            if (content.includes(editFind)) {
+              const newContent = replaceAll ? content.split(editFind).join(editReplace) : content.replace(editFind, editReplace);
+              return { content: newContent, changed: newContent !== content };
             }
-            const newContent = replaceAll ? content.split(editFind).join(editReplace) : content.replace(editFind, editReplace);
-            return { content: newContent, changed: newContent !== content };
+
+            // Strategy 2: Fuzzy match via EditEngine
+            const fuzzyResult = fuzzyFind(content, editFind);
+            if (fuzzyResult.found && fuzzyResult.similarity === undefined || (fuzzyResult.similarity && fuzzyResult.similarity >= 0.85)) {
+              // Use the fuzzy-matched text for replacement
+              const matchedText = fuzzyResult.matchedText;
+              const idx = fuzzyResult.index;
+
+              // Detect indentation and reindent replacement if needed
+              let finalReplace = editReplace;
+              if (fuzzyResult.strategy !== 'exact') {
+                const indentInfo = detectIndentation(content);
+                const matchedIndent = getIndentAtPos(content, idx);
+                finalReplace = reindentBlock(editReplace, matchedIndent, indentInfo);
+              }
+
+              const newContent = content.substring(0, idx) + finalReplace + content.substring(idx + matchedText.length);
+              return { content: newContent, changed: true, strategy: fuzzyResult.strategy, similarity: fuzzyResult.similarity };
+            }
+
+            // Strategy 3: No match — provide diagnostics
+            const searchedPreview = editFind.length > 200 ? editFind.substring(0, 200) + '...' : editFind;
+            const searchLines = Platform.splitLines(editFind);
+            const firstLine = searchLines[0].trim();
+            const contentLines = Platform.splitLines(content);
+            const similarLines = contentLines
+              .map((line, i) => ({ line: i + 1, text: line.trim(), similarity: firstLine.length > 0 && line.includes(firstLine.substring(0, Math.min(20, firstLine.length))) ? 1 : 0 }))
+              .filter(l => l.similarity > 0)
+              .slice(0, 3);
+
+            let hint = `Text not found in file (tried exact + fuzzy matching).\n\nSearched for (${editFind.length} chars):\n"${searchedPreview}"`;
+            hint += `\nFuzzy strategy: ${fuzzyResult.strategy}`;
+            if (similarLines.length > 0) {
+              hint += `\n\nSimilar lines found in file:`;
+              for (const sl of similarLines) {
+                hint += `\n  Line ${sl.line}: "${sl.text.substring(0, 100)}"`;
+              }
+              hint += `\n\nTIP: Use read_file with startLine/endLine to get the exact text, then retry with the verbatim content.`;
+            } else {
+              hint += `\n\nTIP: Re-read the file with read_file to get the current content, then use the EXACT text from the file.`;
+            }
+            hint += `\n\nAlternatively, use write_file_blocks (SEARCH/REPLACE format) or apply_patch for more reliable editing.`;
+            return { content, changed: false, error: hint, suggestion: 'Re-read the file with read_file and use the EXACT text as find, or use startLine/endLine for line-based editing, or try write_file_blocks.' };
           }
+        }
+
+        function getIndentAtPos(content, position) {
+          let lineStart = content.lastIndexOf('\n', position - 1);
+          lineStart = lineStart === -1 ? 0 : lineStart + 1;
+          const line = content.substring(lineStart);
+          const match = line.match(/^(\s*)/);
+          return match ? match[1].length : 0;
         }
 
         /**
