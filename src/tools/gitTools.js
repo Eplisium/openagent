@@ -207,14 +207,15 @@ export function createGitTools(options = {}) {
       },
       required: ['files'],
     },
-    async execute({ cwd = '.', files }) {
-      const result = await runGit(`add "${files}"`, cwd);
-      return {
-        success: result.success,
-        message: result.success ? `Staged: ${files}` : result.error,
-      };
-    },
-  };
+            async execute({ cwd = '.', files }) {
+          // Sanitize files argument BEFORE constructing the command
+          const sanitizedFiles = sanitizeGitArgs(files);
+          const result = await runGit(`add "${sanitizedFiles}"`, cwd);
+          return {
+            success: result.success,
+            message: result.success ? `Staged: ${sanitizedFiles}` : result.error,
+          };
+        }, };
 
   const gitCommitTool = {
     name: 'git_commit',
