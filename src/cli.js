@@ -20,6 +20,7 @@ import boxen from 'boxen';
 import gradient from 'gradient-string';
 import fs from './utils/fs-compat.js';
 import path from 'path';
+import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { AgentSession } from './agent/AgentSession.js';
 import { CONFIG } from './config.js';
@@ -498,20 +499,39 @@ export class CLI {
 
     const dirParts = this.workingDir.replace(/\\/g, '/').split('/');
     const shortDir = dirParts.length > 2 ? '…/' + dirParts.slice(-2).join('/') : this.workingDir;
+    // Git branch (cached, refreshed every 30s)
+    let gitBranch = '';
+    if (!this._gitBranchCache || Date.now() - this._gitBranchCacheTime > 30000) {
+      try {
+        gitBranch = execSync('git branch --show-current', { cwd: this.workingDir, encoding: 'utf8', timeout: 1000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      } catch { /* not a git repo or git not available */ }
+      this._gitBranchCache = gitBranch;
+      this._gitBranchCacheTime = Date.now();
+    } else {
+      gitBranch = this._gitBranchCache;
+    }
+
+    const streamStr = this.streaming ? chalk.green('stream') : chalk.yellow('chat');
 
     const segments = [
       `${chalk.dim('🤖')} ${chalk.cyan(shortenModelLabel(this.session.agent.model))}`,
       `${chalk.dim('[')}${contextBar}${chalk.dim(']')} ${contextColor(context.percent + '%')}`,
       costStr,
       toolStr,
+      streamStr,
       `${chalk.dim(elapsedStr)}`,
-      `${chalk.gray(shortDir)}`,
     ];
+
+    if (gitBranch) {
+      segments.splice(4, 0, `${chalk.dim('⎇')} ${chalk.magenta(gitBranch)}`);
+    }
 
     const workspaceLabel = getWorkspaceLabel(this);
     if (workspaceLabel !== 'none') {
-      segments.splice(5, 0, `${chalk.dim('ws')} ${chalk.gray(workspaceLabel)}`);
+      segments.push(`${chalk.dim('ws')} ${chalk.gray(workspaceLabel)}`);
     }
+
+    segments.push(`${chalk.gray(shortDir)}`);
 
     return `${chalk.dim('─ ')}${segments.join(chalk.dim(' │ '))}`;
   }
@@ -595,6 +615,7 @@ export class CLI {
     };
 
     console.log(chalk.dim('──────────────────────'));
+    console.log(chalk.dim('  Press Ctrl+C to stop and send a new message'));
 
     this.session.agent.onIterationStart = (_iteration) => {
       const iterationLabel = this.session.agent.formatIterationLabel();
@@ -622,23 +643,40 @@ export class CLI {
       console.log(formatter(`   ${message}`));
     };
 
-    // Progress indicator for long-running tasks
-    let progressInterval = null;
-    const startProgressIndicator = () => {
-      let elapsed = 0;
-      progressInterval = setInterval(() => {
-        elapsed += 1;
-        process.stdout.write(`\r  ${chalk.yellow('⏳')} ${chalk.gray('Working...')} ${chalk.white(elapsed.toFixed(1) + 's')}  `);
-      }, 1000);
-    };
-    const stopProgressIndicator = () => {
-      if (progressInterval) {
-        clearInterval(progressInterval);
-        progressInterval = null;
-        process.stdout.write('\r' + ' '.repeat(40) + '\r');
+            // Progress indicator for long-running tasks
+        let progressInterval = null;
+        let progressMessage = 'Working...';
+        this._progressMessage = (msg) => { progressMessage = msg; };
+        const startProgressIndicator = () => {
+          let elapsed = 0;
+          progressInterval = setInterval(() => {
+            elapsed += 1;
+            process.stdout.write(`\r  ${chalk.yellow('⏳')} ${chalk.gray(progressMessage)} ${chalk.white(elapsed.toFixed(1) + 's')}  `);
+          }, 1000);
+        };
+        const stopProgressIndicator = () => {
+          if (progressInterval) {
+            clearInterval(progressInterval);
+            progressInterval = null;
+            process.stdout.write('\r' + ' '.repeat(50) + '\r');
+          }
+        };
+        const progressTimeout = setTimeout(startProgressIndicator, 5000); // ── Ctrl+C abort handler ──
+    // During task execution, intercept Ctrl+C to abort the agent
+    // instead of killing the whole process.
+    let abortHandler = null;
+    const wasRaw = process.stdin.isRaw;
+    if (process.stdin.isTTY && !process.stdin.isRaw) {
+      process.stdin.setRawMode(true);
+    }
+    process.stdin.resume();
+    abortHandler = (data) => {
+      // Ctrl+C = 0x03
+      if (data[0] === 0x03) {
+        this.session.agent.abort();
       }
     };
-    const progressTimeout = setTimeout(startProgressIndicator, 5000);
+    process.stdin.on('data', abortHandler);
 
     try {
       const result = await this.session.run(task);
@@ -667,13 +705,24 @@ export class CLI {
       await this.saveState();
 
     } catch (error) {
-      showSmartError('task_execution', {
-        message: error.message,
-        task,
-        suggestions: generateErrorSuggestions(error, task),
-        errorData: error.details || error.stack || null,
-      });
+      if (error.name === 'AgentAbortError') {
+        console.log(chalk.yellow('\n⏹  Stopped by user. Ready for your next message.'));
+      } else {
+        showSmartError('task_execution', {
+          message: error.message,
+          task,
+          suggestions: generateErrorSuggestions(error, task),
+          errorData: error.details || error.stack || null,
+        });
+      }
     } finally {
+      // Clean up Ctrl+C handler
+      if (abortHandler) {
+        process.stdin.removeListener('data', abortHandler);
+      }
+      if (process.stdin.isTTY && !wasRaw) {
+        try { process.stdin.setRawMode(false); } catch { /* may fail if stream closed */ }
+      }
       clearTimeout(progressTimeout);
       stopProgressIndicator();
       Object.assign(this.session.agent, previousCallbacks);
@@ -698,6 +747,7 @@ export class CLI {
     };
 
     console.log(chalk.dim('──────────────────────'));
+    console.log(chalk.dim('  Press Ctrl+C to stop and send a new message'));
 
     this.session.agent.onIterationStart = () => {
       console.log(chalk.dim(`\n── ${this.session.agent.formatIterationLabel()} ──`));
@@ -719,6 +769,20 @@ export class CLI {
       const f = type === 'compaction' ? chalk.cyan : type === 'retry' ? chalk.yellow : chalk.dim;
       console.log(f(`   ${message}`));
     };
+
+    // ── Ctrl+C abort handler ──
+    let abortHandler = null;
+    const wasRaw = process.stdin.isRaw;
+    if (process.stdin.isTTY && !process.stdin.isRaw) {
+      process.stdin.setRawMode(true);
+    }
+    process.stdin.resume();
+    abortHandler = (data) => {
+      if (data[0] === 0x03) {
+        this.session.agent.abort();
+      }
+    };
+    process.stdin.on('data', abortHandler);
 
     try {
       this.session.agent.pushMessage(multimodalMsg);
@@ -749,13 +813,24 @@ export class CLI {
       }
       await this.saveState();
     } catch (error) {
-      showSmartError('task_execution', {
-        message: error.message,
-        task: this.currentTask,
-        suggestions: generateErrorSuggestions(error, this.currentTask),
-        errorData: error.details || error.stack || null,
-      });
+      if (error.name === 'AgentAbortError') {
+        console.log(chalk.yellow('\n⏹  Stopped by user. Ready for your next message.'));
+      } else {
+        showSmartError('task_execution', {
+          message: error.message,
+          task: this.currentTask,
+          suggestions: generateErrorSuggestions(error, this.currentTask),
+          errorData: error.details || error.stack || null,
+        });
+      }
     } finally {
+      // Clean up Ctrl+C handler
+      if (abortHandler) {
+        process.stdin.removeListener('data', abortHandler);
+      }
+      if (process.stdin.isTTY && !wasRaw) {
+        try { process.stdin.setRawMode(false); } catch { /* may fail if stream closed */ }
+      }
       Object.assign(this.session.agent, previousCallbacks);
       this.currentTask = null;
       this.taskStartTime = null;

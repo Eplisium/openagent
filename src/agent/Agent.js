@@ -109,6 +109,15 @@ export class Agent {
     this.noActionTrapCount = 0;
     this.maxNoActionTraps = 3;
 
+    // File-level stall detection: track read/edit cycles on the same file
+    this.fileOperationHistory = []; // [{toolName, filePath, iteration}]
+    this.maxFileStall = options.maxFileStall || CONFIG.AGENT_MAX_FILE_STALL;
+
+    // Tool-name pattern stall: track the sequence of tool names per round
+    // to detect alternating patterns like read→edit→read→edit
+    this.roundToolNameHistory = []; // ["read_file", "edit_file", ...]
+    this.maxPatternStall = options.maxPatternStall || 8; // Same pattern repeating N times
+
     // Tool failure tracking for self-reflection (used in reflectOnToolResults)
     this.toolFailureCounts = {};
 
@@ -297,6 +306,105 @@ When done, provide a clear summary: what changed, why, what was verified, and an
   }
 
   /**
+   * Detect file-level stall: the agent is cycling read → edit → read → edit
+   * on the same file(s) without making meaningful progress. This catches the
+   * common pattern where the model keeps re-reading a file it just edited
+   * with slightly different line ranges, so the exact-argument stall detector
+   * never fires.
+   */
+  hasFileStalled() {
+    if (this.fileOperationHistory.length < 4) return false;
+
+    // Look at the last N operations and check if we're in a read/edit cycle
+    // on the same file(s)
+    const recentOps = this.fileOperationHistory.slice(-this.maxFileStall * 2);
+    const fileEditCounts = {};
+    const fileReadCounts = {};
+
+    for (const op of recentOps) {
+      if (!op.filePath) continue;
+      const file = op.filePath.toLowerCase();
+      if (op.toolName === 'edit_file' || op.toolName === 'write_file') {
+        fileEditCounts[file] = (fileEditCounts[file] || 0) + 1;
+      } else if (op.toolName === 'read_file') {
+        fileReadCounts[file] = (fileReadCounts[file] || 0) + 1;
+      }
+    }
+
+    // If any single file has been both read and edited multiple times in recent ops,
+    // we're in a file stall
+    for (const file of Object.keys(fileEditCounts)) {
+      const edits = fileEditCounts[file] || 0;
+      const reads = fileReadCounts[file] || 0;
+      if (edits >= this.maxFileStall / 2 && reads >= this.maxFileStall / 2) {
+        return file;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Record a file operation for stall tracking.
+   * Called from postToolIteration after tool calls are processed.
+   */
+  recordFileOperations(toolCalls) {
+    for (const tc of toolCalls) {
+      const name = tc.name;
+      if (name !== 'read_file' && name !== 'edit_file' && name !== 'write_file') continue;
+      const args = tc.arguments || {};
+      const filePath = args.path || args.filePath || args.file || null;
+      if (filePath) {
+        this.fileOperationHistory.push({
+          toolName: name,
+          filePath: String(filePath).replace(/\\/g, '/'),
+          iteration: this.iterationCount,
+        });
+        // Keep only the last 100 operations to avoid unbounded growth
+        if (this.fileOperationHistory.length > 100) {
+          this.fileOperationHistory = this.fileOperationHistory.slice(-50);
+        }
+      }
+    }
+  }
+
+  /**
+   * Detect tool-name pattern stall: the agent is repeating the same
+   * sequence of tool names (e.g., read_file → edit_file) across rounds,
+   * even though the exact arguments differ. This catches alternating
+   * patterns that the exact-signature stall detector misses.
+   */
+  hasPatternStalled() {
+    const history = this.roundToolNameHistory;
+    if (history.length < 4) return false;
+
+    // Check for repeating 2-round patterns in the recent history
+    // A 2-round pattern like ["read_file", "edit_file"] repeating means
+    // the history looks like: [r, e, r, e, r, e, ...]
+    const recent = history.slice(-this.maxPatternStall);
+    if (recent.length < 4) return false;
+
+    // Try pattern lengths 1 and 2
+    for (const patternLen of [1, 2]) {
+      if (recent.length < patternLen * 3) continue; // Need at least 3 repetitions
+      const pattern = recent.slice(0, patternLen);
+      let repetitions = 0;
+      for (let i = 0; i <= recent.length - patternLen; i += patternLen) {
+        const chunk = recent.slice(i, i + patternLen);
+        const match = pattern.every((name, idx) => chunk[idx] === name);
+        if (match) {
+          repetitions++;
+        } else {
+          break;
+        }
+      }
+      if (repetitions >= 3) {
+        return pattern.join(' → ');
+      }
+    }
+    return false;
+  }
+
+  /**
    * Detect "hallucinated action" — the model describes doing something
    * but produces zero tool calls. This happens when a model doesn't
    * support native function calling and falls into a "I'll do X" loop.
@@ -417,11 +525,18 @@ When done, provide a clear summary: what changed, why, what was verified, and an
   }
 
   recordToolRound(toolCalls) {
+    // Fuzzy signature: tool name + target file only (not full args).
+    // This catches read→edit→read→edit cycles on the same file where
+    // the exact arguments (line numbers, edit content) differ each time.
     const signature = JSON.stringify(
-      toolCalls.map(toolCall => ({
-        name: toolCall.name,
-        arguments: toolCall.arguments,
-      }))
+      toolCalls.map(toolCall => {
+        const args = toolCall.arguments || {};
+        const filePath = args.path || args.filePath || args.file || null;
+        return {
+          name: toolCall.name,
+          file: filePath ? String(filePath).replace(/\\/g, '/') : null,
+        };
+      })
     );
 
     if (signature === this.lastToolCallSignature) {
@@ -1166,6 +1281,13 @@ Task: ${userInput}`;
     this.history.push(iterationRecord);
     runHistory.push(iterationRecord);
     this.recordToolRound(toolCalls);
+    this.recordFileOperations(toolCalls);
+    // Track tool name pattern for pattern-stall detection
+    const roundNames = toolCalls.map(tc => tc.name).join('+');
+    this.roundToolNameHistory.push(roundNames);
+    if (this.roundToolNameHistory.length > 50) {
+      this.roundToolNameHistory = this.roundToolNameHistory.slice(-25);
+    }
 
     // Update performance metrics (guard against division by zero)
     const iterDuration = Date.now() - iterationStart;
@@ -1201,6 +1323,17 @@ Task: ${userInput}`;
       if (this.hasReachedRuntimeLimit(startTime)) { this.stopReason = 'max_runtime'; break; }
       if (this.hasReachedToolCallLimit()) { this.stopReason = 'max_tool_calls'; break; }
       if (this.hasStalled()) { this.stopReason = 'stalled'; break; }
+      const stalledFile = this.hasFileStalled();
+      const stalledPattern = this.hasPatternStalled();
+      if (stalledFile || stalledPattern) {
+        const parts = [];
+        if (stalledFile) parts.push(`reading and editing "${stalledFile}" in a cycle`);
+        if (stalledPattern) parts.push(`repeating the tool pattern (${stalledPattern})`);
+        this.pushMessage({
+          role: 'user',
+          content: `[System] You are ${parts.join(' and ')} without making meaningful progress. Stop re-reading files you've already edited. Either: (1) move on to the next file or task, or (2) provide your final answer with the changes you've already made.`,
+        });
+      }
 
       this.iterationCount++;
       this.performanceMetrics.totalIterations++;
@@ -1547,6 +1680,8 @@ Task: ${userInput}`;
         this.repeatedToolRoundCount = 0;
         this.noActionTrapCount = 0;
         this.toolFailureCounts = {};
+        this.fileOperationHistory = [];
+        this.roundToolNameHistory = [];
         // Fall through to non-streaming path below
       }
     }
@@ -1579,7 +1714,19 @@ Task: ${userInput}`;
           this.stopReason = 'stalled';
           break;
         }
-        
+
+        const nonStreamStalledFile = this.hasFileStalled();
+        const nonStreamStalledPattern = this.hasPatternStalled();
+        if (nonStreamStalledFile || nonStreamStalledPattern) {
+          const parts = [];
+          if (nonStreamStalledFile) parts.push(`reading and editing "${nonStreamStalledFile}" in a cycle`);
+          if (nonStreamStalledPattern) parts.push(`repeating the tool pattern (${nonStreamStalledPattern})`);
+          this.pushMessage({
+            role: 'user',
+            content: `[System] You are ${parts.join(' and ')} without making meaningful progress. Stop re-reading files you've already edited. Either: (1) move on to the next file or task, or (2) provide your final answer with the changes you've already made.`,
+          });
+        }
+
         this.iterationCount++;
         this.performanceMetrics.totalIterations++;
         
@@ -2200,6 +2347,8 @@ Task: ${userInput}`;
     this.lastToolCallSignature = null;
     this.repeatedToolRoundCount = 0;
     this.noActionTrapCount = 0;
+    this.fileOperationHistory = [];
+    this.roundToolNameHistory = [];
     const startTime = Date.now();
     
     while (true) {
@@ -2224,6 +2373,17 @@ Task: ${userInput}`;
       if (this.hasStalled()) {
         this.stopReason = 'stalled';
         break;
+      }
+      const streamStalledFile = this.hasFileStalled();
+      const streamStalledPattern = this.hasPatternStalled();
+      if (streamStalledFile || streamStalledPattern) {
+        const parts = [];
+        if (streamStalledFile) parts.push(`reading and editing "${streamStalledFile}" in a cycle`);
+        if (streamStalledPattern) parts.push(`repeating the tool pattern (${streamStalledPattern})`);
+        this.pushMessage({
+          role: 'user',
+          content: `[System] You are ${parts.join(' and ')} without making meaningful progress. Stop re-reading files you've already edited. Either: (1) move on to the next file or task, or (2) provide your final answer with the changes you've already made.`,
+        });
       }
 
       this.iterationCount++;
@@ -2327,6 +2487,13 @@ Task: ${userInput}`;
       };
 
       this.recordToolRound(toolCalls);
+      this.recordFileOperations(toolCalls);
+      // Track tool name pattern for pattern-stall detection
+      const rsRoundNames = toolCalls.map(tc => tc.name).join('+');
+      this.roundToolNameHistory.push(rsRoundNames);
+      if (this.roundToolNameHistory.length > 50) {
+        this.roundToolNameHistory = this.roundToolNameHistory.slice(-25);
+      }
     }
     
     if (this.stopReason === 'max_iterations') {
@@ -2495,6 +2662,7 @@ Task: ${userInput}`;
     this.repeatedSingleToolCount = 0;
     this.toolFailureCounts = {};
     this.workingSet.clear();
+    this.fileOperationHistory = [];
     this.performanceMetrics = {
       totalIterations: 0,
       totalToolCalls: 0,

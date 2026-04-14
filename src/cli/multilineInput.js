@@ -67,6 +67,17 @@ export class MultilineInput {
     this._handler = null;
     this._wasRaw = false;
 
+    // Autocomplete
+    this.commands = opts.commands || [];  // Array of command strings like ['/help', '/model', ...]
+    this._autocompleteMatches = [];
+    this._autocompleteIndex = -1;
+
+    // Reverse search
+    this._searchMode = false;
+    this._searchQuery = '';
+    this._searchMatches = [];
+    this._searchIndex = 0;
+
     // Load history from disk
     this._loadHistory();
   }
@@ -138,11 +149,18 @@ export class MultilineInput {
   _onData(data) {
     if (!this._active) return;
 
+    // Search mode intercepts most keys
+    if (this._searchMode) {
+      this._handleSearchKey(data);
+      return;
+    }
+
     // Some Windows terminals deliver Enter as CRLF in raw mode.
     if (data === '\r\n') {
       this._submit();
       return;
     }
+    if (!this._active) return;
 
     // Enhanced keyboard protocols may surface modified Enter directly.
     if (data === '\x0f' || data === '\x1b\r' || data === '\x1b\n' || data === '\x1b[13;2u' || data === '\x1b[27;13;2~') {
@@ -182,16 +200,16 @@ export class MultilineInput {
       this._backspace();
       return;
     }
-
     // Delete
     if (data === '\x1b[3~') {
       this._delete();
       return;
     }
 
-    // Tab = insert 2 spaces
+    // Tab = autocomplete slash commands (or insert spaces if no match)
     if (data === '\t') {
-      this._insert('  ');
+      if (this._searchMode) return; // ignore tab in search mode
+      this._handleAutocomplete();
       return;
     }
 
@@ -231,6 +249,19 @@ export class MultilineInput {
       if (this._resolve) this._resolve(MultilineInput.CLEAR_SCREEN);
       return;
     }
+    // Ctrl+T = cycle theme
+    // Ctrl+R = reverse history search
+    if (data === '\x12') {
+      if (this._searchMode) {
+        // Cycle through matches
+        this._searchIndex = (this._searchIndex + 1) % Math.max(1, this._searchMatches.length);
+        this._render();
+        return;
+      }
+      this._enterSearchMode();
+      return;
+    }
+
     // Ctrl+T = cycle theme
     if (data === '\x14') {
       this._clearRenderedBlock();
@@ -700,6 +731,114 @@ export class MultilineInput {
     }
     this.sel = null;
     this._render();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 🔍 Autocomplete & Reverse Search
+  // ═══════════════════════════════════════════════════════════
+
+  _handleAutocomplete() {
+    const line = this.lines[this.row] || '';
+    const before = line.slice(0, this.col);
+
+    // Only autocomplete slash commands when the line starts with '/'
+    if (!before.startsWith('/')) {
+      this._insert('  '); // Fall back to inserting spaces
+      return;
+    }
+
+    const prefix = before.split(/\s/).pop(); // Current word
+    if (!prefix || !prefix.startsWith('/')) {
+      this._insert('  ');
+      return;
+    }
+
+    // Find matching commands
+    const matches = (this.commands || []).filter(c => c.startsWith(prefix));
+    if (matches.length === 0) {
+      this._insert('  ');
+      return;
+    }
+
+    // Cycle through matches
+    this._autocompleteIndex++;
+    if (this._autocompleteIndex >= matches.length) this._autocompleteIndex = 0;
+
+    const match = matches[this._autocompleteIndex];
+    // Replace the current word with the match
+    const wordStart = before.lastIndexOf(prefix);
+    this.lines[this.row] = line.slice(0, wordStart) + match + line.slice(this.col);
+    this.col = wordStart + match.length;
+    this._render();
+  }
+
+  _enterSearchMode() {
+    this._searchMode = true;
+    this._searchQuery = '';
+    this._searchIndex = 0;
+    this._searchMatches = [];
+    this._render();
+  }
+
+  _exitSearchMode() {
+    this._searchMode = false;
+    this._searchQuery = '';
+    this._searchMatches = [];
+    this._render();
+  }
+
+  _handleSearchKey(data) {
+    // Escape = exit search mode
+    if (data === '\x1b') {
+      this._exitSearchMode();
+      return;
+    }
+    // Enter = accept current match and exit search mode
+    if (data === '\r' || data === '\n') {
+      if (this._searchMatches.length > 0 && this._searchIndex < this._searchMatches.length) {
+        const match = this._searchMatches[this._searchIndex];
+        this.lines = [match];
+        this.row = 0;
+        this.col = match.length;
+      }
+      this._exitSearchMode();
+      return;
+    }
+    // Ctrl+R = cycle through matches
+    if (data === '\x12') {
+      if (this._searchMatches.length > 0) {
+        this._searchIndex = (this._searchIndex + 1) % this._searchMatches.length;
+      }
+      this._render();
+      return;
+    }
+    // Backspace = remove last char from query
+    if (data === '\x7f' || data === '\b') {
+      if (this._searchQuery.length > 0) {
+        this._searchQuery = this._searchQuery.slice(0, -1);
+        this._updateSearchMatches();
+      } else {
+        this._exitSearchMode();
+      }
+      this._render();
+      return;
+    }
+    // Printable character = append to query
+    if (data.length === 1 && data >= ' ') {
+      this._searchQuery += data;
+      this._updateSearchMatches();
+      this._searchIndex = 0;
+      this._render();
+      return;
+    }
+  }
+
+  _updateSearchMatches() {
+    const q = this._searchQuery.toLowerCase();
+    this._searchMatches = this.history.filter(line =>
+      line.toLowerCase().includes(q)
+    ).slice(0, 20);
+    this._searchIndex = 0;
   }
 
   // ═══════════════════════════════════════════════════════════

@@ -38,21 +38,56 @@ export function spinner(text, { color = 'cyan', spinner: spinnerName = 'dots' } 
 
 /**
  * Create a thinking spinner (emoji-based, for LLM response waiting)
- * @returns {{ stop: Function }}
+ * @param {string} [message] - Optional message to display (default: 'Thinking')
+ * @returns {{ stop: Function, setMessage: Function }}
  */
-export function thinkingSpinner() {
+export function thinkingSpinner(message = 'Thinking') {
   const frames = ['🤔', '🤔.', '🤔..', '🤔...'];
   let frame = 0;
+  let currentMessage = message;
+  let elapsed = 0;
+  const startTime = Date.now();
+
   const interval = setInterval(() => {
-    process.stdout.write(`\r${chalk.gray(frames[frame])} `);
+    elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    process.stdout.write(`\r${chalk.gray(frames[frame])} ${chalk.gray(currentMessage)} ${chalk.dim(elapsed + 's')} `);
     frame = (frame + 1) % frames.length;
   }, 300);
 
   return {
     stop: () => {
       clearInterval(interval);
-      process.stdout.write('\r' + ' '.repeat(10) + '\r');
-    }
+      process.stdout.write('\r' + ' '.repeat(60) + '\r');
+    },
+    setMessage: (msg) => { currentMessage = msg; },
+  };
+}
+
+/**
+ * Create a contextual progress spinner with elapsed time
+ * @param {string} message - Initial message (e.g., 'Working...', 'Reading file...')
+ * @returns {{ stop: Function, setMessage: Function, getElapsed: Function }}
+ */
+export function contextualSpinner(message = 'Working...') {
+  let currentMessage = message;
+  let elapsed = 0;
+  const startTime = Date.now();
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let frame = 0;
+
+  const interval = setInterval(() => {
+    elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    process.stdout.write(`\r  ${chalk.yellow(frames[frame])} ${chalk.gray(currentMessage)} ${chalk.white(elapsed + 's')}  `);
+    frame = (frame + 1) % frames.length;
+  }, 80);
+
+  return {
+    stop: () => {
+      clearInterval(interval);
+      process.stdout.write('\r' + ' '.repeat(60) + '\r');
+    },
+    setMessage: (msg) => { currentMessage = msg; },
+    getElapsed: () => elapsed,
   };
 }
 
@@ -96,4 +131,4 @@ export function getSpinnerFrame(index, style = 'dots') {
  */
 export const SPINNER_STYLES = Object.keys(cliSpinners);
 
-export default { spinner, thinkingSpinner, respondingIndicator, getSpinnerFrames, getSpinnerFrame, SPINNER_STYLES };
+export default { spinner, thinkingSpinner, contextualSpinner, respondingIndicator, getSpinnerFrames, getSpinnerFrame, SPINNER_STYLES };

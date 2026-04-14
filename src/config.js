@@ -78,10 +78,11 @@ export const CONFIG = {
   // Context Management
   MAX_CONTEXT_TOKENS: parseInt(process.env.MAX_CONTEXT_TOKENS, 10) || 800000,
   COMPACT_THRESHOLD: parseFloat(process.env.COMPACT_THRESHOLD) || 0.7,
-  AGENT_MAX_ITERATIONS: normalizeOptionalLimit(process.env.AGENT_MAX_ITERATIONS, null),
-  AGENT_MAX_RUNTIME_MS: normalizeOptionalLimit(process.env.AGENT_MAX_RUNTIME_MS, null),
+  AGENT_MAX_ITERATIONS: normalizeOptionalLimit(process.env.AGENT_MAX_ITERATIONS, 50),
+  AGENT_MAX_RUNTIME_MS: normalizeOptionalLimit(process.env.AGENT_MAX_RUNTIME_MS, 30 * 60 * 1000), // 30 min
   AGENT_MAX_TOOL_CALLS: normalizeOptionalLimit(process.env.AGENT_MAX_TOOL_CALLS, null),
   AGENT_MAX_STALL_ITERATIONS: normalizePositiveInt(process.env.AGENT_MAX_STALL_ITERATIONS, 10),
+  AGENT_MAX_FILE_STALL: normalizePositiveInt(process.env.AGENT_MAX_FILE_STALL, 6), // Same-file read/edit cycles
   
   // Tool Settings
   TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS, 10) || 90000, // 90s — builds and large file operations need more headroom
