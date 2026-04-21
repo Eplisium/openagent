@@ -81,8 +81,8 @@ export const CONFIG = {
   AGENT_MAX_ITERATIONS: normalizeOptionalLimit(process.env.AGENT_MAX_ITERATIONS, 50),
   AGENT_MAX_RUNTIME_MS: normalizeOptionalLimit(process.env.AGENT_MAX_RUNTIME_MS, 30 * 60 * 1000), // 30 min
   AGENT_MAX_TOOL_CALLS: normalizeOptionalLimit(process.env.AGENT_MAX_TOOL_CALLS, null),
-  AGENT_MAX_STALL_ITERATIONS: normalizePositiveInt(process.env.AGENT_MAX_STALL_ITERATIONS, 10),
-  AGENT_MAX_FILE_STALL: normalizePositiveInt(process.env.AGENT_MAX_FILE_STALL, 6), // Same-file read/edit cycles
+  AGENT_MAX_STALL_ITERATIONS: normalizePositiveInt(process.env.AGENT_MAX_STALL_ITERATIONS, 6),
+  AGENT_MAX_FILE_STALL: normalizePositiveInt(process.env.AGENT_MAX_FILE_STALL, 4), // Same-file read/edit cycles
   
   // Tool Settings
   TOOL_TIMEOUT_MS: parseInt(process.env.TOOL_TIMEOUT_MS, 10) || 90000, // 90s — builds and large file operations need more headroom
@@ -99,7 +99,7 @@ export const CONFIG = {
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
 
   // Circuit Breaker
-  CIRCUIT_BREAKER_THRESHOLD: normalizePositiveInt(process.env.CIRCUIT_BREAKER_THRESHOLD, 3),
+  CIRCUIT_BREAKER_THRESHOLD: normalizePositiveInt(process.env.CIRCUIT_BREAKER_THRESHOLD, 2),
 
   // ═══════════════════════════════════════════════════════════════
   // 📁 File Tool Limits

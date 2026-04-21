@@ -165,6 +165,7 @@ export class CompanionServer extends EventEmitter {
     switch (msg.type) {
       case 'pause':
         if (this.session.agent) this.session.agent.abort();
+        if (this.session.subagentManager) this.session.subagentManager.abort();
         this.wsSink.writeEvent('state', { status: 'paused' });
         break;
 

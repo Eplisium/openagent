@@ -674,6 +674,10 @@ export class CLI {
       // Ctrl+C = 0x03
       if (data[0] === 0x03) {
         this.session.agent.abort();
+        // Also abort any running subagents so they stop immediately
+        if (this.session.subagentManager) {
+          this.session.subagentManager.abort();
+        }
       }
     };
     process.stdin.on('data', abortHandler);
@@ -780,6 +784,9 @@ export class CLI {
     abortHandler = (data) => {
       if (data[0] === 0x03) {
         this.session.agent.abort();
+        if (this.session.subagentManager) {
+          this.session.subagentManager.abort();
+        }
       }
     };
     process.stdin.on('data', abortHandler);

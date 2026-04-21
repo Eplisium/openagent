@@ -1198,6 +1198,42 @@ export class AgentSession {
     if (msg.includes('budget') || msg.includes('cost')) return 'BUDGET_EXCEEDED';
     return 'UNKNOWN';
   }
+
+  /**
+   * Explicitly release all resources held by this session.
+   * Call this when the session is no longer needed to prevent memory leaks.
+   */
+  destroy() {
+    // Abort any running agent execution
+    if (this.agent) {
+      this.agent.abort();
+      this.agent.clear();
+    }
+
+    // Clean up subagent manager (stops timers, clears tasks)
+    if (this.subagentManager) {
+      this.subagentManager.cleanup();
+    }
+
+    // Stop API client cache cleanup timer
+    if (this.agent?.client?.stopCacheCleanup) {
+      this.agent.client.stopCacheCleanup();
+    }
+
+    // Clear workflow graphs
+    if (this.workflowRegistry) {
+      this.workflowRegistry.clear();
+    }
+    if (this.activeGraphs) {
+      this.activeGraphs.clear();
+    }
+
+    // Clear checkpoints array
+    this.checkpoints = [];
+
+    // Mark as destroyed
+    this._destroyed = true;
+  }
 }
 
 export default AgentSession;

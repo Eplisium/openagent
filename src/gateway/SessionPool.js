@@ -48,6 +48,7 @@ export class SessionPool {
     for (const [, entry] of this.sessions) {
       try {
         if (entry.session.agent) entry.session.agent.abort();
+        if (entry.session.subagentManager) entry.session.subagentManager.abort();
       } catch { /* ignore */ }
     }
     this.sessions.clear();
@@ -115,6 +116,7 @@ export class SessionPool {
     if (entry) {
       try {
         if (entry.session.agent) entry.session.agent.abort();
+        if (entry.session.subagentManager) entry.session.subagentManager.abort();
       } catch { /* ignore */ }
       this.sessions.delete(sessionKey);
     }
@@ -157,6 +159,7 @@ export class SessionPool {
       const entry = this.sessions.get(oldestKey);
       try {
         if (entry?.session.agent) entry.session.agent.abort();
+        if (entry?.session.subagentManager) entry.session.subagentManager.abort();
       } catch { /* ignore */ }
       this.sessions.delete(oldestKey);
       this._stats.evicted++;
@@ -180,6 +183,7 @@ export class SessionPool {
       const entry = this.sessions.get(key);
       try {
         if (entry?.session.agent) entry.session.agent.abort();
+        if (entry?.session.subagentManager) entry.session.subagentManager.abort();
       } catch { /* ignore */ }
       this.sessions.delete(key);
       this._stats.evicted++;

@@ -1378,6 +1378,11 @@ Please synthesize these results into a single coherent, well-organized response.
       content: typeof message === 'string' ? message : JSON.stringify(message),
     };
     queue.push(entry);
+    // Enforce max queue size to prevent unbounded growth
+    const MAX_QUEUE_SIZE = 50;
+    if (queue.length > MAX_QUEUE_SIZE) {
+      queue.splice(0, queue.length - MAX_QUEUE_SIZE);
+    }
     return { success: true, queueSize: queue.length, messageId: entry.id };
   }
 

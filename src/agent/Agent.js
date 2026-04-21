@@ -116,7 +116,21 @@ export class Agent {
     // Tool-name pattern stall: track the sequence of tool names per round
     // to detect alternating patterns like read→edit→read→edit
     this.roundToolNameHistory = []; // ["read_file", "edit_file", ...]
-    this.maxPatternStall = options.maxPatternStall || 8; // Same pattern repeating N times
+    this.maxPatternStall = options.maxPatternStall || 6; // Same pattern repeating N times
+
+    // Progress tracking: detect when agent is spinning without accomplishment
+    this.successfulToolCalls = 0;   // Total tools that succeeded
+    this.failedToolCalls = 0;       // Total tools that failed
+    this.iterationsWithoutProgress = 0; // Consecutive iterations with zero successful tools
+    this.maxNoProgressIterations = options.maxNoProgressIterations || 4;
+
+    // Dead-end detection: track if agent is stuck in a failure mode despite changing approach
+    this.recentErrorCategories = []; // Rolling window of error categories
+    this.maxDeadEndWindow = 8;
+
+    // Diversity tracking: detect tool-type monotony (only reading, only editing, etc.)
+    this.toolTypeHistory = []; // [{iteration, readCount, writeCount, execCount, otherCount}]
+    this.maxDiversityWindow = 6;
 
     // Tool failure tracking for self-reflection (used in reflectOnToolResults)
     this.toolFailureCounts = {};
@@ -405,6 +419,130 @@ When done, provide a clear summary: what changed, why, what was verified, and an
   }
 
   /**
+   * Detect when the agent is spinning: consecutive iterations where
+   * every tool call failed. This catches the "try, fail, try, fail" loop
+   * before the generic stall detector fires.
+   */
+  hasNoProgress() {
+    return this.iterationsWithoutProgress >= this.maxNoProgressIterations;
+  }
+
+  /**
+   * Detect dead-end: the agent has tried multiple different approaches
+   * but keeps hitting the same error categories. This means changing
+   * arguments isn't helping — the problem is upstream.
+   *
+   * Returns the dominant error category or null.
+   */
+  hasDeadEnded() {
+    if (this.recentErrorCategories.length < 4) return null;
+
+    const window = this.recentErrorCategories.slice(-this.maxDeadEndWindow);
+    const counts = {};
+    for (const cat of window) {
+      counts[cat] = (counts[cat] || 0) + 1;
+    }
+
+    // If one error category dominates (>60% of recent errors), it's a dead end
+    const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    if (dominant && dominant[1] >= Math.ceil(window.length * 0.6)) {
+      return dominant[0];
+    }
+    return null;
+  }
+
+  /**
+   * Detect tool-type monotony: the agent is only reading files (exploration
+   * loop) or only editing files (modification loop) without mixing. A healthy
+   * task usually alternates between reading and writing.
+   *
+   * Returns a description string or null.
+   */
+  hasToolTypeMonotony() {
+    if (this.toolTypeHistory.length < 3) return null;
+
+    const recent = this.toolTypeHistory.slice(-this.maxDiversityWindow);
+    const totals = { read: 0, write: 0, exec: 0, other: 0 };
+    for (const entry of recent) {
+      totals.read += entry.readCount;
+      totals.write += entry.writeCount;
+      totals.exec += entry.execCount;
+      totals.other += entry.otherCount;
+    }
+
+    const total = totals.read + totals.write + totals.exec + totals.other;
+    if (total === 0) return null;
+
+    // Pure read loop: 100% reads, 3+ iterations, no writes
+    if (totals.read > 0 && totals.write === 0 && totals.exec === 0 && recent.length >= 4) {
+      return 'read-only loop — agent is only reading files without making changes';
+    }
+
+    // Pure edit loop: 100% writes, 3+ iterations, no reads
+    if (totals.write > 0 && totals.read === 0 && totals.exec === 0 && recent.length >= 4) {
+      return 'write-only loop — agent is only editing files without reading them first';
+    }
+
+    // Pure exec loop: 100% shell commands, 4+ iterations
+    if (totals.exec > 0 && totals.read === 0 && totals.write === 0 && recent.length >= 5) {
+      return 'exec-only loop — agent is only running shell commands without other actions';
+    }
+
+    return null;
+  }
+
+  /**
+   * Classify a round of tool calls by type for diversity tracking.
+   * Called from postToolIteration.
+   */
+  recordToolTypeRound(toolCalls) {
+    const counts = { readCount: 0, writeCount: 0, execCount: 0, otherCount: 0 };
+    const readTools = new Set(['read_file', 'read_files', 'list_directory', 'file_tree', 'search_files', 'search_in_files', 'get_file_info']);
+    const writeTools = new Set(['write_file', 'edit_file', 'search_and_replace', 'create_file']);
+    const execTools = new Set(['exec', 'process', 'process_action']);
+
+    for (const tc of toolCalls) {
+      if (readTools.has(tc.name)) counts.readCount++;
+      else if (writeTools.has(tc.name)) counts.writeCount++;
+      else if (execTools.has(tc.name)) counts.execCount++;
+      else counts.otherCount++;
+    }
+
+    this.toolTypeHistory.push({ iteration: this.iterationCount, ...counts });
+    if (this.toolTypeHistory.length > 50) {
+      this.toolTypeHistory = this.toolTypeHistory.slice(-25);
+    }
+  }
+
+  /**
+   * Assess overall progress for a richer stop message.
+   * Returns a summary of what happened during this run.
+   */
+  assessProgress(runHistory) {
+    const totalTools = this.successfulToolCalls + this.failedToolCalls;
+    const successRate = totalTools > 0 ? Math.round((this.successfulToolCalls / totalTools) * 100) : 0;
+    const uniqueTools = new Set();
+    for (const entry of runHistory) {
+      for (const t of entry.toolCalls || []) uniqueTools.add(t);
+    }
+
+    return {
+      totalIterations: this.iterationCount,
+      totalToolCalls: totalTools,
+      successfulToolCalls: this.successfulToolCalls,
+      failedToolCalls: this.failedToolCalls,
+      successRate,
+      uniqueToolsUsed: [...uniqueTools],
+      stallDetected: this.hasStalled(),
+      fileStall: this.hasFileStalled(),
+      patternStall: this.hasPatternStalled(),
+      noProgress: this.hasNoProgress(),
+      deadEnd: this.hasDeadEnded(),
+      monotony: this.hasToolTypeMonotony(),
+    };
+  }
+
+  /**
    * Detect "hallucinated action" — the model describes doing something
    * but produces zero tool calls. This happens when a model doesn't
    * support native function calling and falls into a "I'll do X" loop.
@@ -417,52 +555,9 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     const text = content.trim();
     if (text.length < 20) return null;
 
-    // Action-oriented phrases that indicate the model INTENDS to use tools
-    const actionPatterns = [
-      /\blet me\b/i,
-      /\bi'll\b/i,
-      /\bi will\b/i,
-      /\bnow i\b/i,
-      /\bfirst i\b/i,
-      /\bnext i\b/i,
-      /\bgoing to\b/i,
-      /\bhere'?s what i'?ll\b/i,
-      /\blet'?s\b/i,
-      /\bi need to\b/i,
-      /\bi should\b/i,
-      /\bi can\b.*\b(read|edit|write|create|modify|update|change|fix|refactor|add|remove|delete|open|check)\b/i,
-      /\b(step \d|phase \d)\b.*\b(read|edit|write|create|modify|update|change|fix)\b/i,
-      /\b(read|edit|write|create|modify|update|change|fix|refactor|add|remove)\b.*\b(the|this|these|those|that)\b.*\b(file|code|component|function|class|page|style|css|html|js|tsx)\b/i,
-    ];
-
-    const hasActionLanguage = actionPatterns.some(p => p.test(text));
-
-    // Tool-call indicators that suggest the model IS trying to use tools
-    const toolIndicators = [
-      /<tool_call>/i,
-      /<invoke/i,
-      /<function_calls>/i,
-      /<tool_use>/i,
-      /\bedit_file\b/i,
-      /\bwrite_file\b/i,
-      /\bread_file\b/i,
-      /\bexec\b/i,
-      /\bsearch_and_replace\b/i,
-      /\blist_directory\b/i,
-      /\bgit_\w+\b/i,
-    ];
-
-    const hasToolIndicator = toolIndicators.some(p => p.test(text));
-
-    // Also check if this looks like a genuine summary/completion
-    const completionPatterns = [
-      /^(done|complete|finished|here'?s? (the |a )?summary|summary of|what (i|we) (changed|did|modified))[:.]/i,
-      /^(the )?(changes?|modifications?|updates?) (have been|are|include)/i,
-      /^(here|this) (is|are) (the |your )?(updated|modified|new|result)/i,
-      /^i'?ve (already )?(made|completed|finished|done|applied|implemented)/i,
-    ];
-
-    const looksLikeCompletion = completionPatterns.some(p => p.test(text));
+    const hasActionLanguage = Agent._actionPatterns.some(p => p.test(text));
+    const hasToolIndicator = Agent._toolIndicators.some(p => p.test(text));
+    const looksLikeCompletion = Agent._completionPatterns.some(p => p.test(text));
 
     // If action language is present but no tool indicators and doesn't look like completion
     if (hasActionLanguage && !hasToolIndicator && !looksLikeCompletion) {
@@ -526,23 +621,20 @@ When done, provide a clear summary: what changed, why, what was verified, and an
 
   recordToolRound(toolCalls) {
     // Fuzzy signature: tool name + target file only (not full args).
-    // This catches read→edit→read→edit cycles on the same file where
-    // the exact arguments (line numbers, edit content) differ each time.
-    const signature = JSON.stringify(
-      toolCalls.map(toolCall => {
-        const args = toolCall.arguments || {};
-        const filePath = args.path || args.filePath || args.file || null;
-        return {
-          name: toolCall.name,
-          file: filePath ? String(filePath).replace(/\\/g, '/') : null,
-        };
-      })
-    );
+    // Use string concatenation instead of JSON.stringify for speed.
+    let sig = '';
+    for (let i = 0; i < toolCalls.length; i++) {
+      const tc = toolCalls[i];
+      const args = tc.arguments || {};
+      const filePath = args.path || args.filePath || args.file || null;
+      const normalized = filePath ? String(filePath).replace(/\\/g, '/') : '';
+      sig += tc.name + ':' + normalized + '|';
+    }
 
-    if (signature === this.lastToolCallSignature) {
+    if (sig === this.lastToolCallSignature) {
       this.repeatedToolRoundCount++;
     } else {
-      this.lastToolCallSignature = signature;
+      this.lastToolCallSignature = sig;
       this.repeatedToolRoundCount = 1;
     }
   }
@@ -749,6 +841,27 @@ When done, provide a clear summary: what changed, why, what was verified, and an
   static _errorExtractRegex = /"error"\s*:\s*"([^"]{3,100})/;
   static _writeTools = new Set(['write_file', 'edit_file', 'search_and_replace']);
 
+  // Pre-compiled regexes for no-action trap detection
+  static _actionPatterns = [
+    /\blet me\b/i, /\bi'll\b/i, /\bi will\b/i, /\bnow i\b/i, /\bfirst i\b/i,
+    /\bnext i\b/i, /\bgoing to\b/i, /\bhere'?s what i'?ll\b/i, /\blet'?s\b/i,
+    /\bi need to\b/i, /\bi should\b/i,
+    /\bi can\b.*\b(read|edit|write|create|modify|update|change|fix|refactor|add|remove|delete|open|check)\b/i,
+    /\b(step \d|phase \d)\b.*\b(read|edit|write|create|modify|update|change|fix)\b/i,
+    /\b(read|edit|write|create|modify|update|change|fix|refactor|add|remove)\b.*\b(the|this|these|those|that)\b.*\b(file|code|component|function|class|page|style|css|html|js|tsx)\b/i,
+  ];
+  static _toolIndicators = [
+    /<tool_call>/i, /<invoke/i, /<function_calls>/i, /<tool_use>/i,
+    /\bedit_file\b/i, /\bwrite_file\b/i, /\bread_file\b/i, /\bexec\b/i,
+    /\bsearch_and_replace\b/i, /\blist_directory\b/i, /\bgit_\w+\b/i,
+  ];
+  static _completionPatterns = [
+    /^(done|complete|finished|here'?s? (the |a )?summary|summary of|what (i|we) (changed|did|modified))[:.]/i,
+    /^(the )?(changes?|modifications?|updates?) (have been|are|include)/i,
+    /^(here|this) (is|are) (the |your )?(updated|modified|new|result)/i,
+    /^i'?ve (already )?(made|completed|finished|done|applied|implemented)/i,
+  ];
+
   buildCompactionSummary(olderMessages = []) {
     const priorUserMessages = [];
     const filesMentioned = new Set();
@@ -820,16 +933,16 @@ When done, provide a clear summary: what changed, why, what was verified, and an
       }
     }
 
-    // Determine current state from last few messages
+    // Determine current state from last assistant message (backward scan — avoids filter+slice)
     let currentState = 'Conversation in progress.';
-    const lastAssistantMsgs = olderMessages
-      .filter(m => m.role === 'assistant' && m.content && typeof m.content === 'string')
-      .slice(-2);
-    if (lastAssistantMsgs.length > 0) {
-      const lastMsg = lastAssistantMsgs[lastAssistantMsgs.length - 1].content;
-      const lastSentence = lastMsg.split(/[.!?\n]/).filter(s => s.trim().length > 10).pop();
-      if (lastSentence) {
-        currentState = lastSentence.trim().substring(0, 200);
+    for (let j = olderMessages.length - 1; j >= 0; j--) {
+      const m = olderMessages[j];
+      if (m.role === 'assistant' && m.content && typeof m.content === 'string') {
+        const lastSentence = m.content.split(/[.!?\n]/).filter(s => s.trim().length > 10).pop();
+        if (lastSentence) {
+          currentState = lastSentence.trim().substring(0, 200);
+        }
+        break;
       }
     }
 
@@ -950,21 +1063,121 @@ When done, provide a clear summary: what changed, why, what was verified, and an
   }
 
   buildStopMessage(reason, history, startTime) {
+    const elapsed = startTime ? Math.round((Date.now() - startTime) / 1000) : 0;
+    const progress = this.assessProgress(history);
+    const progressSummary = `
+📊 Run Summary:
+  Iterations: ${progress.totalIterations} | Tools: ${progress.totalToolCalls} (${progress.successRate}% success)
+  Successful: ${progress.successfulToolCalls} | Failed: ${progress.failedToolCalls}
+  Tools used: ${progress.uniqueToolsUsed.join(', ') || 'none'}`;
+
     switch (reason) {
       case 'max_iterations':
-        return `I stopped after reaching the configured iteration limit (${this.maxIterations}).\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+        return `I stopped after reaching the iteration limit (${this.maxIterations}).
+
+The task may need more iterations than configured. Suggestions:
+  - Increase AGENT_MAX_ITERATIONS if this is a complex task
+  - Break the task into smaller, focused subtasks
+  - Check if the agent was making progress or spinning
+${progressSummary}
+
+Recent progress:
+${this.formatRecentHistory(history)}`;
+
       case 'max_runtime':
-        return `I stopped after reaching the configured runtime limit (${Math.round((Date.now() - startTime) / 1000)}s).\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+        return `I stopped after reaching the runtime limit (${elapsed}s / ${Math.round(this.maxRuntimeMs / 1000)}s).
+
+Suggestions:
+  - Increase AGENT_MAX_RUNTIME_MS for long-running tasks
+  - Break the task into smaller parts
+  - Use a faster model if the current one is slow
+${progressSummary}
+
+Recent progress:
+${this.formatRecentHistory(history)}`;
+
       case 'max_tool_calls':
-        return `I stopped after reaching the configured tool-call limit (${this.maxToolCalls}).\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+        return `I stopped after reaching the tool-call limit (${this.maxToolCalls}).
+
+Suggestions:
+  - Increase AGENT_MAX_TOOL_CALLS if more work is needed
+  - Check if the agent was making efficient progress
+${progressSummary}
+
+Recent progress:
+${this.formatRecentHistory(history)}`;
+
       case 'stalled':
-        return `I stopped because I appeared to be repeating the same tool workflow without making progress.\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+        return `I stopped because I was repeating the same tool workflow without making progress.
+
+This usually means:
+  - The approach isn't working and needs to change
+  - The task may be impossible with available tools
+  - The model may need more specific instructions
+
+Suggestions:
+  - Rephrase the task with more specific instructions
+  - Break it into smaller, concrete steps
+  - Check if the target files/resources exist
+${progressSummary}
+
+Recent progress:
+${this.formatRecentHistory(history)}`;
+
+      case 'no_progress':
+        return `I stopped because every tool call failed for ${this.maxNoProgressIterations} consecutive iterations.
+
+This means the agent tried different approaches but none worked. Common causes:
+  - Target files don't exist yet (need to create them first)
+  - Network/API is down
+  - Permissions are blocking operations
+  - The requested operation is fundamentally invalid
+
+Suggestions:
+  - Verify the target resources exist
+  - Check permissions and network connectivity
+  - Rephrase the task with clearer preconditions
+${progressSummary}
+
+Recent progress:
+${this.formatRecentHistory(history)}`;
+
+      case 'dead_end':
+        const category = this._deadEndCategory || 'UNKNOWN';
+        return `I stopped because I hit a dead end: ${category} errors dominated despite trying different approaches.
+
+This means the problem isn't with specific arguments — something upstream is broken.
+
+Suggestions for ${category}:
+${this.getRecoverySuggestion(category + ' error', 'agent')}
+${progressSummary}
+
+Recent progress:
+${this.formatRecentHistory(history)}`;
+
       case 'consecutive_api_errors':
-        return `I stopped after 3 consecutive API errors. The model API may be experiencing issues.\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+        return `I stopped after 3 consecutive API errors. The model API may be experiencing issues.
+
+Suggestions:
+  - Check your API key and account balance
+  - Try a different model
+  - Wait a few minutes and retry
+${progressSummary}
+
+Recent progress:
+${this.formatRecentHistory(history)}`;
+
       case 'aborted':
         return 'Agent execution was aborted.';
+
       default:
-        return `I stopped before producing a final answer.\n\nRecent progress:\n${this.formatRecentHistory(history)}`;
+        return `I stopped before producing a final answer.
+
+This may indicate an unexpected condition. Check the recent progress below for clues.
+${progressSummary}
+
+Recent progress:
+${this.formatRecentHistory(history)}`;
     }
   }
   
@@ -1107,22 +1320,29 @@ Task: ${userInput}`;
    * Reflect on failed tool executions and inject guidance messages
    */
   reflectOnToolResults(toolResults, _toolCalls) {
-    const errors = toolResults.filter(r => r.result && r.result.success === false);
-    const empties = toolResults.filter(r => {
-      if (r.result && r.result.success === false) return false;
-      const content = JSON.stringify(r.result);
-      return content.length < 10 || content === '{}' || content === 'null' || content === 'undefined';
-    });
+    // Single-pass: collect errors and empties, track failures, build reflection
+    const errors = [];
+    const empties = [];
+    if (!this.toolFailureCounts) this.toolFailureCounts = {};
+
+    for (const r of toolResults) {
+      if (r.result && r.result.success === false) {
+        errors.push(r);
+        this.toolFailureCounts[r.toolName] = (this.toolFailureCounts[r.toolName] || 0) + 1;
+      } else {
+        // Check emptiness without JSON.stringify — check result keys directly
+        const res = r.result;
+        const isEmpty = res === null || res === undefined ||
+          (typeof res === 'object' && Object.keys(res).length === 0) ||
+          (typeof res === 'string' && res.length < 10);
+        if (isEmpty) {
+          empties.push(r);
+          this.toolFailureCounts[r.toolName] = (this.toolFailureCounts[r.toolName] || 0) + 1;
+        }
+      }
+    }
 
     if (errors.length === 0 && empties.length === 0) return;
-
-    // Track failures per tool name
-    const failedTools = [...errors, ...empties].map(r => r.toolName);
-
-    for (const toolName of failedTools) {
-      if (!this.toolFailureCounts) this.toolFailureCounts = {};
-      this.toolFailureCounts[toolName] = (this.toolFailureCounts[toolName] || 0) + 1;
-    }
 
     // Build reflection message
     const reflectionParts = [];
@@ -1137,10 +1357,11 @@ Task: ${userInput}`;
     }
 
     // Check for repeated failures
-    for (const toolName of failedTools) {
+    for (const errResult of errors) {
+      const toolName = errResult.toolName;
       if (this.toolFailureCounts[toolName] >= 3) {
         reflectionParts.push(`[CRITICAL] The tool "${toolName}" has failed ${this.toolFailureCounts[toolName]} times. You MUST try a completely different approach or tool. Do not retry the same operation.`);
-        this.toolFailureCounts[toolName] = 0; // Reset after warning
+        this.toolFailureCounts[toolName] = 0;
       }
     }
 
@@ -1279,6 +1500,10 @@ Task: ${userInput}`;
     };
     this.history.push(iterationRecord);
     runHistory.push(iterationRecord);
+    // Trim history to prevent unbounded growth (keep last 200 entries)
+    if (this.history.length > 200) {
+      this.history = this.history.slice(-100);
+    }
     this.recordToolRound(toolCalls);
     this.recordFileOperations(toolCalls);
     // Track tool name pattern for pattern-stall detection
@@ -1286,6 +1511,32 @@ Task: ${userInput}`;
     this.roundToolNameHistory.push(roundNames);
     if (this.roundToolNameHistory.length > 50) {
       this.roundToolNameHistory = this.roundToolNameHistory.slice(-25);
+    }
+
+    // Track tool diversity for monotony detection
+    this.recordToolTypeRound(toolCalls);
+
+    // Track progress: count successes and failures this iteration
+    let roundSuccesses = 0;
+    let roundFailures = 0;
+    for (const tr of toolResults) {
+      if (tr.result && tr.result.success === false) {
+        roundFailures++;
+        this.failedToolCalls++;
+        const errorCat = this.categorizeError({ message: tr.result.error || '' });
+        this.recentErrorCategories.push(errorCat);
+        if (this.recentErrorCategories.length > this.maxDeadEndWindow * 2) {
+          this.recentErrorCategories = this.recentErrorCategories.slice(-this.maxDeadEndWindow);
+        }
+      } else {
+        roundSuccesses++;
+        this.successfulToolCalls++;
+      }
+    }
+    if (roundFailures > 0 && roundSuccesses === 0) {
+      this.iterationsWithoutProgress++;
+    } else {
+      this.iterationsWithoutProgress = 0;
     }
 
     // Update performance metrics (guard against division by zero)
@@ -1331,6 +1582,29 @@ Task: ${userInput}`;
         this.pushMessage({
           role: 'user',
           content: `[System] You are ${parts.join(' and ')} without making meaningful progress. Stop re-reading files you've already edited. Either: (1) move on to the next file or task, or (2) provide your final answer with the changes you've already made.`,
+        });
+      }
+
+      // No-progress stop: all tool calls failed for N consecutive iterations
+      if (this.hasNoProgress()) {
+        this.stopReason = 'no_progress';
+        break;
+      }
+
+      // Dead-end stop: same error category dominates despite different approaches
+      const streamingDeadEndCategory = this.hasDeadEnded();
+      if (streamingDeadEndCategory) {
+        this.stopReason = 'dead_end';
+        this._deadEndCategory = streamingDeadEndCategory;
+        break;
+      }
+
+      // Tool-type monotony: inject a nudge (don't stop, just guide)
+      const streamingMonotony = this.hasToolTypeMonotony();
+      if (streamingMonotony) {
+        this.pushMessage({
+          role: 'user',
+          content: `[System] ${streamingMonotony}. Consider mixing your approach: if you've been reading files, try editing one. If you've been editing, re-read the file to verify your changes. If you've been running commands, try examining the output and making file changes.`,
         });
       }
 
@@ -1636,6 +1910,12 @@ Task: ${userInput}`;
     this.noActionTrapCount = 0;
     this.abortController = new AbortController();
     this.consecutiveApiErrors = 0;
+    this.successfulToolCalls = 0;
+    this.failedToolCalls = 0;
+    this.iterationsWithoutProgress = 0;
+    this.recentErrorCategories = [];
+    this.toolTypeHistory = [];
+    this._deadEndCategory = null;
     // Add user message (skip if already pushed, e.g. multimodal messages)
     if (userInput !== undefined && userInput !== null) {
       this.maybeResetWorkingSet(userInput);
@@ -1681,6 +1961,14 @@ Task: ${userInput}`;
         this.toolFailureCounts = {};
         this.fileOperationHistory = [];
         this.roundToolNameHistory = [];
+        this.successfulToolCalls = 0;
+        this.failedToolCalls = 0;
+        this.iterationsWithoutProgress = 0;
+        this.recentErrorCategories = [];
+        this.toolTypeHistory = [];
+        this.consecutiveFailures = {};
+        this.circuitBreakerTripped = false;
+        this._deadEndCategory = null;
         // Fall through to non-streaming path below
       }
     }
@@ -1723,6 +2011,29 @@ Task: ${userInput}`;
           this.pushMessage({
             role: 'user',
             content: `[System] You are ${parts.join(' and ')} without making meaningful progress. Stop re-reading files you've already edited. Either: (1) move on to the next file or task, or (2) provide your final answer with the changes you've already made.`,
+          });
+        }
+
+        // No-progress stop: all tool calls failed for N consecutive iterations
+        if (this.hasNoProgress()) {
+          this.stopReason = 'no_progress';
+          break;
+        }
+
+        // Dead-end stop: same error category dominates despite different approaches
+        const deadEndCategory = this.hasDeadEnded();
+        if (deadEndCategory) {
+          this.stopReason = 'dead_end';
+          this._deadEndCategory = deadEndCategory;
+          break;
+        }
+
+        // Tool-type monotony: inject a nudge (don't stop, just guide)
+        const monotony = this.hasToolTypeMonotony();
+        if (monotony) {
+          this.pushMessage({
+            role: 'user',
+            content: `[System] ${monotony}. Consider mixing your approach: if you've been reading files, try editing one. If you've been editing, re-read the file to verify your changes. If you've been running commands, try examining the output and making file changes.`,
           });
         }
 
@@ -1905,7 +2216,12 @@ Task: ${userInput}`;
                           error.message.includes('Unexpected end') ||
                           error.message.includes('context length');
       
-      if (isJsonError && retryCount < maxRetries) {
+      // Also retry on empty response errors — transient API issue
+      const isEmptyResponse = error.code === 'EMPTY_RESPONSE' ||
+                              error.message.includes('No message in response') ||
+                              error.message.includes('Empty or malformed response');
+      
+      if ((isJsonError || isEmptyResponse) && retryCount < maxRetries) {
         this.performanceMetrics.totalRetries++;
         const retryMessage = `Retrying with shorter response (attempt ${retryCount + 1}/${maxRetries})`;
         if (!this.emitStatus('retry', retryMessage) && this.shouldEmitVerboseLogs()) {
@@ -2348,6 +2664,14 @@ Task: ${userInput}`;
     this.noActionTrapCount = 0;
     this.fileOperationHistory = [];
     this.roundToolNameHistory = [];
+    this.successfulToolCalls = 0;
+    this.failedToolCalls = 0;
+    this.iterationsWithoutProgress = 0;
+    this.recentErrorCategories = [];
+    this.toolTypeHistory = [];
+    this.consecutiveFailures = {};
+    this.circuitBreakerTripped = false;
+    this._deadEndCategory = null;
     const startTime = Date.now();
     
     while (true) {
@@ -2382,6 +2706,29 @@ Task: ${userInput}`;
         this.pushMessage({
           role: 'user',
           content: `[System] You are ${parts.join(' and ')} without making meaningful progress. Stop re-reading files you've already edited. Either: (1) move on to the next file or task, or (2) provide your final answer with the changes you've already made.`,
+        });
+      }
+
+      // No-progress stop
+      if (this.hasNoProgress()) {
+        this.stopReason = 'no_progress';
+        break;
+      }
+
+      // Dead-end stop
+      const rsDeadEnd = this.hasDeadEnded();
+      if (rsDeadEnd) {
+        this.stopReason = 'dead_end';
+        this._deadEndCategory = rsDeadEnd;
+        break;
+      }
+
+      // Tool-type monotony nudge
+      const rsMonotony = this.hasToolTypeMonotony();
+      if (rsMonotony) {
+        this.pushMessage({
+          role: 'user',
+          content: `[System] ${rsMonotony}. Consider mixing your approach.`,
         });
       }
 
@@ -2493,6 +2840,32 @@ Task: ${userInput}`;
       if (this.roundToolNameHistory.length > 50) {
         this.roundToolNameHistory = this.roundToolNameHistory.slice(-25);
       }
+
+      // Track tool diversity for monotony detection
+      this.recordToolTypeRound(toolCalls);
+
+      // Track progress: count successes and failures this iteration
+      let rsRoundSuccesses = 0;
+      let rsRoundFailures = 0;
+      for (const tr of results) {
+        if (tr.result && tr.result.success === false) {
+          rsRoundFailures++;
+          this.failedToolCalls++;
+          const errorCat = this.categorizeError({ message: tr.result.error || '' });
+          this.recentErrorCategories.push(errorCat);
+          if (this.recentErrorCategories.length > this.maxDeadEndWindow * 2) {
+            this.recentErrorCategories = this.recentErrorCategories.slice(-this.maxDeadEndWindow);
+          }
+        } else {
+          rsRoundSuccesses++;
+          this.successfulToolCalls++;
+        }
+      }
+      if (rsRoundFailures > 0 && rsRoundSuccesses === 0) {
+        this.iterationsWithoutProgress++;
+      } else {
+        this.iterationsWithoutProgress = 0;
+      }
     }
     
     if (this.stopReason === 'max_iterations') {
@@ -2520,7 +2893,12 @@ Task: ${userInput}`;
   async maybeCompactContext() {
     const { usedTokens: estimatedTokens, maxTokens } = this.getContextStats();
     
-    if (estimatedTokens < maxTokens * this.compactThreshold) {
+    // Also trigger compaction if message count exceeds hard limit (prevents runaway growth)
+    const MESSAGE_HARD_LIMIT = 150;
+    const shouldCompact = estimatedTokens >= maxTokens * this.compactThreshold ||
+                          this.messages.length > MESSAGE_HARD_LIMIT;
+    
+    if (!shouldCompact) {
       return; // Still have room
     }
     
@@ -2529,34 +2907,47 @@ Task: ${userInput}`;
       logger.warn(triggerMessage, { estimatedTokens });
     }
     
-    // Smart compaction: preserve system message, first user message, and last 4 exchanges
-    const systemMsg = this.messages.find(m => m.role === 'system');
-    const nonSystemMessages = this.messages.filter(m => m.role !== 'system');
+    // ── Single-pass compaction ──
+    // Collect system msg, first user msg, and exchange boundaries in one forward pass.
+    let systemMsg = null;
+    let firstUserMsg = null;
+    let firstUserMsgIndex = -1;
+    const exchangeStarts = []; // indices into this.messages (non-system numbering)
+    let nonSystemIdx = 0;
 
-    // Find the first user message (original request)
-    const firstUserMsgIndex = nonSystemMessages.findIndex(m => m.role === 'user');
-    const firstUserMsg = firstUserMsgIndex >= 0 ? nonSystemMessages[firstUserMsgIndex] : null;
-
-    // Identify exchange boundaries: each "exchange" starts with a user message or assistant+tool_calls
-    // We want the last 4 exchanges from the end of the conversation
-    const exchangeStarts = [];
-    for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
-      const msg = nonSystemMessages[i];
-      if (msg.role === 'user' || (msg.role === 'assistant' && msg.tool_calls)) {
-        exchangeStarts.unshift(i);
+    for (let i = 0; i < this.messages.length; i++) {
+      const msg = this.messages[i];
+      if (msg.role === 'system') {
+        if (!systemMsg) systemMsg = msg; // keep first system msg reference
+        continue;
       }
+      if (!firstUserMsg && msg.role === 'user') {
+        firstUserMsg = msg;
+        firstUserMsgIndex = nonSystemIdx;
+      }
+      if (msg.role === 'user' || (msg.role === 'assistant' && msg.tool_calls)) {
+        exchangeStarts.push(nonSystemIdx);
+      }
+      nonSystemIdx++;
     }
 
     // Take the last 4 exchange start indices
     const last4StartIndices = exchangeStarts.slice(-4);
-    const keepFromIndex = last4StartIndices.length > 0 ? last4StartIndices[0] : nonSystemMessages.length;
+    const keepFromIndex = last4StartIndices.length > 0 ? last4StartIndices[0] : nonSystemIdx;
 
-    // Messages to keep: from keepFromIndex to end
-    const recentMessages = nonSystemMessages.slice(keepFromIndex);
-
-    // Older messages (for summary): everything between first user msg and the kept window
-    const olderStart = firstUserMsgIndex >= 0 ? firstUserMsgIndex + 1 : 0;
-    const olderMessages = nonSystemMessages.slice(olderStart, keepFromIndex);
+    // Build recent and older message slices in one pass
+    const recentMessages = [];
+    const olderMessages = [];
+    nonSystemIdx = 0;
+    for (let i = 0; i < this.messages.length; i++) {
+      if (this.messages[i].role === 'system') continue;
+      if (nonSystemIdx >= keepFromIndex) {
+        recentMessages.push(this.messages[i]);
+      } else if (nonSystemIdx > (firstUserMsgIndex >= 0 ? firstUserMsgIndex : -1)) {
+        olderMessages.push(this.messages[i]);
+      }
+      nonSystemIdx++;
+    }
 
     // Rebuild messages
     const newMessages = [];
@@ -2564,9 +2955,9 @@ Task: ${userInput}`;
 
     // Always preserve the first user message (the original request)
     // Only add first user message if it's NOT already in recentMessages
-  if (firstUserMsg && !recentMessages.some(m => m === firstUserMsg)) {
-    newMessages.push(firstUserMsg);
-  }
+    if (firstUserMsg && !recentMessages.includes(firstUserMsg)) {
+      newMessages.push(firstUserMsg);
+    }
 
     if (olderMessages.length > 0) {
       newMessages.push({
@@ -2575,7 +2966,7 @@ Task: ${userInput}`;
       });
     }
     newMessages.push(...recentMessages);
-    
+
     this.setMessages(newMessages);
     this.contextStats.compactions++;
     

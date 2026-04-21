@@ -148,7 +148,7 @@ this.activeGraphs = new Map();
 ```javascript
 // Lines 36-70: estimateMessageTokens()
 // Heuristic: code ~3 chars/token, prose ~4 chars/token
-const isCode = /[{}\[\]()=><;]/.test(content);
+const isCode = /[{}[\]()=><;]/.test(content);
 total += isCode ? Math.ceil(content.length / 3) : Math.ceil(content.length / 4);
 ```
 **Accuracy**: Reasonable heuristic but may over/underestimate for mixed content.

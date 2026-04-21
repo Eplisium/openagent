@@ -209,9 +209,11 @@ export class OpenRouterClient {
    * Generate cache key using content hash (no collisions)
    */
   getCacheKey(messages, options) {
+    // Pass messages directly — generateCacheKey() already only reads the last 2
+    // messages + system message, so no need to copy the entire array here.
     const keyObj = {
       model: options.model || this.defaultModel,
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
+      messages, // reference — generateCacheKey handles slicing internally
       temperature: options.temperature,
       max_tokens: options.max_tokens,
       top_p: options.top_p,
@@ -1023,20 +1025,17 @@ export class OpenRouterClient {
     };
     
     if (reasoning_effort) payload.reasoning_effort = reasoning_effort;
-    if (tools) {
-      // Detect provider from model to adapt tool format
-      const targetModel = model || this.defaultModel;
-      const detectedProvider = ToolFormatAdapter.detectProvider(targetModel);
-      const adaptedTools = ToolFormatAdapter.formatToolDefinitions(tools, detectedProvider);
-      // For Google Gemini, tools come as a single object with function_declarations
-      payload.tools = adaptedTools;
-    }
-    if (tool_choice) {
-      const targetModel = model || this.defaultModel;
-      const detectedProvider = ToolFormatAdapter.detectProvider(targetModel);
-      payload.tool_choice = typeof tool_choice === 'string'
-        ? ToolFormatAdapter.getToolChoice(detectedProvider, tool_choice)
-        : tool_choice;
+    if (tools || tool_choice) {
+      // Detect provider once and reuse for both tools and tool_choice
+      const detectedProvider = ToolFormatAdapter.detectProvider(model || this.defaultModel);
+      if (tools) {
+        payload.tools = ToolFormatAdapter.formatToolDefinitions(tools, detectedProvider);
+      }
+      if (tool_choice) {
+        payload.tool_choice = typeof tool_choice === 'string'
+          ? ToolFormatAdapter.getToolChoice(detectedProvider, tool_choice)
+          : tool_choice;
+      }
     }
     if (response_format) payload.response_format = response_format;
     if (plugins) {
