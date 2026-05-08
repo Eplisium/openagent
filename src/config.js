@@ -55,7 +55,7 @@ export const CONFIG = {
   // Generation Parameters
   DEFAULT_PARAMS: {
     temperature: 0.7,
-    max_tokens: 16384,
+    max_tokens: 32768,
     top_p: 0.9,
     frequency_penalty: 0,
     presence_penalty: 0,
@@ -64,7 +64,7 @@ export const CONFIG = {
   // Agent-specific params (lower temp for more deterministic tool use)
   AGENT_PARAMS: {
     temperature: 0.3,
-    max_tokens: 16384,
+    max_tokens: 32768,
     top_p: 0.95,
   },
   

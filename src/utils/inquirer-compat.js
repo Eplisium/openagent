@@ -4,7 +4,7 @@
  * Returns: { confirm: true/false } or { [name]: value }
  */
 
-import { confirm as inquirerConfirm, input as inquirerInput, select as inquirerSelect } from '@inquirer/prompts';
+import { confirm as inquirerConfirm, input as inquirerInput, select as inquirerSelect, Separator } from '@inquirer/prompts';
 
 const PROMPT_MAP = {
   confirm: inquirerConfirm,
@@ -14,6 +14,7 @@ const PROMPT_MAP = {
 };
 
 export default {
+  Separator,
   async prompt(questions) {
     const results = {};
     const list = Array.isArray(questions) ? questions : [questions];

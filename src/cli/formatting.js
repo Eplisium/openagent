@@ -98,24 +98,16 @@ export function textSimilarity(a, b) {
 }
 
 /**
- * Deduplicate response content that may have been repeated by the LLM
+ * Deduplicate response content that may have been repeated by the LLM.
+ * Only triggers on near-exact duplication — avoids false positives on
+ * long structured content (codebase analyses, etc.) where both halves
+ * share vocabulary but are semantically distinct.
  */
 export function deduplicateResponse(content) {
-  if (!content || content.length < 100) return content;
+  if (!content || content.length < 200) return content;
 
+  // Check for exact substring duplication first (most reliable)
   const half = Math.floor(content.length / 2);
-  const firstHalf = content.substring(0, half).trim();
-  const secondHalf = content.substring(half).trim();
-
-  // If both halves are very similar (>85% overlap), take just the first half
-  if (firstHalf.length > 50 && secondHalf.length > 50) {
-    const similarity = textSimilarity(firstHalf, secondHalf);
-    if (similarity > 0.85) {
-      return firstHalf;
-    }
-  }
-
-  // Also check for exact substring duplication
   for (let offset = -20; offset <= 20; offset++) {
     const splitPoint = half + offset;
     if (splitPoint < 50 || splitPoint > content.length - 50) continue;
@@ -125,6 +117,20 @@ export function deduplicateResponse(content) {
 
     if (part1 === part2) {
       return part1;
+    }
+  }
+
+  // Jaccard similarity guard: only apply for very long content (>4000 chars)
+  // where a false positive is less likely, and use a very high threshold (0.95)
+  // to avoid catching structured reports with shared vocabulary.
+  if (content.length > 4000) {
+    const firstHalf = content.substring(0, half).trim();
+    const secondHalf = content.substring(half).trim();
+    if (firstHalf.length > 100 && secondHalf.length > 100) {
+      const similarity = textSimilarity(firstHalf, secondHalf);
+      if (similarity > 0.95) {
+        return firstHalf;
+      }
     }
   }
 

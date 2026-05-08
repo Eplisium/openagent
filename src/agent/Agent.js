@@ -1743,6 +1743,16 @@ Task: ${userInput}`;
             continue;
           }
 
+          // Empty response guard (streaming fallback)
+          if (!fallbackContent || !fallbackContent.trim()) {
+            this.pushMessage({ role: 'assistant', content: '' });
+            this.pushMessage({ role: 'user', content: '[System] Your previous response was empty. You must provide a substantive text response summarizing your findings or completing the task. Do not leave your response blank.' });
+            if (this.shouldEmitVerboseLogs()) {
+              logger.warn('Empty response detected (streaming fallback): model returned no content and no tool calls. Injecting nudge.');
+            }
+            continue;
+          }
+
           finalResponse = fallbackContent;
           this.pushMessage({ role: 'assistant', content: finalResponse });
           this.stopReason = 'completed';
@@ -1826,6 +1836,17 @@ Task: ${userInput}`;
           this.pushMessage({ role: 'user', content: noActionNudge });
           if (this.shouldEmitVerboseLogs()) {
             logger.warn('No-action trap detected: model described actions but produced no tool calls. Injecting nudge.');
+          }
+          continue;
+        }
+
+        // Empty response guard: if the model returned no content and no tool calls,
+        // nudge it to provide a proper summary instead of accepting blank output.
+        if (!fullContent || !fullContent.trim()) {
+          this.pushMessage({ role: 'assistant', content: '' });
+          this.pushMessage({ role: 'user', content: '[System] Your previous response was empty. You must provide a substantive text response summarizing your findings or completing the task. Do not leave your response blank.' });
+          if (this.shouldEmitVerboseLogs()) {
+            logger.warn('Empty response detected (streaming): model returned no content and no tool calls. Injecting nudge.');
           }
           continue;
         }
@@ -2096,6 +2117,17 @@ Task: ${userInput}`;
             this.pushMessage({ role: 'user', content: noActionNudge });
             if (this.shouldEmitVerboseLogs()) {
               logger.warn('No-action trap detected: model described actions but produced no tool calls. Injecting nudge.');
+            }
+            continue;
+          }
+
+          // Empty response guard: if the model returned no content and no tool calls,
+          // nudge it to provide a proper summary instead of accepting blank output.
+          if (!response.content || !response.content.trim()) {
+            this.pushMessage({ role: 'assistant', content: '' });
+            this.pushMessage({ role: 'user', content: '[System] Your previous response was empty. You must provide a substantive text response summarizing your findings or completing the task. Do not leave your response blank.' });
+            if (this.shouldEmitVerboseLogs()) {
+              logger.warn('Empty response detected (non-streaming): model returned no content and no tool calls. Injecting nudge.');
             }
             continue;
           }
@@ -2789,6 +2821,16 @@ Task: ${userInput}`;
           this.pushMessage({ role: 'user', content: streamNoActionNudge });
           if (this.shouldEmitVerboseLogs()) {
             logger.warn('No-action trap detected (runStream): model described actions but produced no tool calls. Injecting nudge.');
+          }
+          continue;
+        }
+
+        // Empty response guard (runStream)
+        if (!fullContent || !fullContent.trim()) {
+          this.pushMessage({ role: 'assistant', content: '' });
+          this.pushMessage({ role: 'user', content: '[System] Your previous response was empty. You must provide a substantive text response summarizing your findings or completing the task. Do not leave your response blank.' });
+          if (this.shouldEmitVerboseLogs()) {
+            logger.warn('Empty response detected (runStream): model returned no content and no tool calls. Injecting nudge.');
           }
           continue;
         }

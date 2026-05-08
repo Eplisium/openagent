@@ -689,6 +689,11 @@ export class CLI {
       if (result.response && !responsePrinted) {
         printAIResponse(this, deduplicateResponse(result.response));
         responsePrinted = true;
+      } else if (!responsePrinted) {
+        // Safety net: agent completed but produced no visible response.
+        // This can happen when the model returns empty content as its final answer.
+        console.log(chalk.yellow('\n  ⚠ Agent completed but produced no text response. The model may have returned empty content.'));
+        console.log(chalk.dim('  Try rephrasing your request or using a different model.'));
       }
 
       printEnhancedTaskSummary(this, result, duration);
@@ -799,6 +804,9 @@ export class CLI {
       if (result.response && !responsePrinted) {
         printAIResponse(this, deduplicateResponse(result.response));
         responsePrinted = true;
+      } else if (!responsePrinted) {
+        console.log(chalk.yellow('\n  ⚠ Agent completed but produced no text response. The model may have returned empty content.'));
+        console.log(chalk.dim('  Try rephrasing your request or using a different model.'));
       }
       printEnhancedTaskSummary(this, result, duration);
       console.log(chalk.dim(`\n✨ Done in ${formatDuration(duration)}`));
