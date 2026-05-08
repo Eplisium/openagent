@@ -886,6 +886,9 @@ export class CLI {
         if (sawToolCalls && !displayContent.trim()) {
           displayContent = '[Model returned tool calls in chat mode; suppressed from regular chat output.]';
         }
+        if (!displayContent.trim() && !sawToolCalls) {
+          displayContent = '[Model returned an empty response.]';
+        }
 
         process.stdout.write(chalk.white(displayContent));
         console.log('');
@@ -900,7 +903,10 @@ export class CLI {
       try {
         const result = await this.session.agent.chat(message);
         thinkSpinner.stop();
-        printAIResponse(this, result.content);
+        const rendered = printAIResponse(this, result.content);
+        if (!rendered) {
+          console.log(chalk.yellow('\n  ⚠ Model returned an empty response. Try rephrasing or using a different model.'));
+        }
         succeeded = true;
       } catch (error) {
         thinkSpinner.error(chalk.red(`Error: ${error.message}`));

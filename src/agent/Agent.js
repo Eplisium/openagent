@@ -1565,6 +1565,7 @@ Task: ${userInput}`;
     const startTime = Date.now();
     const runHistory = [];
     let finalResponse = null;
+    let lastIterationContent = null; // Track last iteration's text content for non-completed exits
 
     while (true) {
       this.checkAborted();
@@ -1776,6 +1777,10 @@ Task: ${userInput}`;
           ? parseXmlToolCalls(fallbackClean).cleanContent
           : fallbackClean;
         await this.postToolIteration(toolCalls, fallbackResults, cleanedFallback, iterationStart, runHistory);
+        // Preserve this iteration's text content for non-completed exits
+        if (cleanedFallback && cleanedFallback.trim()) {
+          lastIterationContent = cleanedFallback;
+        }
         continue;
       }
 
@@ -1888,10 +1893,22 @@ Task: ${userInput}`;
         ? parseXmlToolCalls(fullContent).cleanContent
         : fullContent;
       await this.postToolIteration(finalToolCalls, toolResults, cleanContent, iterationStart, runHistory);
+      // Preserve this iteration's text content in case the loop exits without a final response
+      if (cleanContent && cleanContent.trim()) {
+        lastIterationContent = cleanContent;
+      }
     }
 
     if (!finalResponse) {
-      finalResponse = this.buildStopMessage(this.stopReason, runHistory, startTime);
+      // If the loop exited without a "completed" final response but the model
+      // produced text content in its last iteration, include it as the response
+      // instead of only showing the generic stop message.
+      const stopMessage = this.buildStopMessage(this.stopReason, runHistory, startTime);
+      if (lastIterationContent && lastIterationContent.trim()) {
+        finalResponse = lastIterationContent + '\n\n---\n' + stopMessage;
+      } else {
+        finalResponse = stopMessage;
+      }
     }
 
     return {
@@ -1996,6 +2013,7 @@ Task: ${userInput}`;
 
     // ── Non-streaming path (original logic) ──
     let finalResponse = null;
+    let lastIterationContent = null; // Track last iteration's text content for non-completed exits
     const runHistory = [];
     this.toolFailureCounts = {};
 
@@ -2165,10 +2183,22 @@ Task: ${userInput}`;
 
         // Shared post-iteration processing (circuit breaker, stall, messages, history)
         await this.postToolIteration(allToolCalls, toolResults, cleanContent, iterationStart, runHistory);
+        // Preserve this iteration's text content for non-completed exits
+        if (cleanContent && cleanContent.trim()) {
+          lastIterationContent = cleanContent;
+        }
       }
       
       if (!finalResponse) {
-        finalResponse = this.buildStopMessage(this.stopReason, runHistory, startTime);
+        // If the loop exited without a "completed" final response but the model
+        // produced text content in its last iteration, include it as the response
+        // instead of only showing the generic stop message.
+        const stopMessage = this.buildStopMessage(this.stopReason, runHistory, startTime);
+        if (lastIterationContent && lastIterationContent.trim()) {
+          finalResponse = lastIterationContent + '\n\n---\n' + stopMessage;
+        } else {
+          finalResponse = stopMessage;
+        }
       }
       
       this.state = 'completed';
