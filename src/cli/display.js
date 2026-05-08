@@ -105,13 +105,14 @@ export function buildPromptStatusLine(cli) {
  * Print AI response in a box
  */
 export function printAIResponse(cli, content) {
-  if (!content) return;
+  if (!content || !content.trim()) return false;
   const rendered = cli.isMarkdownEnabled() ? renderMarkdown(content) : content;
   console.log('');
   console.log(boxen(
     `${g.ai('🤖 AI')}\n\n${rendered}`,
     box.response
   ));
+  return true;
 }
 
 /**

@@ -633,8 +633,8 @@ export class CLI {
 
     this.session.agent.onResponse = (content) => {
       if (!responsePrinted) {
-        printAIResponse(this, deduplicateResponse(content));
-        responsePrinted = true;
+        const rendered = printAIResponse(this, deduplicateResponse(content));
+        if (rendered) responsePrinted = true;
       }
     };
 
@@ -686,10 +686,11 @@ export class CLI {
       const result = await this.session.run(task);
       const duration = Date.now() - startTime;
 
-      if (result.response && !responsePrinted) {
-        printAIResponse(this, deduplicateResponse(result.response));
-        responsePrinted = true;
-      } else if (!responsePrinted) {
+      if (result.response && result.response.trim() && !responsePrinted) {
+        const rendered = printAIResponse(this, deduplicateResponse(result.response));
+        if (rendered) responsePrinted = true;
+      }
+      if (!responsePrinted) {
         // Safety net: agent completed but produced no visible response.
         // This can happen when the model returns empty content as its final answer.
         console.log(chalk.yellow('\n  ⚠ Agent completed but produced no text response. The model may have returned empty content.'));
@@ -770,8 +771,8 @@ export class CLI {
     };
     this.session.agent.onResponse = (content) => {
       if (!responsePrinted) {
-        printAIResponse(this, deduplicateResponse(content));
-        responsePrinted = true;
+        const rendered = printAIResponse(this, deduplicateResponse(content));
+        if (rendered) responsePrinted = true;
       }
     };
     this.session.agent.onStatus = ({ type, message }) => {
@@ -801,10 +802,11 @@ export class CLI {
       const result = await this.session.agent.run();
       const duration = Date.now() - startTime;
 
-      if (result.response && !responsePrinted) {
-        printAIResponse(this, deduplicateResponse(result.response));
-        responsePrinted = true;
-      } else if (!responsePrinted) {
+      if (result.response && result.response.trim() && !responsePrinted) {
+        const rendered = printAIResponse(this, deduplicateResponse(result.response));
+        if (rendered) responsePrinted = true;
+      }
+      if (!responsePrinted) {
         console.log(chalk.yellow('\n  ⚠ Agent completed but produced no text response. The model may have returned empty content.'));
         console.log(chalk.dim('  Try rephrasing your request or using a different model.'));
       }
