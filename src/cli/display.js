@@ -116,6 +116,23 @@ export function printAIResponse(cli, content) {
 }
 
 /**
+ * Print intermediate model thinking (dimmed, compact)
+ * Shown when the model produces text alongside tool calls or when
+ * the no-action trap catches a response — keeps the user informed
+ * without treating it as the final answer.
+ */
+export function printIntermediateContent(cli, content) {
+  if (!content || !content.trim()) return false;
+  // Truncate long intermediate content to keep the display clean
+  const maxLen = 500;
+  const truncated = content.length > maxLen
+    ? content.substring(0, maxLen) + chalk.dim('…')
+    : content;
+  console.log(chalk.dim(`   💭 ${truncated.trim()}`));
+  return true;
+}
+
+/**
  * Show thinking spinner during LLM response time
  */
 export function showThinkingSpinner() {

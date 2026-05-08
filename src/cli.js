@@ -55,6 +55,7 @@ import {
   getShortcutSummary,
   getInputShortcutSummary,
   printAIResponse,
+  printIntermediateContent,
   printEnhancedToolCallStart,
   printEnhancedToolCallEnd,
   printEnhancedTaskSummary,
@@ -638,6 +639,10 @@ export class CLI {
       }
     };
 
+    this.session.agent.onIntermediateContent = (content) => {
+      printIntermediateContent(this, content);
+    };
+
     this.session.agent.onStatus = ({ type, message }) => {
       const formatter = type === 'compaction' ? chalk.cyan : type === 'retry' ? chalk.yellow : chalk.dim;
       console.log(formatter(`   ${message}`));
@@ -774,6 +779,9 @@ export class CLI {
         const rendered = printAIResponse(this, deduplicateResponse(content));
         if (rendered) responsePrinted = true;
       }
+    };
+    this.session.agent.onIntermediateContent = (content) => {
+      printIntermediateContent(this, content);
     };
     this.session.agent.onStatus = ({ type, message }) => {
       const f = type === 'compaction' ? chalk.cyan : type === 'retry' ? chalk.yellow : chalk.dim;

@@ -42,6 +42,7 @@ export class Agent {
     this.onToolStart = options.onToolStart || null;
     this.onToolEnd = options.onToolEnd || null;
     this.onResponse = options.onResponse || null;
+    this.onIntermediateContent = options.onIntermediateContent || null;
     this.onIterationStart = options.onIterationStart || null;
     this.onIterationEnd = options.onIterationEnd || null;
     this.onError = options.onError || null;
@@ -644,6 +645,7 @@ When done, provide a clear summary: what changed, why, what was verified, and an
       this.onToolStart ||
       this.onToolEnd ||
       this.onResponse ||
+      this.onIntermediateContent ||
       this.onIterationStart ||
       this.onIterationEnd ||
       this.onStatus
@@ -1741,6 +1743,10 @@ Task: ${userInput}`;
             if (this.shouldEmitVerboseLogs()) {
               logger.warn('No-action trap detected (streaming fallback): model described actions but produced no tool calls. Injecting nudge.');
             }
+            // Show the model's text even though we're nudging it to use tools
+            if (this.onIntermediateContent && fallbackContent && fallbackContent.trim()) {
+              this.onIntermediateContent(fallbackContent);
+            }
             continue;
           }
 
@@ -1780,6 +1786,8 @@ Task: ${userInput}`;
         // Preserve this iteration's text content for non-completed exits
         if (cleanedFallback && cleanedFallback.trim()) {
           lastIterationContent = cleanedFallback;
+          // Show intermediate model thinking alongside tool calls
+          if (this.onIntermediateContent) this.onIntermediateContent(cleanedFallback);
         }
         continue;
       }
@@ -1842,6 +1850,10 @@ Task: ${userInput}`;
           if (this.shouldEmitVerboseLogs()) {
             logger.warn('No-action trap detected: model described actions but produced no tool calls. Injecting nudge.');
           }
+          // Show the model's text even though we're nudging it to use tools
+          if (this.onIntermediateContent && fullContent && fullContent.trim()) {
+            this.onIntermediateContent(fullContent);
+          }
           continue;
         }
 
@@ -1896,6 +1908,8 @@ Task: ${userInput}`;
       // Preserve this iteration's text content in case the loop exits without a final response
       if (cleanContent && cleanContent.trim()) {
         lastIterationContent = cleanContent;
+        // Show intermediate model thinking alongside tool calls
+        if (this.onIntermediateContent) this.onIntermediateContent(cleanContent);
       }
     }
 
@@ -2136,6 +2150,10 @@ Task: ${userInput}`;
             if (this.shouldEmitVerboseLogs()) {
               logger.warn('No-action trap detected: model described actions but produced no tool calls. Injecting nudge.');
             }
+            // Show the model's text even though we're nudging it to use tools
+            if (this.onIntermediateContent && response.content && response.content.trim()) {
+              this.onIntermediateContent(response.content);
+            }
             continue;
           }
 
@@ -2186,6 +2204,8 @@ Task: ${userInput}`;
         // Preserve this iteration's text content for non-completed exits
         if (cleanContent && cleanContent.trim()) {
           lastIterationContent = cleanContent;
+          // Show intermediate model thinking alongside tool calls
+          if (this.onIntermediateContent) this.onIntermediateContent(cleanContent);
         }
       }
       
@@ -2852,6 +2872,10 @@ Task: ${userInput}`;
           if (this.shouldEmitVerboseLogs()) {
             logger.warn('No-action trap detected (runStream): model described actions but produced no tool calls. Injecting nudge.');
           }
+          // Show the model's text even though we're nudging it to use tools
+          if (this.onIntermediateContent && fullContent && fullContent.trim()) {
+            this.onIntermediateContent(fullContent);
+          }
           continue;
         }
 
@@ -2903,6 +2927,14 @@ Task: ${userInput}`;
         type: 'tools_done',
         results: results.map(r => ({ tool: r.toolName, success: r.result.success })),
       };
+
+      // Show intermediate model thinking alongside tool calls
+      const rsCleanContent = (fullContent && hasXmlToolCalls(fullContent))
+        ? parseXmlToolCalls(fullContent).cleanContent
+        : fullContent;
+      if (this.onIntermediateContent && rsCleanContent && rsCleanContent.trim()) {
+        this.onIntermediateContent(rsCleanContent);
+      }
 
       this.recordToolRound(toolCalls);
       this.recordFileOperations(toolCalls);
