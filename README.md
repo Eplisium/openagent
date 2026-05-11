@@ -141,21 +141,24 @@ Includes circuit breaker, stall detection, no-action trap detection, and automat
 
 | Category | Tools |
 |----------|-------|
-| **File Operations** | `read_file`, `read_files`, `write_file`, `edit_file`, `list_directory`, `search_in_files`, `get_file_info`, `search_and_replace`, `find_files`, `diff_files`, `preview_edit`, `move_file`, `delete_file`, `file_tree` |
-| **Shell Execution** | `exec`, `exec_background`, `process_status`, `system_info` |
-| **Web Access** | `web_search`, `read_webpage`, `fetch_url` |
-| **Git Operations** | `git_status`, `git_log`, `git_diff`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_branch`, `git_info` |
-| **Subagent Delegation** | `delegate_task`, `delegate_parallel`, `delegate_with_synthesis`, `delegate_pipeline`, `delegate_background`, `delegate_fanout`, `get_background_result`, `await_background`, `list_background_tasks`, `subagent_status`, `send_subagent_message`, `get_subagent_messages`, `set_shared_context`, `get_shared_context` |
-| **Memory** | `save_memory`, `get_memory`, `init_memory`, `validate_memory`, `check_retrieval` |
-| **Skills** | `use_skill`, `list_skills`, `create_skill` |
-| **Task Management** | `initialize_task`, `create_feature_list`, `get_next_feature`, `complete_feature`, `fail_feature`, `get_task_status`, `get_progress_report`, `save_session_progress` |
-| **MCP** | `mcp_connect`, `mcp_disconnect`, `mcp_list_tools`, `mcp_call_tool`, `mcp_list_connections` |
-| **A2A** | `a2a_start_server`, `a2a_stop_server`, `a2a_discover`, `a2a_send_task`, `a2a_get_task_status`, `a2a_list_tasks`, `a2a_cancel_task`, `a2a_get_status` |
-| **AG-UI** | `agui_start`, `agui_stop`, `agui_emit`, `agui_emit_text`, `agui_emit_tool_call`, `agui_emit_run_started`, `agui_emit_run_ended`, `agui_emit_run_error`, `agui_get_subscribers`, `agui_get_status` |
-| **Graph** | `graph_list_workflows`, `graph_run`, `graph_resume`, `graph_status`, `graph_list_checkpoints`, `graph_visualize`, `graph_abort` |
-| **AutoGen** | `create_group_chat`, `add_agent_to_chat`, `run_group_chat`, `create_team`, `run_team`, `get_autogen_status` |
-| **Checkpoints** | Session save/load/export/undo via CLI commands |
-| **Plugins** | Plugin lifecycle management |
+| **File Operations** (15) | `read_file`, `read_files`, `write_file`, `edit_file`, `list_directory`, `search_in_files`, `get_file_info`, `read_image`, `search_and_replace`, `find_files`, `diff_files`, `preview_edit`, `move_file`, `delete_file`, `file_tree` |
+| **Shell Execution** (4) | `exec`, `exec_background`, `process_status`, `system_info` |
+| **Web Access** (3) | `web_search`, `read_webpage`, `fetch_url` |
+| **Git Operations** (9) | `git_status`, `git_log`, `git_diff`, `git_add`, `git_commit`, `git_push`, `git_pull`, `git_branch`, `git_info` |
+| **Subagent Delegation** (14) | `delegate_task`, `delegate_parallel`, `delegate_with_synthesis`, `delegate_pipeline`, `delegate_background`, `delegate_fanout`, `get_background_result`, `await_background`, `list_background_tasks`, `subagent_status`, `send_subagent_message`, `get_subagent_messages`, `set_shared_context`, `get_shared_context` |
+| **Advanced Editing** (5) | `apply_patch`, `write_file_blocks`, `multi_edit`, `generate_diff`, `detect_indent` |
+| **Memory** (5) | `save_memory`, `get_memory`, `init_memory`, `validate_memory`, `check_retrieval` |
+| **Skills** (3) | `use_skill`, `list_skills`, `create_skill` |
+| **Task Management** (8) | `initialize_task`, `create_feature_list`, `get_next_feature`, `complete_feature`, `fail_feature`, `get_task_status`, `get_progress_report`, `save_session_progress` |
+| **MCP** (10) | `mcp_connect`, `mcp_auth`, `mcp_list_tools`, `mcp_call_tool`, `mcp_disconnect`, `mcp_list_connections`, `mcp_save_server`, `mcp_remove_server`, `mcp_list_servers`, `mcp_connect_all` |
+| **A2A** (8) | `a2a_start_server`, `a2a_stop_server`, `a2a_discover`, `a2a_send_task`, `a2a_get_task_status`, `a2a_list_tasks`, `a2a_cancel_task`, `a2a_get_status` |
+| **AG-UI** (10) | `agui_start`, `agui_stop`, `agui_emit`, `agui_emit_text`, `agui_emit_tool_call`, `agui_emit_run_started`, `agui_emit_run_ended`, `agui_emit_run_error`, `agui_get_subscribers`, `agui_get_status` |
+| **Graph** (7) | `graph_list_workflows`, `graph_run`, `graph_resume`, `graph_status`, `graph_list_checkpoints`, `graph_visualize`, `graph_abort` |
+| **AutoGen** (6) | `create_group_chat`, `add_agent_to_chat`, `run_group_chat`, `create_team`, `run_team`, `get_autogen_status` |
+| **Browser Automation** (11) | `browser_launch`, `browser_navigate`, `browser_click`, `browser_type`, `browser_screenshot`, `browser_get_text`, `browser_get_html`, `browser_evaluate`, `browser_wait_for`, `browser_list_pages`, `browser_close` |
+| **Canvas** (5) | `canvas_draw`, `canvas_image`, `canvas_clear`, `canvas_layout`, `canvas_markdown` |
+| **Checkpoints** (7) | `checkpoint_save`, `checkpoint_list`, `checkpoint_restore`, `checkpoint_diff`, `checkpoint_delete`, `checkpoint_status`, `checkpoint_is_git` |
+| **Plugins** (6) | `plugin_list`, `plugin_info`, `plugin_reload`, `plugin_load`, `plugin_unload`, `plugin_discover` |
 
 ### 🤝 Subagent Delegation System
 
@@ -319,23 +322,29 @@ openagent/
 │   │   ├── ConversationManager.js # Multi-turn tracking
 │   │   ├── FunctionTool.js       # Tool wrapping
 │   │   └── UserProxyAgent.js     # Human-in-the-loop agent
-│   ├── tools/                    # Built-in tools (40+)
+│   ├── tools/                    # Built-in tools (136)
 │   │   ├── ToolRegistry.js       # Tool registration & permissions
 │   │   ├── ToolGuard.js          # Safety guardrails
-│   │   ├── fileTools.js          # File operations (14 tools)
+│   │   ├── fileTools.js          # File operations (15 tools)
 │   │   ├── shellTools.js         # Shell execution
 │   │   ├── webTools.js           # Web search & fetch
 │   │   ├── gitTools.js           # Git operations
 │   │   ├── subagentTools.js      # Subagent delegation (14 tools)
-│   │   ├── mcpTools.js           # MCP protocol
-│   │   ├── a2aTools.js           # A2A protocol
-│   │   ├── aguiTools.js          # AG-UI protocol
-│   │   ├── graphTools.js         # Workflow graph control
-│   │   ├── memoryTools.js        # Memory operations
-│   │   ├── skillTools.js         # Skills management
-│   │   ├── taskTools.js          # Task management
-│   │   ├── checkpointTools.js    # Session checkpoints
-│   │   ├── pluginTools.js        # Plugin management
+│   │   ├── advancedEditTools.js  # Advanced editing (5 tools)
+│   │   ├── EditEngine.js         # Edit engine with fuzzy matching
+│   │   ├── mcpTools.js           # MCP protocol (10 tools)
+│   │   ├── a2aTools.js           # A2A protocol (8 tools)
+│   │   ├── aguiTools.js          # AG-UI protocol (10 tools)
+│   │   ├── browserTools.js       # Browser automation (11 tools)
+│   │   ├── canvasTools.js        # Canvas rendering (5 tools)
+│   │   ├── graphTools.js         # Workflow graph control (7 tools)
+│   │   ├── memoryTools.js        # Memory operations (5 tools)
+│   │   ├── skillTools.js         # Skills management (3 tools)
+│   │   ├── taskTools.js          # Task management (8 tools)
+│   │   ├── checkpointTools.js    # Session checkpoints (7 tools)
+│   │   ├── pluginTools.js        # Plugin management (6 tools)
+│   │   ├── ToolFormatAdapter.js  # Universal tool format adapter
+│   │   ├── guard-rules.js        # Tool guard rules
 │   │   ├── fileCache.js          # Stat cache with TTL
 │   │   ├── searchCache.js        # Search result caching
 │   │   ├── ProcessManager.js     # Background process management
@@ -553,9 +562,9 @@ const result = await runTeam('code-team', 'Review src/agent/Agent.js for issues'
 | **Model Support** | 400+ AI models via OpenRouter |
 | **Cross-Platform** | Windows, macOS, Linux, WSL |
 | **Skill Templates** | 4 types (Basic, Tool, Workflow, Agent) |
-| **Built-in Tools** | 60+ across 14 categories |
+| **Built-in Tools** | 136 across 17 categories |
 | **Protocols** | MCP, A2A, AG-UI |
-| **Source Files** | 111 files, ~1.4MB |
+| **Source Files** | 136 source files, ~1.4MB |
 | **Test Coverage** | 137+ tests (Vitest) |
 
 ---
