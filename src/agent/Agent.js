@@ -72,6 +72,11 @@ export class Agent {
     this._tokenCache = new WeakMap();
     this._tokenCacheVersion = 0;
     
+    // Token estimation calibration: tracks actual/estimated ratio from API usage
+    this._tokenCalibrationSamples = [];
+    this._tokenCalibrationFactor = 1.0; // 1.0 = no correction
+    this._tokenCalibrationMaxSamples = 20;
+    
     // Retry configuration
     this.maxRetries = options.maxRetries || 3;
     this.retryDelay = options.retryDelay || 1000;
@@ -86,6 +91,10 @@ export class Agent {
       avgIterationTime: 0,
       totalExecutionTime: 0,
     };
+    
+    // Per-iteration performance log (opt-in via --perf flag)
+    this.perfLogging = options.perfLogging || false;
+    this.perfLog = [];
     
     // State management
     this.state = 'idle'; // idle, running, paused, error, completed
@@ -696,6 +705,38 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     return allocResult.messages;
   }
 
+  /**
+   * Get relevant tool definitions for the current request.
+   * Sends only core + recently-used tool categories to reduce prompt token overhead.
+   * First iteration sends all tools; subsequent iterations use category filtering.
+   */
+  getRelevantToolDefinitions() {
+    // First iteration: send all tools (model needs to see the full toolkit)
+    if (this.iterationCount <= 1) {
+      return this.tools.getToolDefinitions();
+    }
+
+    // Track which categories were used in the last 3 iterations
+    const recentCategories = new Set();
+    const recentHistory = this.history.slice(-3);
+    for (const entry of recentHistory) {
+      for (const toolName of entry.toolCalls || []) {
+        const category = this.tools.getToolCategory(toolName);
+        recentCategories.add(category);
+      }
+    }
+
+    // If no recent history, send all tools
+    if (recentCategories.size === 0) {
+      return this.tools.getToolDefinitions();
+    }
+
+    // Always include 'general' category so models can request unexpected tools
+    recentCategories.add('general');
+    
+    return this.tools.getToolDefinitionsForCategories(recentCategories);
+  }
+
   recordToolRound(toolCalls) {
     // Fuzzy signature: tool name + target file only (not full args).
     // Use string concatenation instead of JSON.stringify for speed.
@@ -867,6 +908,21 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     this.contextStats.lastPromptTokens = usage.prompt_tokens || 0;
     this.contextStats.lastCompletionTokens = usage.completion_tokens || 0;
     this.contextStats.lastTotalTokens = usage.total_tokens || 0;
+
+    // Calibration: learn actual/estimated ratio from API-reported prompt_tokens
+    if (usage.prompt_tokens && usage.prompt_tokens > 0) {
+      const estimated = this.cachedEstimatedTokens;
+      if (estimated > 0) {
+        const ratio = usage.prompt_tokens / estimated;
+        this._tokenCalibrationSamples.push(ratio);
+        if (this._tokenCalibrationSamples.length > this._tokenCalibrationMaxSamples) {
+          this._tokenCalibrationSamples.shift();
+        }
+        // Use median of recent samples for stability (avoids outlier influence)
+        const sorted = [...this._tokenCalibrationSamples].sort((a, b) => a - b);
+        this._tokenCalibrationFactor = sorted[Math.floor(sorted.length / 2)];
+      }
+    }
   }
 
   getContextStats(maxTokens = this.maxContextTokens) {
@@ -1596,9 +1652,9 @@ Task: ${userInput}`;
     };
     this.history.push(iterationRecord);
     runHistory.push(iterationRecord);
-    // Trim history to prevent unbounded growth (keep last 200 entries)
-    if (this.history.length > 200) {
-      this.history = this.history.slice(-100);
+    // Trim history to prevent unbounded growth (keep last 100 entries)
+    if (this.history.length > 100) {
+      this.history = this.history.slice(-50);
     }
     this.recordToolRound(toolCalls);
     this.recordFileOperations(toolCalls);
@@ -1728,7 +1784,7 @@ Task: ${userInput}`;
         max_tokens: this.maxOutputTokens,
         // Send tool definitions so the model can use native tool calling via streaming.
         // If a model rejects streaming+tools, we catch the error and fall back to non-streaming.
-        tools: this.tools.getToolDefinitions(),
+        tools: this.getRelevantToolDefinitions(),
         tool_choice: 'auto',
         // Fire as soon as a single tool call is fully accumulated
         onToolCallReady: (toolCall) => {
@@ -2074,13 +2130,9 @@ Task: ${userInput}`;
       await this.discoverProjectStructure();
     }
 
-    // Planning phase: generate execution plan for complex tasks
-    if (userInput && this.isComplexTask(userInput)) {
-      const planMessage = await this.plan(userInput, this.messages);
-      if (planMessage) {
-        this.pushMessage({ role: 'system', content: planMessage });
-      }
-    }
+    // Planning phase: disabled — system prompt already enforces Explore→Plan→Code→Verify.
+    // The separate planning LLM call added 2-4s latency with no quality benefit.
+    // Models follow the structured workflow in the system prompt natively.
 
     // ── Streaming path ──
     if (this.streaming) {
@@ -2362,7 +2414,7 @@ Task: ${userInput}`;
     try {
       const result = await this.client.chatWithTools(
         messagesToSend,
-        this.tools.getToolDefinitions(),
+        this.getRelevantToolDefinitions(),
         {
           model: this.model,
           temperature: 0.3,
@@ -2436,19 +2488,21 @@ Task: ${userInput}`;
     const independentTools = [];
     const dependentTools = [];
     
-    // Expanded heuristic: all read-only tools can run in parallel
+    // Expanded heuristic: all read-only + safe parallel tools
     const readOnlyTools = new Set([
       'read_file', 'read_files', 'list_directory', 'file_tree', 'search_files', 'search_in_files', 'get_file_info',
       'find_files', 'diff_files', 'preview_edit', 'read_image',
       'git_status', 'git_log', 'git_diff', 'git_info', 'git_branch',
+      'git_add', 'git_remote', 'git_stash', // Safe write ops that don't conflict
       'web_search', 'read_webpage', 'fetch_url',
-      'system_info', 'process_status',
-      'get_memory', 'list_skills', 'list_memories',
+      'system_info', 'process_status', 'computer_control',
+      'get_memory', 'list_skills', 'list_memories', 'save_memory',
       'get_task_status', 'get_progress_report', 'list_tasks',
       'subagent_status', 'get_subagent_messages', 'get_shared_context', 'list_subagents',
       'get_background_result',
       'list_workflows', 'get_workflow_state',
       'list_mcp_tools', 'list_a2a_agents',
+      'search_library', 'list_library_sources', 'search_in_file',
     ]);
     for (const toolCall of toolCalls) {
       if (readOnlyTools.has(toolCall.name)) {

@@ -161,9 +161,9 @@ export const CONFIG = {
   // ═══════════════════════════════════════════════════════════════
   // 🔌 OpenRouter Client
   // ═══════════════════════════════════════════════════════════════
-  CLIENT_CACHE_MAX_SIZE: 500, // Increased from 200 — more cache hits for repeated queries
-  CLIENT_REQUEST_HISTORY_MAX: 100, // Reduced from 200 — less memory, history isn't that useful
-  CLIENT_REQUEST_HISTORY_TRIM: 50, // Reduced from 100
+  CLIENT_CACHE_MAX_SIZE: 200, // Reduced from 500 — agent sessions rarely repeat identical requests; saves memory
+  CLIENT_REQUEST_HISTORY_MAX: 50, // Reduced from 100 — further memory optimization
+      CLIENT_REQUEST_HISTORY_TRIM: 25, // Reduced from 50
   CLIENT_RATE_LIMIT_DEFAULT_WAIT_MS: 1000,
   CLIENT_RATE_LIMIT_MAX_WAIT_MS: 10000,
 

@@ -23,7 +23,7 @@ import { ToolFormatAdapter } from './tools/ToolFormatAdapter.js';
 import { Agent as UndiciAgent } from 'undici';
 
 // Shared HTTP connection pool for keep-alive reuse across all client instances
-export const httpAgent = new UndiciAgent({ keepAliveTimeout: 60000, connections: 20 });
+export const httpAgent = new UndiciAgent({ keepAliveTimeout: 60000, connections: 6, connectTimeout: 5000 });
 
 export { OpenRouterError, RateLimitError, AuthenticationError, AbortError } from './errors.js';
 
@@ -203,6 +203,13 @@ export class OpenRouterClient {
     if (timeSinceLastRequest < this.minRequestInterval) {
       await this.sleep(this.minRequestInterval - timeSinceLastRequest);
     }
+    
+    // Adaptive timeout: use p95 of recent response times, clamped to [30s, 120s]
+    if (this._recentResponseTimes.length >= 5) {
+      const sorted = [...this._recentResponseTimes].sort((a, b) => a - b);
+      const p95 = sorted[Math.floor(sorted.length * 0.95)];
+      this.timeout = Math.max(30000, Math.min(120000, p95 * 2.5));
+    }
   }
   
   /**
@@ -267,15 +274,18 @@ export class OpenRouterClient {
   }
   
   /**
-   * Create AbortController with timeout
+   * Create AbortController with timeout.
+   * Uses a conservative adaptive timeout based on recent successful responses,
+   * but never below the configured timeout passed by callers.
    */
   createController(timeoutMs = this.timeout) {
     const controller = new AbortController();
     this.activeControllers.add(controller);
-    
+
+    const effectiveTimeoutMs = this.getAdaptiveTimeout(timeoutMs);
     const timer = setTimeout(() => {
       controller.abort();
-    }, timeoutMs);
+    }, effectiveTimeoutMs);
     
     // Clean up on completion
     const cleanup = () => {
@@ -283,7 +293,20 @@ export class OpenRouterClient {
       this.activeControllers.delete(controller);
     };
     
-    return { controller, cleanup };
+    return { controller, cleanup, timeoutMs: effectiveTimeoutMs };
+  }
+
+  /**
+   * Compute adaptive request timeout from recent response times.
+   */
+  getAdaptiveTimeout(baseTimeoutMs = this.timeout) {
+    const base = Number.isFinite(baseTimeoutMs) && baseTimeoutMs > 0 ? baseTimeoutMs : this.timeout;
+    if (this._recentResponseTimes.length < 5) return base;
+
+    const sorted = [...this._recentResponseTimes].sort((a, b) => a - b);
+    const p95 = sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)] || base;
+    const adaptive = Math.ceil(p95 * 3);
+    return Math.max(base, Math.min(120000, adaptive));
   }
   
   /**
@@ -472,7 +495,7 @@ export class OpenRouterClient {
           ...this.headers,
         },
         body: JSON.stringify(payload),
-        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(this.timeout)]),
+        signal: controller.signal,
         dispatcher: httpAgent,
       });
       
@@ -904,7 +927,7 @@ export class OpenRouterClient {
           ...this.headers,
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]),
+        signal: controller.signal,
         dispatcher: httpAgent,
       });
       
@@ -945,7 +968,7 @@ export class OpenRouterClient {
           'Connection': 'keep-alive',
           ...this.headers,
         },
-        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]),
+        signal: controller.signal,
         dispatcher: httpAgent,
       });
       
@@ -1066,12 +1089,14 @@ export class OpenRouterClient {
     if (!Array.isArray(messages)) {
       return [messages];
     }
-    return messages.map(m => {
-      if (typeof m === 'string') {
-        return { role: 'user', content: m };
-      }
-      return m;
-    });
+    // Fast path: if all messages are already objects, return as-is (no mapping)
+    // This avoids O(n) .map() on every request for the common case
+    let needsMapping = false;
+    for (let i = 0; i < messages.length; i++) {
+      if (typeof messages[i] === 'string') { needsMapping = true; break; }
+    }
+    if (!needsMapping) return messages;
+    return messages.map(m => typeof m === 'string' ? { role: 'user', content: m } : m);
   }
   
   // ═══════════════════════════════════════════════════════════════
@@ -1215,6 +1240,12 @@ export class OpenRouterClient {
     // Keep history limited to 100 entries max
     if (this.requestHistory.length > 100) {
       this.requestHistory = this.requestHistory.slice(-100);
+    }
+    
+    // Track response time for adaptive timeouts
+    this._recentResponseTimes.push(duration);
+    if (this._recentResponseTimes.length > this._maxResponseTimeSamples) {
+      this._recentResponseTimes.shift();
     }
   }
   
