@@ -1453,12 +1453,22 @@ export const fetchUrlTool = {
       }
 
       // SSRF protection — block private/internal IP ranges
+      // Allow local network if OPENAGENT_ALLOW_LOCAL_NETWORK=true (for local development servers, Docker, etc.)
+      const allowLocalNetwork = process.env.OPENAGENT_ALLOW_LOCAL_NETWORK === 'true';
       try {
         const parsed = new URL(url);
         const hostname = parsed.hostname;
-        if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' ||
-            hostname.startsWith('10.') || hostname.startsWith('172.16.') || hostname.startsWith('192.168.') ||
-            hostname === '169.254.169.254') {
+        // Full private range check: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, loopback, link-local
+        const isPrivate172 = (() => {
+          if (!hostname.startsWith('172.')) return false;
+          const parts = hostname.split('.');
+          if (parts.length < 2) return false;
+          const second = parseInt(parts[1], 10);
+          return second >= 16 && second <= 31;
+        })();
+        if (!allowLocalNetwork && (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' ||
+            hostname.startsWith('10.') || isPrivate172 || hostname.startsWith('192.168.') ||
+            hostname === '169.254.169.254')) {
           return { success: false, error: 'Fetching internal/private URLs is not allowed for security reasons' };
         }
       } catch (_e) {

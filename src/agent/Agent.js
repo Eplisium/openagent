@@ -278,6 +278,22 @@ NEVER skip steps. Each phase prevents entire classes of bugs.
 - git_diff to review changes before committing
 - Descriptive commit messages: "feat: add user auth" not "update files"
 - git_log to understand recent history and conventions
+- git_init to initialize new repos (use initialBranch parameter for custom branch names)
+- git_remote to manage remotes (add, remove, set-url, list)
+- git_clone to clone repos (supports shallow clone with depth parameter)
+- git_stash to temporarily save uncommitted changes
+
+## Network & API Access
+
+- web_search: Search the internet (uses DuckDuckGo, Startpage, SearX backends)
+- read_webpage: Fetch and extract content from web pages (HTML → text)
+- fetch_url: Raw HTTP requests for APIs and JSON endpoints
+- fetch_url BLOCKS localhost/private IPs by default (SSRF protection)
+- For local APIs (localhost, Docker, LAN servers): use exec with curl instead
+  Example: exec { command: "curl -s http://localhost:8929/api/v4/projects" }
+- For local APIs with auth: use exec with curl -H for headers
+  Example: exec { command: "curl -s -H 'PRIVATE-TOKEN: xxx' http://localhost:8929/api/v4/namespaces" }
+- Check .git-credentials, .env files, or environment for stored tokens before asking the user
 
 ## Subagent Delegation
 
@@ -486,7 +502,16 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     }
 
     // Guard: non-dead-end categories — these are fixable, not systemic
-    const nonDeadEndCategories = ['VALIDATION_ERROR', 'NOT_GIT_REPO'];
+    const nonDeadEndCategories = [
+      'VALIDATION_ERROR',
+      'NOT_GIT_REPO',
+      'NETWORK',       // Network issues are transient — retrying makes sense
+      'RATE_LIMIT',    // Rate limits are temporary
+      // TIMEOUT is intentionally NOT here — consistent timeouts ARE a dead end
+      'PARSE_ERROR',   // Parse errors can often be fixed with different args
+      'AUTH',          // Auth errors can be fixed by finding/providing credentials
+      'SANITIZED',     // Sanitization false positives can be worked around
+    ];
     if (nonDeadEndCategories.includes(dominant[0])) {
       return null;
     }
@@ -2700,6 +2725,18 @@ Task: ${userInput}`;
   categorizeError(error) {
     const message = (error?.message || '').toLowerCase();
 
+    // High-priority checks first (most common failure patterns)
+    if (message.includes('text not found') || message.includes('not found in file')) {
+      return 'EDIT_MISMATCH';
+    }
+    if (message.includes('must be greater') || message.includes('must be ≥') || message.includes('must be >=') ||
+        message.includes('1-indexed') || message.includes('is 1-indexed') ||
+        message.includes('invalid value for parameter') || message.includes('exceeds file length')) {
+      return 'VALIDATION_ERROR';
+    }
+    if (message.includes('not a git repository') || message.includes('not a git repo') || message.includes('fatal: not a git repository')) {
+      return 'NOT_GIT_REPO';
+    }
     if (message.includes('timeout') || message.includes('timed out')) {
       return 'TIMEOUT';
     }
@@ -2709,13 +2746,16 @@ Task: ${userInput}`;
     if (message.includes('enoent') || message.includes('not found') || message.includes('no such file')) {
       return 'NOT_FOUND';
     }
-    if (message.includes('econnrefused') || message.includes('network') || message.includes('dns') || message.includes('fetch failed')) {
+    if (message.includes('fetching internal/private') || message.includes('not allowed for security')) {
+      return 'NETWORK'; // SSRF block — count as network (agent should use exec+curl instead)
+    }
+    if (message.includes('econnrefused') || message.includes('network') || message.includes('dns') || message.includes('fetch failed') || message.includes('enotfound')) {
       return 'NETWORK';
     }
-    if (message.includes('text not found') || message.includes('not found in file')) {
-      return 'EDIT_MISMATCH';
+    if (message.includes('unauthorized') || message.includes('401') || message.includes('forbidden') || message.includes('403')) {
+      return 'AUTH';
     }
-    if (message.includes('json') || message.includes('parse') || message.includes('unexpected token')) {
+    if (message.includes('invalid json') || message.includes('parse') || message.includes('unexpected token') || message.includes('malformed')) {
       return 'PARSE_ERROR';
     }
     if (message.includes('rate limit') || message.includes('429') || message.includes('too many requests')) {
@@ -2724,13 +2764,8 @@ Task: ${userInput}`;
     if (message.includes('context length') || message.includes('token') || message.includes('too large')) {
       return 'SIZE_LIMIT';
     }
-    if (message.includes('must be greater') || message.includes('must be ≥') || message.includes('must be >=') ||
-        message.includes('1-indexed') || message.includes('is 1-indexed') ||
-        message.includes('invalid value for parameter') || message.includes('exceeds file length')) {
-      return 'VALIDATION_ERROR';
-    }
-    if (message.includes('not a git repository') || message.includes('not a git repo') || message.includes('fatal: not a git repository')) {
-      return 'NOT_GIT_REPO';
+    if (message.includes('shield') || message.includes('blocked')) {
+      return 'SANITIZED';
     }
 
     return 'UNKNOWN';
@@ -2800,13 +2835,15 @@ Task: ${userInput}`;
       TIMEOUT: `The ${toolName} tool timed out. Try: (1) breaking the operation into smaller pieces, (2) using a more specific query or path, or (3) checking if the target resource is available.`,
       PERMISSION: `The ${toolName} tool encountered a permission error. Try: (1) checking file/directory permissions, (2) running with appropriate access rights, or (3) using a different path that you have access to.`,
       NOT_FOUND: `The ${toolName} tool could not find the target. Try: (1) verifying the path exists using list_directory or read_file first, (2) checking for typos in the path, or (3) searching for the file using search_in_files.`,
-      NETWORK: `The ${toolName} tool encountered a network error. Try: (1) checking your internet connection, (2) verifying the URL is correct, (3) trying again after a brief wait, or (4) using an alternative data source.`,
-      PARSE_ERROR: `The ${toolName} tool returned unparseable data. Try: (1) checking if the input arguments are correctly formatted, (2) verifying the tool is being used with valid parameters, or (3) simplifying the request.`,
+      NETWORK: `The ${toolName} tool encountered a network error. If this is a local/internal URL (localhost, 192.168.x.x), fetch_url blocks those by default for security — use exec with curl/wget instead. For external URLs: (1) check your internet connection, (2) verify the URL is correct, (3) try again after a brief wait.`,
+      AUTH: `The ${toolName} tool got an authentication error (401/403). Try: (1) check if credentials/tokens are available in the environment or config files, (2) use exec to find stored credentials (e.g. ~/.git-credentials, .env files), (3) pass credentials via headers parameter, or (4) ask the user for the correct credentials.`,
+      PARSE_ERROR: `The ${toolName} tool returned unparseable data. Try: (1) checking if the input arguments are correctly formatted, (2) verifying JSON is valid (no trailing commas, proper escaping), (3) using exec to test the command interactively first.`,
       RATE_LIMIT: `The ${toolName} tool hit a rate limit. Try: (1) waiting before retrying, (2) reducing the frequency of calls, or (3) batching multiple operations into fewer calls.`,
       SIZE_LIMIT: `The ${toolName} tool encountered a size limit. Try: (1) reducing the amount of data being processed, (2) using pagination or chunking, or (3) filtering results to be more specific.`,
       EDIT_MISMATCH: `The edit_file tool could not find the exact text in the file. This is the most common error. IMMEDIATE RECOVERY: (1) Re-read the file with read_file to get the CURRENT content, (2) Copy the EXACT text verbatim from the read_file output as the 'find' parameter, (3) Or use line-based editing with startLine/endLine instead. NEVER retry with the same text that just failed.`,
       VALIDATION_ERROR: `The ${toolName} tool received invalid arguments. Check the parameter types and ranges. For edit_file, line numbers are 1-indexed (start at 1, not 0). Re-read the file with read_file to get correct line numbers, then retry. You can also switch to find/replace mode instead of line-based mode.`,
-      NOT_GIT_REPO: `This project is not a git repository. Git commands will not work here. Skip git operations and continue with other tools (read_file, edit_file, exec, etc.).`,
+      NOT_GIT_REPO: `This project is not a git repository. Use git_init to initialize one, or Skip git operations and continue with other tools (read_file, edit_file, exec, etc.).`,
+      SANITIZED: `The ${toolName} tool blocked the operation due to security sanitization. This is usually a false positive. Try: (1) using an alternative command syntax, (2) using exec with a simpler command, or (3) breaking the operation into separate steps.`,
       UNKNOWN: `The ${toolName} tool failed with: "${errorMessage.substring(0, 100)}". Try: (1) reviewing the error details, (2) checking tool documentation, (3) using an alternative approach, or (4) breaking the task into smaller steps.`,
     };
 
