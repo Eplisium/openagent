@@ -5,12 +5,10 @@
 
 import chalk from '../utils/chalk-compat.js';
 import boxen from 'boxen';
-import gradient from 'gradient-string';
 import * as prompts from '../utils/prompts.js';
 import { CONFIG } from '../config.js';
-import { gradients, boxStyles } from '../utils.js';
+import { boxStyles } from '../utils.js';
 
-const g = gradients;
 const box = boxStyles;
 
 /**
@@ -34,12 +32,13 @@ export async function runOnboarding(state, saveState, modelBrowser = null) {
   console.clear();
 
   // Print welcome banner
-  console.log(`\n ${g.title('╔═══════════════════════════════════════════════════════════════╗')}
- ${g.title('║')}                                                               ${g.title('║')}
- ${g.title('║')}   ${gradient.rainbow('🌙 Welcome to OpenAgent!')}                                ${g.title('║')}
- ${g.title('║')}                                                               ${g.title('║')}
- ${g.title('╚═══════════════════════════════════════════════════════════════╝')}
- `);
+  const width = Math.min(process.stdout.columns || 80, 60);
+  const line = '─'.repeat(width);
+  console.log('');
+  console.log(chalk.dim(`  ${line}`));
+  console.log(`  ${chalk.bold.cyan('🌙 Welcome to OpenAgent!')}`);
+  console.log(chalk.dim(`  ${line}`));
+  console.log('');
 
   prompts.intro(chalk.gray("Let's get you set up. This takes 30 seconds."));
 

@@ -143,15 +143,13 @@ export function shortenModelLabel(modelId) {
  * @param {string} version - Version string
  */
 export function printBanner(version) {
-  console.log(`
- ${g.title('╔═══════════════════════════════════════════════════════════════╗')}
- ${g.title('║')}                                                               ${g.title('║')}
- ${g.title('║')}   ${gradient.rainbow('🚀 OpenAgent')} ${chalk.gray(`v${version}`)}                                           ${g.title('║')}
- ${g.title('║')}   ${chalk.gray('AI-Powered Agentic Assistant with 400+ Models')}               ${g.title('║')}
- ${g.title('║')}   ${chalk.gray('Production-grade • Tool calling • Multi-agent')}                ${g.title('║')}
- ${g.title('║')}                                                               ${g.title('║')}
- ${g.title('╚═══════════════════════════════════════════════════════════════╝')}
- `);
+  const width = Math.min(process.stdout.columns || 80, 60);
+  const line = '─'.repeat(width);
+  console.log('');
+  console.log(chalk.dim(`  ${line}`));
+  console.log(`  ${gradient.rainbow('🚀 OpenAgent')} ${chalk.gray(`v${version}`)}  ${chalk.dim('·')}  ${chalk.gray('AI Agent · 400+ Models · Cross-Platform')}`);
+  console.log(chalk.dim(`  ${line}`));
+  console.log('');
 }
 
 /**
@@ -193,13 +191,13 @@ export function formatToolCall(toolName, args, count, startTime) {
  * Print goodbye banner
  */
 export function printGoodbye() {
-  console.log(`
- ${g.title('╔═══════════════════════════════════════════════════════════════╗')}
- ${g.title('║')}                                                               ${g.title('║')}
- ${g.title('║')}   ${g.success('👋 Session Complete')}                                         ${g.title('║')}
- ${g.title('║')}                                                               ${g.title('║')}
- ${g.title('╚═══════════════════════════════════════════════════════════════╝')}
- `);
+  const width = Math.min(process.stdout.columns || 80, 60);
+  const line = '─'.repeat(width);
+  console.log('');
+  console.log(chalk.dim(`  ${line}`));
+  console.log(`  ${g.success('👋 Session complete')}`);
+  console.log(chalk.dim(`  ${line}`));
+  console.log('');
 }
 
 /**

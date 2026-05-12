@@ -247,14 +247,10 @@ export class CLI {
     const contextLength = modelInfo?.contextLength || CONFIG.MAX_CONTEXT_TOKENS;
     const toolCount = this.session.toolRegistry?.list()?.length || 0;
 
-    console.log(boxen(
-      `${chalk.bold('🚀 OpenAgent')} ${chalk.gray(`v${VERSION}`)}\n\n` +
-      `${chalk.bold('Model:')} ${chalk.cyan(this.session.agent.model)}\n` +
-      `${chalk.bold('Context:')} ${formatCompactNumber(contextLength)}\n` +
-      `${chalk.bold('Tools:')} ${toolCount} available\n` +
-      `${chalk.bold('Dir:')} ${chalk.gray(this.workingDir)}`,
-      { ...b().info, title: '📋 Session Info', titleAlignment: 'center' }
-    ));
+    const modelShort = shortenModelLabel(this.session.agent.model);
+    console.log(chalk.dim(`  ${modelShort} · ${formatCompactNumber(contextLength)} ctx · ${toolCount} tools`));
+    console.log(chalk.dim(`  ${this.workingDir}`));
+    console.log('');
 
     // Installation directory warning
     if (isInsideInstallationDir(this.workingDir) && !this.allowFullAccess) {
@@ -272,12 +268,11 @@ export class CLI {
     if (this.autoSave) this.startAutoSave();
 
     console.log(boxen(
-      `${chalk.bold('Commands:')}\n\n` +
       `${formatCommandList()}\n\n` +
       `${chalk.dim('Shortcuts:')} ${chalk.gray(getShortcutSummary())}\n` +
       `${chalk.dim('Input:')} ${chalk.gray(getInputShortcutSummary())}\n` +
       `${chalk.dim('Tip: Just type a message to run as an agentic task')}`,
-      { ...b().default, title: '🤖 OpenAgent', titleAlignment: 'center' }
+      { ...b().default, title: '🤖 Commands', titleAlignment: 'left' }
     ));
 
     await this.mainLoop();
@@ -494,15 +489,13 @@ export class CLI {
   // ── Banner & Status ──────────────────────────────────────────
 
   printBanner() {
-    console.log(`
- ${g().title('╔═══════════════════════════════════════════════════════════════╗')}
- ${g().title('║')}                                                               ${g().title('║')}
- ${g().title('║')}   ${gradient.rainbow('🚀 OpenAgent')} ${chalk.gray(`v${VERSION}`)}                                           ${g().title('║')}
- ${g().title('║')}   ${chalk.gray('AI-Powered Agentic Assistant with 400+ Models')}               ${g().title('║')}
- ${g().title('║')}   ${chalk.gray('Production-grade • Tool calling • Multi-agent')}                ${g().title('║')}
- ${g().title('║')}                                                               ${g().title('║')}
- ${g().title('╚═══════════════════════════════════════════════════════════════╝')}
- `);
+    const width = Math.min(process.stdout.columns || 80, 60);
+    const line = '─'.repeat(width);
+    console.log('');
+    console.log(chalk.dim(`  ${line}`));
+    console.log(`  ${gradient.rainbow('🚀 OpenAgent')} ${chalk.gray(`v${VERSION}`)}  ${chalk.dim('·')}  ${chalk.gray('AI Agent · 400+ Models · Cross-Platform')}`);
+    console.log(chalk.dim(`  ${line}`));
+    console.log('');
   }
 
   buildPromptStatusLine() {

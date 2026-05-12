@@ -8,6 +8,14 @@ import { marked } from 'marked';
 import { highlightCode } from './syntaxHighlight.js';
 
 /**
+ * Strip ANSI escape codes from a string for length calculations
+ */
+function stripAnsi(str) {
+  if (!str) return '';
+  return str.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+}
+
+/**
  * Render inline tokens (text, strong, em, code, links, etc.) to terminal-styled string.
  * In marked v15, inline tokens have child content in token.text (already rendered as string).
  */
@@ -45,19 +53,28 @@ function renderInline(tokens) {
 
 const renderer = {};
 
-// Headers with box-drawing characters
+// Headers with gradient-underlined styling
 renderer.heading = function(token) {
   const text = token.text || '';
   const level = token.depth || 1;
-  const widths = { 1: 50, 2: 40, 3: 30, 4: 25, 5: 20, 6: 18 };
-  const width = widths[level] || 20;
-  const prefix = '━'.repeat(Math.floor((width - text.length - 1) / 2));
-  const suffix = '━'.repeat(Math.ceil((width - text.length - 1) / 2));
-  
+  const maxWidth = Math.min(process.stdout.columns || 80, 60);
+
   if (level === 1) {
-    return `\n${chalk.bold.underline(prefix + ' ' + text + ' ' + suffix)}\n`;
+    const rule = '━'.repeat(Math.min(text.length + 4, maxWidth));
+    return `\n${chalk.bold.cyan(text)}\n${chalk.dim(rule)}\n`;
   }
-  return `\n${chalk.bold(prefix + ' ' + text + ' ' + suffix)}\n`;
+  if (level === 2) {
+    const prefix = chalk.bold.hex('#89b4fa')('## ');
+    return `\n${prefix}${chalk.bold.white(text)}\n`;
+  }
+  if (level === 3) {
+    const prefix = chalk.bold.hex('#a6e3a1')('### ');
+    return `\n${prefix}${chalk.bold(text)}\n`;
+  }
+  // h4-h6: progressively dimmer
+  const dimLevel = Math.min(level - 3, 3);
+  const dimFn = dimLevel === 1 ? chalk.bold : dimLevel === 2 ? chalk : chalk.dim;
+  return `\n${dimFn('#'.repeat(level) + ' ' + text)}\n`;
 };
 
 // Code blocks with syntax highlighting and line numbers
@@ -87,21 +104,31 @@ renderer.link = function(token) {
   return `${chalk.cyan(token?.text || '')} ${chalk.dim('(' + (token?.href || '') + ')')}`;
 };
 
-// Blockquotes
+// Blockquotes with left-bar accent
 renderer.blockquote = function(token) {
   const inner = token.tokens ? marked.parser(token.tokens) : (token.text || '');
   const clean = inner.replace(/<\/?p>/g, '').trim();
-  return clean.split('\n').map(line => `${chalk.dim('│')} ${chalk.dim(line)}`).join('\n') + '\n';
+  const bar = chalk.hex('#89b4fa')('│');
+  return clean.split('\n').map(line => `${bar} ${chalk.italic(line)}`).join('\n') + '\n';
 };
 
-// Lists - iterate items properly
+// Lists with task-list checkbox support
 renderer.list = function(token) {
   const items = token.items || [];
   const ordered = token.ordered;
   return '\n' + items.map((item, i) => {
-    const bullet = ordered ? `${(token.start || 1) + i}. ` : '• ';
+    // Marked v15 sets item.task = true for checkbox items
+    const isTask = item.task === true;
+    const checked = item.checked === true;
+    let bullet;
+    if (isTask) {
+      bullet = checked ? chalk.green('✔ ') : chalk.dim('◻ ');
+      const content = item.tokens ? renderInline(item.tokens) : (item.text || '');
+      return `  ${bullet}${checked ? chalk.dim.strikethrough(content) : content}`;
+    }
+    bullet = ordered ? chalk.dim(`${(token.start || 1) + i}. `) : chalk.dim('• ');
     const content = item.tokens ? renderInline(item.tokens) : (item.text || '');
-    return `  ${chalk.dim(bullet)}${content}`;
+    return `  ${bullet}${content}`;
   }).join('\n') + '\n';
 };
 
@@ -136,29 +163,38 @@ renderer.paragraph = function(token) {
   return `\n${content}\n`;
 };
 
-// Tables
+// Tables with proper box-drawing separators
 renderer.table = function(token) {
   try {
     const header = token?.header || [];
     const rows = token?.rows || [];
     const headerCells = header.map(cell => cell?.text || '');
     const colWidths = headerCells.map((col, i) => {
-      let maxWidth = col.length;
+      let maxWidth = stripAnsi(col).length;
       rows.forEach(row => {
-        maxWidth = Math.max(maxWidth, (row[i]?.text || '').length);
+        maxWidth = Math.max(maxWidth, stripAnsi(row[i]?.text || '').length);
       });
-      return maxWidth;
+      return Math.min(maxWidth, 40);
     });
-    const formatRow = (cells) => {
-      return cells.map((cell, i) => {
-        const text = typeof cell === 'string' ? cell : cell?.text || '';
-        return text.padEnd(colWidths[i] || text.length);
-      }).join(' │ ');
+    const padCell = (text, width) => {
+      const visible = stripAnsi(text);
+      const padding = Math.max(0, width - visible.length);
+      return text + ' '.repeat(padding);
     };
-    const headerRow = formatRow(headerCells);
-    const separator = colWidths.map(w => '─'.repeat(w)).join('─┼─');
-    const bodyRows = rows.map(row => formatRow(row.map(cell => cell?.text || '')));
-    return `\n${chalk.bold(headerRow)}\n${chalk.dim(separator)}\n${bodyRows.join('\n')}\n`;
+    const formatRow = (cells, isHeader) => {
+      const styled = cells.map((cell) => {
+        const text = typeof cell === 'string' ? cell : cell?.text || '';
+        return isHeader ? chalk.bold(text) : text;
+      });
+      return '│ ' + styled.map((text, i) => padCell(text, colWidths[i])).join(' │ ') + ' │';
+    };
+    const sepChar = '─';
+    const topBorder = '┌' + colWidths.map(w => sepChar.repeat(w + 2)).join('┬') + '┐';
+    const midBorder = '├' + colWidths.map(w => sepChar.repeat(w + 2)).join('┼') + '┤';
+    const botBorder = '└' + colWidths.map(w => sepChar.repeat(w + 2)).join('┴') + '┘';
+    const headerRow = formatRow(headerCells, true);
+    const bodyRows = rows.map(row => formatRow(row.map(cell => cell?.text || ''), false));
+    return `\n${chalk.dim(topBorder)}\n${headerRow}\n${chalk.dim(midBorder)}\n${bodyRows.join('\n')}\n${chalk.dim(botBorder)}\n`;
   } catch {
     return '\n' + (token?.text || '') + '\n';
   }

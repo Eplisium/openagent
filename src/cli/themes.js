@@ -86,6 +86,32 @@ export const themes = {
     assistant: '#333333',
     header: '#005cc5',
   },
+  tokyonight: {
+    name: 'Tokyo Night',
+    text: '#c0caf5',
+    accent: '#7aa2f7',
+    success: '#9ece6a',
+    error: '#f7768e',
+    warning: '#e0af68',
+    muted: '#565f89',
+    tool: '#7dcfff',
+    user: '#7aa2f7',
+    assistant: '#c0caf5',
+    header: '#bb9af7',
+  },
+  solarized: {
+    name: 'Solarized Dark',
+    text: '#839496',
+    accent: '#268bd2',
+    success: '#859900',
+    error: '#dc322f',
+    warning: '#b58900',
+    muted: '#586e75',
+    tool: '#2aa198',
+    user: '#268bd2',
+    assistant: '#93a1a1',
+    header: '#6c71c4',
+  },
 };
 
 /**
@@ -108,7 +134,7 @@ export function listThemes() {
 /**
  * Ordered array of theme keys for cycling.
  */
-export const THEME_ORDER = ['catppuccin', 'nord', 'dracula', 'monokai', 'gruvbox', 'light'];
+export const THEME_ORDER = ['catppuccin', 'tokyonight', 'nord', 'dracula', 'monokai', 'gruvbox', 'solarized', 'light'];
 
 /**
  * Get the next theme in the cycle.

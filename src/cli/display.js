@@ -31,14 +31,13 @@ const box = boxStyles;
  * Print the OpenAgent startup banner
  */
 export function printBanner() {
-  console.log(g.title(`
-╔═══════════════════════════════════════════════════════════════╗
-║                                                               ║
-║   ${g.ai('🚀 OpenAgent')}                                          ║
-║   ${g.subtitle('AI Agent • 400+ Models • Cross-Platform')}             ║
-║                                                               ║
-╚═══════════════════════════════════════════════════════════════╝
-`));
+  const width = Math.min(process.stdout.columns || 80, 60);
+  const line = '─'.repeat(width);
+  console.log('');
+  console.log(chalk.dim(`  ${line}`));
+  console.log(`  ${g.title('🚀 OpenAgent')}  ${chalk.dim('·')}  ${chalk.gray('AI Agent · 400+ Models · Cross-Platform')}`);
+  console.log(chalk.dim(`  ${line}`));
+  console.log('');
 }
 
 /**
@@ -470,31 +469,35 @@ export function printEnhancedTaskSummary(cli, result, duration) {
     });
   }
 
-  const dividerLine = chalk.dim('━'.repeat(50));
+  const width = Math.min(process.stdout.columns || 80, 60);
+  const dividerLine = chalk.dim('─'.repeat(width));
 
   console.log('');
   console.log(dividerLine);
-  console.log(chalk.hex(t.success)('  ✅ Task complete'));
+  console.log(chalk.hex(t.success)('  ✓ Task complete'));
   console.log('');
-  console.log(`  ${chalk.hex(t.tool)('🤖')} ${chalk.white(modelShort)} • ${contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} ctx (${contextPct}%)`)}`);
-  console.log(`  ${chalk.hex(t.tool)('⏱')} ${chalk.white(seconds + 's')} • ${chalk.white(result.iterations + ' iter')} • ${chalk.white(result.stats.toolExecutions + ' tool calls')}`);
 
+  // Compact single-line summary
+  const summaryParts = [
+    chalk.hex(t.tool)(modelShort),
+    contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} ctx (${contextPct}%)`),
+    chalk.white(`${seconds}s`),
+    chalk.white(`${result.iterations} iter`),
+    chalk.white(`${result.stats.toolExecutions} tools`),
+  ];
+  console.log(`  ${summaryParts.join(chalk.dim(' · '))}`);
+
+  // Tool breakdown on one line
   if (Object.keys(toolUsage).length > 0) {
-    console.log('');
-    console.log(`  ${chalk.hex(t.tool)('🔧 Tools used:')}`);
     const toolParts = Object.entries(toolUsage)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 6)
-      .map(([tool, cnt]) => `${tool} ×${cnt}`);
-    console.log(`    ${toolParts.join('  ')}`);
+      .map(([tool, cnt]) => `${tool}${chalk.dim('×')}${cnt}`);
+    console.log(chalk.hex(t.muted)(`  ${toolParts.join('  ')}`));
   }
 
-  if (result.performance) {
-    const avgIteration = result.iterations > 0 ? (duration / result.iterations / 1000).toFixed(1) + 's' : 'N/A';
-    const retries = result.performance.totalRetries || 0;
-    console.log('');
-    console.log(`  ${chalk.hex(t.accent)('📊 Performance:')}`);
-    console.log(`    ${chalk.hex(t.muted)('Avg iteration:')} ${chalk.white(avgIteration)} • ${chalk.hex(t.muted)('Retries:')} ${retries > 0 ? chalk.hex(t.warning)(retries) : chalk.hex(t.success)('0')}`);
+  if (result.performance && result.performance.totalRetries > 0) {
+    console.log(chalk.hex(t.warning)(`  ↻ ${result.performance.totalRetries} retries`));
   }
 
   console.log(dividerLine);
@@ -554,13 +557,21 @@ export async function printGoodbye(cli) {
     await cli.sessionSaveInFlight.catch(() => {});
   }
 
-  console.log(`
-${g.title('╔═══════════════════════════════════════════════════════════════╗')}
-${g.title('║')}                                                               ${g.title('║')}
-${g.title('║')}   ${g.success('👋 Session Complete')}                                         ${g.title('║')}
-${g.title('║')}                                                               ${g.title('║')}
-${g.title('╚═══════════════════════════════════════════════════════════════╝')}
-`);
+  const width = Math.min(process.stdout.columns || 80, 60);
+  const line = '─'.repeat(width);
+
+  // Compute session stats for farewell
+  const elapsedMs = Date.now() - cli.sessionStartTime;
+  const elapsedStr = formatElapsedTime(elapsedMs);
+  const taskCount = cli.taskCount || 0;
+  const cost = cli.totalCost || 0;
+  const costStr = cost > 0 ? `$${cost.toFixed(4)}` : '$0.00';
+
+  console.log('');
+  console.log(chalk.dim(`  ${line}`));
+  console.log(`  ${g.success('👋 Session complete')}  ${chalk.dim('·')}  ${chalk.gray(`${taskCount} tasks`)}  ${chalk.dim('·')}  ${chalk.gray(elapsedStr)}  ${chalk.dim('·')}  ${chalk.gray(costStr)}`);
+  console.log(chalk.dim(`  ${line}`));
+  console.log('');
 
   if (cli.state) {
     cli.state.totalSessions = (cli.state.totalSessions || 0) + 1;
@@ -783,19 +794,19 @@ export function showCost(cli) {
   const teamCost = autoGenStats.totalTeamCost || 0;
   const totalCost = clientStats.totalCost + subagentCost + teamCost;
 
-  let content = `${chalk.bold('Session Cost')}\\n\\n` +
-    `${chalk.cyan('Session Duration:')} ${sessionMinutes} minutes\\n`;
+  let content = `${chalk.bold('Session Cost')}\n\n` +
+    `${chalk.cyan('Session Duration:')} ${sessionMinutes} minutes\n`;
 
   const cliMeta = cli.session?._cliSessionMeta;
   if (cliMeta?.sessionStartTime) {
     const lifetimeMinutes = Math.floor((Date.now() - cliMeta.sessionStartTime) / 60000);
-    content += `${chalk.cyan('Session Lifetime:')} ${lifetimeMinutes} minutes (across reloads)\\n`;
+    content += `${chalk.cyan('Session Lifetime:')} ${lifetimeMinutes} minutes (across reloads)\n`;
     if (cliMeta.taskCount > 0) {
-      content += `${chalk.cyan('Lifetime Tasks:')} ${cliMeta.taskCount}\\n`;
+      content += `${chalk.cyan('Lifetime Tasks:')} ${cliMeta.taskCount}\n`;
     }
   }
 
-  content += `${chalk.cyan('Main Agent Cost:')} $${clientStats.totalCost.toFixed(6)}\\n`;
+  content += `${chalk.cyan('Main Agent Cost:')} $${clientStats.totalCost.toFixed(6)}\n`;
 
   if (subagentCost > 0) {
     content += `${chalk.cyan('Subagent Cost:')} $${subagentCost.toFixed(6)}\n`;

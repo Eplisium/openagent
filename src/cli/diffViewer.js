@@ -6,21 +6,25 @@ export function renderDiff(oldContent, newContent, filePath, theme) {
   const diff = computeDiff(oldLines, newLines);
 
   const lines = [];
-  lines.push(theme.accent(`  ${filePath}`));
-  lines.push(theme.muted('  ' + '─'.repeat(50)));
+  lines.push(theme.accent(`  ┌─ ${filePath}`));
 
+  let lastWasChange = false;
   for (const hunk of diff.hunks) {
     for (const line of hunk.lines) {
       const num = String(line.oldNum || line.newNum || '').padStart(4);
       switch (line.type) {
         case 'context':
+          if (lastWasChange) lines.push('');
           lines.push(`  ${theme.muted(num)} │ ${line.content}`);
+          lastWasChange = false;
           break;
         case 'remove':
           lines.push(`  ${theme.muted(num)} │ ${theme.error('- ' + line.content)}`);
+          lastWasChange = true;
           break;
         case 'add':
           lines.push(`  ${theme.muted(num)} │ ${theme.success('+ ' + line.content)}`);
+          lastWasChange = true;
           break;
       }
     }
@@ -28,7 +32,9 @@ export function renderDiff(oldContent, newContent, filePath, theme) {
   }
 
   const stats = getDiffStats(diff);
-  lines.push(`  ${theme.success(`+${stats.additions}`)} ${theme.error(`-${stats.deletions}`)} ${theme.muted(`(${stats.files} file)`)}`);
+  const addStr = theme.success(`+${stats.additions}`);
+  const delStr = theme.error(`-${stats.deletions}`);
+  lines.push(`  └─ ${addStr} ${delStr}`);
 
   return lines.join('\n');
 }
