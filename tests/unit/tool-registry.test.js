@@ -39,8 +39,8 @@ describe('ToolRegistry', () => {
 
     it('should register multiple tools at once', () => {
       const tools = [
-        { name: 'tool1', execute: async () => {} },
-        { name: 'tool2', execute: async () => {} },
+        { name: 'tool1', description: 'First test tool', execute: async () => {} },
+        { name: 'tool2', description: 'Second test tool', execute: async () => {} },
       ];
       registry.registerAll(tools);
       expect(registry.get('tool1')).toBeDefined();
@@ -75,6 +75,7 @@ describe('ToolRegistry', () => {
     it('should return error for disabled tool', async () => {
       registry.register({
         name: 'disabled_tool',
+        description: 'A disabled test tool',
         execute: async () => ({ success: true }),
         enabled: false,
       });
@@ -87,6 +88,7 @@ describe('ToolRegistry', () => {
     it('should validate required parameters', async () => {
       registry.register({
         name: 'strict_tool',
+        description: 'A strict test tool',
         execute: async () => ({ success: true }),
         parameters: {
           type: 'object',
@@ -103,6 +105,7 @@ describe('ToolRegistry', () => {
     it('should track execution stats', async () => {
       registry.register({
         name: 'counter',
+        description: 'Counts executions for stats testing',
         execute: async () => ({ success: true }),
       });
 
@@ -134,8 +137,8 @@ describe('ToolRegistry', () => {
     });
 
     it('should exclude disabled tools', () => {
-      registry.register({ name: 'active', execute: async () => {} });
-      registry.register({ name: 'disabled', execute: async () => {}, enabled: false });
+      registry.register({ name: 'active', description: 'Active test tool', execute: async () => {} });
+      registry.register({ name: 'disabled', description: 'Disabled test tool', execute: async () => {}, enabled: false });
 
       const defs = registry.getFunctionDefinitions();
       expect(defs).toHaveLength(1);
@@ -148,6 +151,7 @@ describe('ToolRegistry', () => {
       registry.setPermissions({ allowShell: false });
       registry.register({
         name: 'run_cmd',
+        description: 'Runs a shell command',
         category: 'shell',
         execute: async () => ({ success: true }),
       });
@@ -161,6 +165,7 @@ describe('ToolRegistry', () => {
       registry.setPermissions({ allowNetwork: false });
       registry.register({
         name: 'fetch_url',
+        description: 'Fetches a URL',
         category: 'network',
         execute: async () => ({ success: true }),
       });
@@ -174,6 +179,7 @@ describe('ToolRegistry', () => {
       registry.setPermissions({ allowFileWrite: false });
       registry.register({
         name: 'write_config',
+        description: 'Writes a config file',
         category: 'file',
         permission: 'write',
         execute: async () => ({ success: true }),
@@ -188,6 +194,7 @@ describe('ToolRegistry', () => {
       registry.setPermissions({ allowFileDelete: false });
       registry.register({
         name: 'delete_config',
+        description: 'Deletes a config file',
         category: 'file',
         permission: 'delete',
         destructive: true,
@@ -203,6 +210,7 @@ describe('ToolRegistry', () => {
       registry.setPermissions({ allowFileDelete: false, allowFileWrite: true });
       registry.register({
         name: 'move_config',
+        description: 'Moves a config file',
         category: 'file',
         permission: 'write',
         destructive: true,
@@ -217,6 +225,7 @@ describe('ToolRegistry', () => {
       registry.setPermissions({ allowGit: false });
       registry.register({
         name: 'git_status',
+        description: 'Gets git status',
         category: 'git',
         execute: async () => ({ success: true }),
       });

@@ -118,6 +118,16 @@ export class Agent {
     // to detect alternating patterns like read→edit→read→edit
     this.roundToolNameHistory = []; // ["read_file", "edit_file", ...]
     this.maxPatternStall = options.maxPatternStall || 6; // Same pattern repeating N times
+    this.runLimits = null; // Per-run adaptive budgets resolved from the task
+    this._explicitBudgetOptions = {
+      maxIterations: Object.prototype.hasOwnProperty.call(options, 'maxIterations') && options.maxIterations !== undefined,
+      maxRuntimeMs: Object.prototype.hasOwnProperty.call(options, 'maxRuntimeMs') && options.maxRuntimeMs !== undefined,
+      maxToolCalls: Object.prototype.hasOwnProperty.call(options, 'maxToolCalls') && options.maxToolCalls !== undefined,
+      maxStallIterations: Object.prototype.hasOwnProperty.call(options, 'maxStallIterations') && options.maxStallIterations !== undefined,
+      maxFileStall: Object.prototype.hasOwnProperty.call(options, 'maxFileStall') && options.maxFileStall !== undefined,
+      maxPatternStall: Object.prototype.hasOwnProperty.call(options, 'maxPatternStall') && options.maxPatternStall !== undefined,
+      maxNoProgressIterations: Object.prototype.hasOwnProperty.call(options, 'maxNoProgressIterations') && options.maxNoProgressIterations !== undefined,
+    };
 
     // Progress tracking: detect when agent is spinning without accomplishment
     this.successfulToolCalls = 0;   // Total tools that succeeded
@@ -304,20 +314,36 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     }
   }
 
+  setRunLimits(runLimits = null) {
+    this.runLimits = runLimits && typeof runLimits === 'object' ? { ...runLimits } : null;
+  }
+
+  _resolveBudgetValue(key, fallback) {
+    const limits = this.runLimits;
+    if (limits && limits[key] !== undefined && limits[key] !== null) {
+      return limits[key];
+    }
+    return fallback;
+  }
+
   hasReachedIterationLimit() {
-    return this.maxIterations !== null && this.iterationCount >= this.maxIterations;
+    const limit = this._resolveBudgetValue('maxIterations', this.maxIterations);
+    return limit !== null && this.iterationCount >= limit;
   }
 
   hasReachedRuntimeLimit(startTime) {
-    return this.maxRuntimeMs !== null && (Date.now() - startTime) >= this.maxRuntimeMs;
+    const limit = this._resolveBudgetValue('maxRuntimeMs', this.maxRuntimeMs);
+    return limit !== null && (Date.now() - startTime) >= limit;
   }
 
   hasReachedToolCallLimit() {
-    return this.maxToolCalls !== null && this.performanceMetrics.totalToolCalls >= this.maxToolCalls;
+    const limit = this._resolveBudgetValue('maxToolCalls', this.maxToolCalls);
+    return limit !== null && this.performanceMetrics.totalToolCalls >= limit;
   }
 
   hasStalled() {
-    return this.repeatedToolRoundCount >= this.maxStallIterations;
+    const limit = this._resolveBudgetValue('maxStallIterations', this.maxStallIterations);
+    return this.repeatedToolRoundCount >= limit;
   }
 
   /**
@@ -436,7 +462,7 @@ When done, provide a clear summary: what changed, why, what was verified, and an
    * Returns the dominant error category or null.
    */
   hasDeadEnded() {
-    if (this.recentErrorCategories.length < 4) return null;
+    if (this.recentErrorCategories.length < 5) return null;
 
     const window = this.recentErrorCategories.slice(-this.maxDeadEndWindow);
     const counts = {};
@@ -446,10 +472,26 @@ When done, provide a clear summary: what changed, why, what was verified, and an
 
     // If one error category dominates (>60% of recent errors), it's a dead end
     const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-    if (dominant && dominant[1] >= Math.ceil(window.length * 0.6)) {
-      return dominant[0];
+    if (!dominant || dominant[1] < Math.ceil(window.length * 0.6)) {
+      return null;
     }
-    return null;
+
+    // Guard: if overall success rate is high, don't dead-end — the agent is making progress
+    const totalTools = this.successfulToolCalls + this.failedToolCalls;
+    if (totalTools > 0) {
+      const successRate = this.successfulToolCalls / totalTools;
+      if (successRate > 0.70) {
+        return null; // Agent is mostly succeeding — don't kill it over a few argument mistakes
+      }
+    }
+
+    // Guard: non-dead-end categories — these are fixable, not systemic
+    const nonDeadEndCategories = ['VALIDATION_ERROR', 'NOT_GIT_REPO'];
+    if (nonDeadEndCategories.includes(dominant[0])) {
+      return null;
+    }
+
+    return dominant[0];
   }
 
   /**
@@ -594,6 +636,15 @@ When done, provide a clear summary: what changed, why, what was verified, and an
    */
   async prepareMessagesForLLM() {
     await this.maybeCompactContext();
+
+    if (this.runLimits?.progressDirective && this.runLimits.progressDirective.trim()) {
+      const directive = this.runLimits.progressDirective.trim();
+      const lastMessage = this.messages[this.messages.length - 1];
+      if (!lastMessage || lastMessage.role !== 'user' || lastMessage.content !== directive) {
+        this.pushMessage({ role: 'user', content: directive });
+      }
+    }
+
 
     const allocResult = this.contextAllocator.allocate(
       this.messages,
@@ -1067,6 +1118,10 @@ When done, provide a clear summary: what changed, why, what was verified, and an
   buildStopMessage(reason, history, startTime) {
     const elapsed = startTime ? Math.round((Date.now() - startTime) / 1000) : 0;
     const progress = this.assessProgress(history);
+    const limits = this.runLimits || {};
+    const resolvedMaxIterations = limits.maxIterations ?? this.maxIterations;
+    const resolvedMaxRuntimeMs = limits.maxRuntimeMs ?? this.maxRuntimeMs;
+    const resolvedMaxToolCalls = limits.maxToolCalls ?? this.maxToolCalls;
     const progressSummary = `
 📊 Run Summary:
   Iterations: ${progress.totalIterations} | Tools: ${progress.totalToolCalls} (${progress.successRate}% success)
@@ -1075,7 +1130,7 @@ When done, provide a clear summary: what changed, why, what was verified, and an
 
     switch (reason) {
       case 'max_iterations':
-        return `I stopped after reaching the iteration limit (${this.maxIterations}).
+        return `I stopped after reaching the iteration limit (${resolvedMaxIterations}).
 
 The task may need more iterations than configured. Suggestions:
   - Increase AGENT_MAX_ITERATIONS if this is a complex task
@@ -1087,7 +1142,7 @@ Recent progress:
 ${this.formatRecentHistory(history)}`;
 
       case 'max_runtime':
-        return `I stopped after reaching the runtime limit (${elapsed}s / ${Math.round(this.maxRuntimeMs / 1000)}s).
+        return `I stopped after reaching the runtime limit (${elapsed}s / ${Math.round(resolvedMaxRuntimeMs / 1000)}s).
 
 Suggestions:
   - Increase AGENT_MAX_RUNTIME_MS for long-running tasks
@@ -1099,7 +1154,7 @@ Recent progress:
 ${this.formatRecentHistory(history)}`;
 
       case 'max_tool_calls':
-        return `I stopped after reaching the tool-call limit (${this.maxToolCalls}).
+        return `I stopped after reaching the tool-call limit (${resolvedMaxToolCalls}).
 
 Suggestions:
   - Increase AGENT_MAX_TOOL_CALLS if more work is needed
@@ -1144,7 +1199,7 @@ ${progressSummary}
 Recent progress:
 ${this.formatRecentHistory(history)}`;
 
-      case 'dead_end':
+      case 'dead_end': {
         const category = this._deadEndCategory || 'UNKNOWN';
         return `I stopped because I hit a dead end: ${category} errors dominated despite trying different approaches.
 
@@ -1156,6 +1211,7 @@ ${progressSummary}
 
 Recent progress:
 ${this.formatRecentHistory(history)}`;
+      }
 
       case 'consecutive_api_errors':
         return `I stopped after 3 consecutive API errors. The model API may be experiencing issues.
@@ -1352,6 +1408,19 @@ Task: ${userInput}`;
     for (const errResult of errors) {
       const errorPreview = String(errResult.result?.error || 'unknown error').substring(0, 120);
       reflectionParts.push(`The tool "${errResult.toolName}" returned an error: "${errorPreview}". Reflect: was this expected? Should you try a different approach?`);
+
+      // Targeted self-correction for edit_file line-number validation errors
+      const errMsg = String(errResult.result?.error || '').toLowerCase();
+      if (errResult.toolName === 'edit_file' &&
+          (errMsg.includes('must be greater') || errMsg.includes('must be ≥') ||
+           errMsg.includes('must be >=') || errMsg.includes('1-indexed') || errMsg.includes('exceeds file length'))) {
+        reflectionParts.push(`[TARGETED FIX] edit_file line-based editing failed because line numbers were invalid. Line numbers are 1-indexed (start at 1, not 0). IMMEDIATE FIX: Use read_file on the same path to get correct line numbers, then retry with valid startLine (≥1) and endLine (≥ startLine). Or switch to find/replace mode (use the "find" parameter) instead of line-based mode.`);
+      }
+
+      // Targeted guidance for git commands on non-git repos
+      if (errMsg.includes('not a git repository') || errMsg.includes('not a git repo') || errMsg.includes('fatal: not a git repository')) {
+        reflectionParts.push(`[TARGETED FIX] This project is not a git repository. Git commands will not work here. Skip git operations and continue with other tools (read_file, edit_file, exec, etc.).`);
+      }
     }
 
     for (const emptyResult of empties) {
@@ -2655,6 +2724,14 @@ Task: ${userInput}`;
     if (message.includes('context length') || message.includes('token') || message.includes('too large')) {
       return 'SIZE_LIMIT';
     }
+    if (message.includes('must be greater') || message.includes('must be ≥') || message.includes('must be >=') ||
+        message.includes('1-indexed') || message.includes('is 1-indexed') ||
+        message.includes('invalid value for parameter') || message.includes('exceeds file length')) {
+      return 'VALIDATION_ERROR';
+    }
+    if (message.includes('not a git repository') || message.includes('not a git repo') || message.includes('fatal: not a git repository')) {
+      return 'NOT_GIT_REPO';
+    }
 
     return 'UNKNOWN';
   }
@@ -2682,6 +2759,13 @@ Task: ${userInput}`;
     }
 
     if (message.includes('no search results were found') || message.includes('not available in the current environment')) {
+      return false;
+    }
+
+    // Validation/argument errors and not-a-git-repo are never worth retrying
+    if (message.includes('1-indexed') || message.includes('must be greater') ||
+        message.includes('must be ≥') || message.includes('exceeds file length') ||
+        message.includes('not a git repository') || message.includes('not a git repo')) {
       return false;
     }
 
@@ -2721,6 +2805,8 @@ Task: ${userInput}`;
       RATE_LIMIT: `The ${toolName} tool hit a rate limit. Try: (1) waiting before retrying, (2) reducing the frequency of calls, or (3) batching multiple operations into fewer calls.`,
       SIZE_LIMIT: `The ${toolName} tool encountered a size limit. Try: (1) reducing the amount of data being processed, (2) using pagination or chunking, or (3) filtering results to be more specific.`,
       EDIT_MISMATCH: `The edit_file tool could not find the exact text in the file. This is the most common error. IMMEDIATE RECOVERY: (1) Re-read the file with read_file to get the CURRENT content, (2) Copy the EXACT text verbatim from the read_file output as the 'find' parameter, (3) Or use line-based editing with startLine/endLine instead. NEVER retry with the same text that just failed.`,
+      VALIDATION_ERROR: `The ${toolName} tool received invalid arguments. Check the parameter types and ranges. For edit_file, line numbers are 1-indexed (start at 1, not 0). Re-read the file with read_file to get correct line numbers, then retry. You can also switch to find/replace mode instead of line-based mode.`,
+      NOT_GIT_REPO: `This project is not a git repository. Git commands will not work here. Skip git operations and continue with other tools (read_file, edit_file, exec, etc.).`,
       UNKNOWN: `The ${toolName} tool failed with: "${errorMessage.substring(0, 100)}". Try: (1) reviewing the error details, (2) checking tool documentation, (3) using an alternative approach, or (4) breaking the task into smaller steps.`,
     };
 

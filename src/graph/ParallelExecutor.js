@@ -95,7 +95,7 @@ export class ParallelExecutor {
       throw new Error(`Node "${name}" has no executable function`);
     }
     // Support both sync and async node functions
-    return await fn(state, config);
+    return fn(state, config);
   }
 }
 

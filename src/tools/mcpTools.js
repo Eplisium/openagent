@@ -909,7 +909,7 @@ export function createMcpTools(_options = {}) {
           name,
           type,
           serverInfo: client.serverInfo,
-          authenticated: !!client.accessToken,
+          authenticated: Boolean(client.accessToken),
           message: `Connected to MCP server "${name}"`,
         };
       } catch (error) {
@@ -1142,7 +1142,7 @@ export function createMcpTools(_options = {}) {
           type: client instanceof MCPHttpClient ? 'http' : 'stdio',
           connected: client.connected,
           url: client.url || null,
-          authenticated: !!client.accessToken,
+          authenticated: Boolean(client.accessToken),
         });
       }
 

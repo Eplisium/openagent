@@ -560,7 +560,9 @@ export class CompiledGraph {
  * @returns {Promise<void>}
  */
 function _sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 /**

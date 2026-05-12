@@ -916,9 +916,9 @@ Please synthesize these results into a single coherent, well-organized response.
     if (!bg) return { success: false, error: 'Background task not found' };
     if (bg.result) return bg.result; // Already done
 
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Background task timeout')), timeoutMs)
-    );
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Background task timeout')), timeoutMs);
+    });
 
     try {
       return await Promise.race([bg.promise, timeoutPromise]);
@@ -1431,7 +1431,9 @@ Please synthesize these results into a single coherent, well-organized response.
   // ─── Utilities ─────────────────────────────────────────────────
 
   sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    });
   }
 }
 

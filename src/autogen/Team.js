@@ -233,9 +233,9 @@ export class Team {
         envBlock,
       ].join('\n');
 
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`Member ${memberName} timed out after ${MEMBER_TIMEOUT_MS / 1000}s`)), MEMBER_TIMEOUT_MS)
-      );
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`Member ${memberName} timed out after ${MEMBER_TIMEOUT_MS / 1000}s`)), MEMBER_TIMEOUT_MS);
+      });
 
       try {
         const result = await Promise.race([

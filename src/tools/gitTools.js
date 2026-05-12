@@ -67,6 +67,15 @@ async function gitExec(args, cwd = '.', resolvePathForAgent = input => path.reso
     });
     return { success: true, stdout: result.stdout, stderr: result.stderr, cwd: resolvedCwd };
   } catch (error) {
+    const errMsg = (error.message || '').toLowerCase();
+    if (errMsg.includes('not a git repository') || errMsg.includes('not a git repo')) {
+      return {
+        success: false,
+        error: 'Not a git repository',
+        errorType: 'NOT_GIT_REPO',
+        cwd: resolvedCwd,
+      };
+    }
     return {
       success: false,
       error: error.message,
@@ -94,7 +103,14 @@ export function createGitTools(options = {}) {
     },
     async execute({ cwd = '.', short = false }) {
       const result = await runGit(`status ${short ? '--short' : '--porcelain=v1'}`, cwd);
-      if (!result.success) return result;
+      if (!result.success) {
+        // Clean error for non-git repos instead of raw stderr
+        const errMsg = (result.error || '').toLowerCase();
+        if (errMsg.includes('not a git repository') || errMsg.includes('not a git repo')) {
+          return { success: false, error: 'Not a git repository', errorType: 'NOT_GIT_REPO', cwd: result.cwd };
+        }
+        return result;
+      }
 
       const branchResult = await runGit('branch --show-current', cwd);
       const branch = branchResult.success ? branchResult.stdout.trim() : 'unknown';

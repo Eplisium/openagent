@@ -214,39 +214,39 @@ export class ModelBrowser {
     if (sortMode === 'cancel') return null;
 
     if (sortMode === 'favorites') {
-      return await this.pickFromFavorites(currentModel);
+      return this.pickFromFavorites(currentModel);
     }
 
     if (sortMode === 'recents') {
-      return await this.pickFromRecents(currentModel);
+      return this.pickFromRecents(currentModel);
     }
 
     if (sortMode === 'search') {
-      return await this.pickBySearch(currentModel);
+      return this.pickBySearch(currentModel);
     }
 
     if (sortMode === 'provider') {
-      return await this.pickByProvider(currentModel);
+      return this.pickByProvider(currentModel);
     }
 
     if (sortMode === 'newest') {
-      return await this.pickNewest(currentModel);
+      return this.pickNewest(currentModel);
     }
 
     if (sortMode === 'cheapest') {
-      return await this.pickCheapest(currentModel);
+      return this.pickCheapest(currentModel);
     }
 
     if (sortMode === 'largest_context') {
-      return await this.pickLargestContext(currentModel);
+      return this.pickLargestContext(currentModel);
     }
 
     if (sortMode === 'tools') {
-      return await this.pickToolsOnly(currentModel);
+      return this.pickToolsOnly(currentModel);
     }
 
     // All models
-    return await this.pickFromList(this.models, currentModel);
+    return this.pickFromList(this.models, currentModel);
   }
 
   /**
@@ -267,7 +267,7 @@ export class ModelBrowser {
       return null;
     }
 
-    return await this.pickFromList(favModels, currentModel, '⭐ Favorites');
+    return this.pickFromList(favModels, currentModel, '⭐ Favorites');
   }
 
   /**

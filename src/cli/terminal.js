@@ -50,7 +50,9 @@ export async function resetTerminalInput(input = process.stdin) {
 
   drainBufferedTerminators(input);
 
-  await new Promise((resolve) => setTimeout(resolve, TERMINAL_RESET_DELAY_MS));
+  await new Promise((resolve) => {
+    setTimeout(resolve, TERMINAL_RESET_DELAY_MS);
+  });
   drainBufferedTerminators(input);
 }
 

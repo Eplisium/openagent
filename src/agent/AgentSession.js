@@ -516,20 +516,13 @@ export class AgentSession {
     await this.hookManager.load();
     
     // Inject evolved prompt guidance from past outcomes
-    const evolutionGuidance = this.promptEvolution.analyze({
-      skill: this._activeSkill || 'none',
-      specialization: this._activeSpecialization || 'general',
-      taskType: this._classifyTaskType(task),
-    });
-    if (evolutionGuidance) {
-      await this.agent.injectSystemMessage(evolutionGuidance);
-    }
+    const runContext = await this._prepareRunContext(task);
+    const taskType = runContext.taskType;
 
     // Create checkpoint before running
     this.createCheckpoint('before_task');
 
     const startTime = Date.now();
-    const taskType = this._classifyTaskType(task);
     
     try {
       const result = await this.agent.run(task);
@@ -587,12 +580,200 @@ export class AgentSession {
    * Run with streaming
    */
   async *runStream(task) {
+    if (this._initPromise) await this._initPromise;
+
     await this.prepareTaskWorkspace(task);
     this.metadata.updated = new Date().toISOString();
-    
+    this.metadata.lastTask = task.substring(0, 100);
+
+    await this.hookManager.load();
+    await this._prepareRunContext(task);
+
     for await (const chunk of this.agent.runStream(task)) {
       yield chunk;
     }
+  }
+
+  /**
+   * Prepare run-scoped budgets and completion guidance from the current task.
+   * Keeps behavior deterministic while letting simple tasks stay short and
+   * complex tasks expand only as needed.
+   * @private
+   */
+  async _prepareRunContext(task) {
+    const taskType = this._classifyTaskType(task);
+    const runLimits = await this._deriveRunLimits(task, taskType);
+    this.agent.setRunLimits(runLimits);
+
+    const completionDirective = this._buildCompletionDirective(task, taskType, runLimits);
+    if (completionDirective) {
+      this.agent.injectSystemMessage(completionDirective);
+    }
+
+    const evolutionGuidance = this.promptEvolution.analyze({
+      skill: this._activeSkill || 'none',
+      specialization: this._activeSpecialization || 'general',
+      taskType,
+    });
+    if (evolutionGuidance) {
+      await this.agent.injectSystemMessage(evolutionGuidance);
+    }
+
+    return {
+      taskType,
+      runLimits,
+    };
+  }
+
+  /**
+   * Deterministically estimate task complexity from task text and current task state.
+   * @private
+   */
+  async _estimateTaskComplexity(task) {
+    const lower = task.toLowerCase();
+    let score = 0;
+
+    const weightMatches = [
+      [/\b(rename|move|delete|replace all|bulk)\b/g, 3],
+      [/\b(refactor|redesign|rewrite|migrate|restructure)\b/g, 5],
+      [/\b(test|tests|spec|coverage|verify)\b/g, 2],
+      [/\b(ui|frontend|backend|api|database|workflow|pipeline|integration)\b/g, 3],
+      [/\b(file|files|component|components|module|modules|page|pages|screen|screens)\b/g, 2],
+      [/\b(debug|fix|issue|bug|error|stuck|stalled)\b/g, 2],
+      [/\b(longer|precise|complete|thorough|full|all related)\b/g, 1],
+    ];
+
+    for (const [pattern, weight] of weightMatches) {
+      const matches = lower.match(pattern);
+      if (matches) score += matches.length * weight;
+    }
+
+    const fileMentions = (lower.match(/\b[a-z0-9_\-./]+\.[a-z0-9]+\b/g) || []).length;
+    score += Math.min(fileMentions, 6);
+
+    const progress = await this.taskManager.loadProgress();
+    const completed = Number(progress?.completedFeatures || 0);
+    const total = Number(progress?.totalFeatures || 0);
+    const remainingFeatures = total > completed ? total - completed : 0;
+    if (remainingFeatures > 0) {
+      score += Math.min(remainingFeatures * 2, 8);
+    }
+
+    if (progress?.currentFeature) score += 2;
+    if (progress?.status && progress.status !== 'complete') score += 2;
+
+    return score;
+  }
+
+  /**
+   * Resolve deterministic run limits from task complexity and task-state signals.
+   * @private
+   */
+  async _deriveRunLimits(task, taskType) {
+    const complexity = await this._estimateTaskComplexity(task);
+    const progress = await this.taskManager.loadProgress();
+    const completedFeatures = Number(progress?.completedFeatures || 0);
+    const totalFeatures = Number(progress?.totalFeatures || 0);
+    const remainingFeatures = totalFeatures > completedFeatures ? totalFeatures - completedFeatures : 0;
+    const progressRatio = totalFeatures > 0 ? completedFeatures / totalFeatures : 0;
+
+    const base = {
+      maxIterations: 32,
+      maxRuntimeMs: 15 * 60 * 1000,
+      maxToolCalls: null,
+      maxStallIterations: 5,
+      maxFileStall: 4,
+      maxPatternStall: 6,
+      maxNoProgressIterations: 4,
+    };
+
+    const byType = {
+      exploration: { maxIterations: 18, maxRuntimeMs: 10 * 60 * 1000, maxStallIterations: 4 },
+      search: { maxIterations: 18, maxRuntimeMs: 10 * 60 * 1000, maxStallIterations: 4 },
+      debugging: { maxIterations: 36, maxRuntimeMs: 20 * 60 * 1000, maxStallIterations: 5 },
+      'code-edit': { maxIterations: 44, maxRuntimeMs: 25 * 60 * 1000, maxStallIterations: 6 },
+      'code-write': { maxIterations: 48, maxRuntimeMs: 30 * 60 * 1000, maxStallIterations: 6 },
+      testing: { maxIterations: 34, maxRuntimeMs: 20 * 60 * 1000, maxStallIterations: 5 },
+      'code-review': { maxIterations: 26, maxRuntimeMs: 15 * 60 * 1000, maxStallIterations: 4 },
+      dependency: { maxIterations: 24, maxRuntimeMs: 15 * 60 * 1000, maxStallIterations: 4 },
+      'build-deploy': { maxIterations: 30, maxRuntimeMs: 20 * 60 * 1000, maxStallIterations: 5 },
+      'git-operation': { maxIterations: 14, maxRuntimeMs: 8 * 60 * 1000, maxStallIterations: 3 },
+      general: { maxIterations: 28, maxRuntimeMs: 15 * 60 * 1000, maxStallIterations: 5 },
+    };
+
+    const merged = {
+      ...base,
+      ...(byType[taskType] || byType.general),
+    };
+
+    const complexityBoost = Math.max(0, Math.min(10, Math.floor((complexity - 3) / 2)));
+    const featureBoost = Math.min(8, remainingFeatures * 2);
+    const progressPenalty = progressRatio >= 0.75 ? -4 : progressRatio >= 0.5 ? -2 : 0;
+
+    const maxIterations = Math.max(12, merged.maxIterations + complexityBoost + featureBoost + progressPenalty);
+    const maxRuntimeMs = Math.max(
+      8 * 60 * 1000,
+      merged.maxRuntimeMs + (complexityBoost * 2 * 60 * 1000) + (featureBoost * 60 * 1000) + progressPenalty * 60 * 1000,
+    );
+
+    const maxToolCalls = Math.max(maxIterations * 2, complexity >= 10 ? maxIterations * 3 : maxIterations * 2);
+    const maxStallIterations = Math.max(3, merged.maxStallIterations - (complexity >= 12 ? 1 : 0));
+    const maxFileStall = Math.max(3, merged.maxFileStall + (complexity >= 10 ? 1 : 0));
+    const maxPatternStall = Math.max(5, merged.maxPatternStall + (complexity >= 10 ? 1 : 0));
+    const maxNoProgressIterations = Math.max(3, merged.maxNoProgressIterations - (complexity >= 12 ? 1 : 0));
+    const adjustedRuntimeMs = Math.max(
+      8 * 60 * 1000,
+      Math.round(maxRuntimeMs * (complexity >= 12 ? 1.15 : complexity >= 8 ? 1.05 : 1)),
+    );
+
+    return {
+      maxIterations,
+      maxRuntimeMs: adjustedRuntimeMs,
+      maxToolCalls,
+      maxStallIterations,
+      maxFileStall,
+      maxPatternStall,
+      maxNoProgressIterations,
+      taskType,
+      complexity,
+      progressSnapshot: {
+        status: progress?.status || 'not_initialized',
+        totalFeatures,
+        completedFeatures,
+        remainingFeatures,
+      },
+      progressDirective: this._buildCompletionDirective(task, taskType, {
+        maxIterations,
+        maxRuntimeMs,
+        maxToolCalls,
+        maxStallIterations,
+        maxFileStall,
+        maxPatternStall,
+        maxNoProgressIterations,
+        complexity,
+      }),
+    };
+  }
+
+  /**
+   * Build a short completion directive that keeps the model focused on scope.
+   * @private
+   */
+  _buildCompletionDirective(task, taskType, runLimits) {
+    const limitBits = [];
+    if (runLimits?.maxIterations) limitBits.push(`${runLimits.maxIterations} iterations`);
+    if (runLimits?.maxRuntimeMs) limitBits.push(`${Math.round(runLimits.maxRuntimeMs / 60000)} min runtime`);
+    if (runLimits?.complexity !== undefined) limitBits.push(`complexity ${runLimits.complexity}`);
+
+    return `
+## Completion Discipline
+- Treat this task as complete only when the full requested scope is done, not after the first visible improvement.
+- Keep going until all related files, references, and verification steps are handled.
+- If work remains in the task workspace or task manager, continue iterating rather than stopping early.
+- Before finishing, do a final consistency pass across related code paths and summarize any intentionally deferred work.
+- Current task type: ${taskType}
+- Current run budget: ${limitBits.join(' | ') || 'adaptive'}
+`.trim();
   }
 
   /**

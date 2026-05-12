@@ -475,6 +475,17 @@ export function createFileTools(options = {}) {
         }
 
         // --- Line-based replacement mode (startLine + endLine) ---
+        // Validate line numbers early — models sometimes send 0 or negative values
+        if (startLine !== undefined && startLine < 1) {
+          return { success: false, error: 'startLine must be ≥ 1 (lines are 1-indexed, starting at 1 not 0). Re-read the file with read_file to get correct line numbers.' };
+        }
+        if (endLine !== undefined && endLine < 1) {
+          return { success: false, error: 'endLine must be ≥ 1 (lines are 1-indexed, starting at 1 not 0). Re-read the file with read_file to get correct line numbers.' };
+        }
+        // If only startLine is provided (no endLine), default to single-line replace
+        if (startLine !== undefined && endLine === undefined) {
+          endLine = startLine;
+        }
         if (startLine !== undefined && endLine !== undefined) {
           if (replace === undefined) {
             return { success: false, error: 'Line-based editing requires the "replace" parameter' };
