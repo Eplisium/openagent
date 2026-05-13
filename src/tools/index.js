@@ -8,6 +8,8 @@ export { ToolRegistry, ToolErrorType } from './ToolRegistry.js';
 export { createFileTools, fileTools, readFileTool, writeFileTool, editFileTool, searchAndReplaceTool, listDirectoryTool, searchInFilesTool, getFileInfoTool } from './fileTools.js';
 export { createShellTools, shellTools, execTool, execBackgroundTool, processStatusTool, systemInfoTool } from './shellTools.js';
 export { createWebTools, webTools, webSearchTool, readWebpageTool, fetchUrlTool } from './webTools.js';
+export { createResearchTools, researchQueryTool, deepResearchTool } from './researchTools.js';
+export { extractContent, htmlToMarkdown, extractMetadata, extractPdfContent, extractViaJina } from './contentExtractor.js';
 export { createGitTools, gitTools, gitStatusTool, gitLogTool, gitDiffTool, gitAddTool, gitCommitTool, gitPushTool, gitPullTool, gitBranchTool, gitInfoTool } from './gitTools.js';
 export { createSubagentTools } from './subagentTools.js';
 export { createTaskTools } from './taskTools.js';

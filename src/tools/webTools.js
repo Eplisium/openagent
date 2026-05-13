@@ -1,21 +1,26 @@
 /**
- * 🌐 Web Tools v5.0 (2026 Edition)
- * Search the web, fetch pages, and browse content
+ * 🌐 Web Tools v6.0 (2026 Edition)
+ * Search the web, fetch pages, and research topics
  *
- * Major improvements over v4:
- * - Parallel backend racing — tries all search backends concurrently, takes first success
- * - Exponential backoff retries for transient failures (429, 5xx, network errors)
- * - Rotating User-Agents to avoid bot detection
- * - Fresh Searx instance list with health checking
- * - DuckDuckGo HTML (non-lite) backend as primary free search
- * - Google cache fallback for read_webpage 404s
- * - Better content extraction with Readability-style scoring
- * - Per-backend circuit breaker to stop hammering dead backends
- * - Smarter error messages with actionable suggestions
+ * Major improvements over v5:
+ * - Mozilla Readability.js content extraction (Firefox Reader Mode engine)
+ * - HTML→Markdown conversion via Turndown (LLM-optimized output)
+ * - Jina Reader API integration for free high-quality markdown extraction
+ * - PDF content extraction support (via pdf-parse)
+ * - Compound research tools: research_query + deep_research
+ * - Smart query decomposition for complex questions
+ * - Result diversity filtering (max 2 results per domain)
+ * - Freshness-aware ranking with date parsing
+ * - Date range filtering (after/before) for web_search
+ * - Content quality signals in ranking (snippet length, code detection)
+ * - Dynamic Searx instance health checking
+ * - All previous v5 features retained (parallel racing, circuit breakers, etc.)
  */
 
 import { CONFIG } from '../config.js';
 import { getSearchCache } from './searchCache.js';
+import { extractContent, extractMetadata as extractMetaFromHtml, extractPdfContent, extractViaJina, isPdf } from './contentExtractor.js';
+import { createResearchTools, initResearchTools } from './researchTools.js';
 
 // ---------------------------------------------------------------------------
 // Constants & Helpers
@@ -514,7 +519,7 @@ const mojeekBackend = new HtmlSearchBackend({
 // API-based search backends
 // ---------------------------------------------------------------------------
 
-/** Searx public instances — dynamically checked */
+/** Searx public instances — dynamically health-checked */
 const SEARX_INSTANCES = [
   'https://searx.be',
   'https://search.bus-hit.me',
@@ -526,11 +531,53 @@ const SEARX_INSTANCES = [
   'https://priv.au',
 ];
 
-async function searchSearx(query, maxResults) {
-  const errors = [];
+/** Health-checked instance cache — populated on first use, refreshed periodically */
+let _healthyInstances = null;
+let _lastHealthCheck = 0;
+const HEALTH_CHECK_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
-  // Try instances in random order to distribute load
-  const shuffled = [...SEARX_INSTANCES].sort(() => Math.random() - 0.5);
+/**
+ * Health-check Searx instances in parallel.
+ * Returns only responsive instances, cached for 10 minutes.
+ */
+async function getHealthySearxInstances() {
+  const now = Date.now();
+  if (_healthyInstances && now - _lastHealthCheck < HEALTH_CHECK_INTERVAL) {
+    return _healthyInstances;
+  }
+
+  const checks = SEARX_INSTANCES.map(async (instance) => {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const response = await fetch(`${instance}/search?q=test&format=json&categories=general`, {
+        headers: { 'User-Agent': 'OpenAgent/6.0' },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (response.ok) return instance;
+    } catch { /* instance dead */ }
+    return null;
+  });
+
+  const results = await Promise.allSettled(checks);
+  _healthyInstances = results
+    .filter(r => r.status === 'fulfilled' && r.value !== null)
+    .map(r => r.value);
+  _lastHealthCheck = now;
+
+  // If all instances are dead, fall back to full list
+  if (_healthyInstances.length === 0) _healthyInstances = [...SEARX_INSTANCES];
+
+  return _healthyInstances;
+}
+
+async function searchSearx(query, maxResults) {
+    const errors = [];
+
+    // Get health-checked instances
+    const healthy = await getHealthySearxInstances();
+    const shuffled = [...healthy].sort(() => Math.random() - 0.5);
 
   for (const instance of shuffled) {
     if (circuitBreaker.isOpen(`searx:${instance}`)) continue;
@@ -846,6 +893,73 @@ function deduplicateResults(results) {
 }
 
 /**
+ * Enforce result diversity: max N results per domain.
+ * Prevents a single site from dominating the results.
+ */
+function diversifyResults(results, maxPerDomain = 2) {
+  const domainCounts = new Map();
+  const diverse = [];
+  for (const r of results) {
+    try {
+      const domain = new URL(r.url).hostname.replace('www.', '');
+      const count = domainCounts.get(domain) || 0;
+      if (count < maxPerDomain) {
+        domainCounts.set(domain, count + 1);
+        diverse.push(r);
+      }
+    } catch {
+      // Invalid URL, include anyway
+      diverse.push(r);
+    }
+  }
+  return diverse;
+}
+
+/**
+ * Filter results by date range (after/before constraints).
+ * Checks publishedDate from snippets/metadata and URL-embedded dates.
+ */
+function filterByDateRange(results, afterDate, beforeDate) {
+  if (!afterDate && !beforeDate) return results;
+
+  const after = afterDate ? new Date(afterDate) : null;
+  const before = beforeDate ? new Date(beforeDate) : null;
+
+  return results.filter(r => {
+    // Try to extract a date from the snippet or URL
+    const dateStr = r.publishedDate || extractDateFromText(r.snippet || '') || extractDateFromUrl(r.url || '');
+    if (!dateStr) return true; // No date info = include (don't exclude unknown)
+
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return true;
+
+    if (after && date < after) return false;
+    if (before && date > before) return false;
+    return true;
+  });
+}
+
+/** Extract a date string from text (common patterns) */
+function extractDateFromText(text) {
+  if (!text) return '';
+  // ISO date
+  const isoMatch = text.match(/(\d{4}-\d{2}-\d{2})/);
+  if (isoMatch) return isoMatch[1];
+  // Month DD, YYYY
+  const monthMatch = text.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})/i);
+  if (monthMatch) return `${monthMatch[1]} ${monthMatch[2]}, ${monthMatch[3]}`;
+  return '';
+}
+
+/** Extract a date from URL (common patterns like /2025/03/ or -2025-) */
+function extractDateFromUrl(url) {
+  if (!url) return '';
+  const match = url.match(/(20\d{2})[/\-](0[1-9]|1[0-2])[/\-](0[1-9]|[12]\d|3[01])/);  // eslint-disable-line no-useless-escape
+  if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+  return '';
+}
+
+/**
  * Score a search result based on relevance to the query.
  * @param {object} result - { title, url, snippet }
  * @param {string} query - Original search query
@@ -862,6 +976,12 @@ function scoreResult(result, query) {
     score += 0.3;
   }
 
+  // Title exact phrase match: +0.15 bonus
+  const queryLower = query.toLowerCase();
+  if (titleLower.includes(queryLower) || queryWords.length > 1 && queryWords.every(w => titleLower.includes(w))) {
+    score += 0.15;
+  }
+
   // Snippet relevance: +0.1 per keyword match in snippet, max 0.4
   let snippetMatches = 0;
   for (const word of queryWords) {
@@ -875,13 +995,26 @@ function scoreResult(result, query) {
   const credibility = getCredibilityScore(result.url);
   score += (credibility - 0.5) * 0.6; // Maps 0.5→0, 1.0→0.3, 0.3→-0.12
 
-  // Freshness: +0.1 if URL contains current year
+  // Freshness: boost if URL or snippet contains current/recent year
   const currentYear = new Date().getFullYear().toString();
+  const prevYear = (new Date().getFullYear() - 1).toString();
   if (result.url && result.url.includes(currentYear)) {
-    score += 0.1;
+    score += 0.12;
+  } else if (result.url && result.url.includes(prevYear)) {
+    score += 0.05;
   }
 
-  return score;
+  // Snippet quality: longer, more detailed snippets indicate better content
+  const snippetLen = (result.snippet || '').length;
+  if (snippetLen > 200) score += 0.08;
+  else if (snippetLen > 100) score += 0.04;
+
+  // Content richness signals in snippet
+  if (snippetLower.includes('```') || snippetLower.includes('code') || snippetLower.includes('example')) {
+    score += 0.03; // Code examples are valuable for technical queries
+  }
+
+  return Math.max(0, Math.min(1, score)); // Clamp to [0, 1]
 }
 
 /**
@@ -989,10 +1122,18 @@ export const webSearchTool = {
         enum: ['auto', 'duckduckgo', 'searx', 'startpage', 'mojeek', 'tavily', 'serper', 'brave', 'ddg-instant', 'stackoverflow', 'github'],
         description: 'Search backend to use (default: auto — races all backends in parallel, takes first success)',
       },
+      afterDate: {
+        type: 'string',
+        description: 'Filter results to pages published after this date (ISO format, e.g. 2025-01-01)',
+      },
+      beforeDate: {
+        type: 'string',
+        description: 'Filter results to pages published before this date (ISO format, e.g. 2025-12-31)',
+      },
     },
     required: ['query'],
   },
-  async execute({ query, maxResults = 5, backend = 'auto' }) {
+  async execute({ query, maxResults = 5, backend = 'auto', afterDate, beforeDate }) {
     try {
       // Ensure multi-tier cache is initialized (disk cache setup + cleanup)
       await ensureCacheInit();
@@ -1149,9 +1290,11 @@ export const webSearchTool = {
         }
       }
 
-      // Deduplicate and rank results
+      // Deduplicate, diversify, filter, and rank results
       if (results.length > 0) {
         results = deduplicateResults(results);
+        results = diversifyResults(results, 2); // Max 2 results per domain
+        results = filterByDateRange(results, afterDate, beforeDate);
         results = rankResults(results, query);
       }
 
@@ -1191,12 +1334,14 @@ export const webSearchTool = {
 };
 
 // ---------------------------------------------------------------------------
-// Content extraction — Readability-style scoring
+// Content extraction — v6.0 Readability.js + Markdown pipeline
+// (Legacy extractReadableText kept as final fallback)
 // ---------------------------------------------------------------------------
 
 /**
  * Extract readable text from HTML using content-density scoring.
- * Falls back to simple extraction if scoring doesn't find good content.
+ * DEPRECATED in favor of extractContent() from contentExtractor.js.
+ * Kept as a final fallback if Readability.js and regex both fail.
  */
 function extractReadableText(html, maxChars) {
   let content = html;
@@ -1265,27 +1410,29 @@ function extractReadableText(html, maxChars) {
   return content;
 }
 
-/** Extract metadata from HTML */
-function extractMetadata(html) {
-  const metadata = {};
-
-  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  if (titleMatch) metadata.title = titleMatch[1].replace(/<[^>]*>/g, '').trim();
-
-  const descMatch = html.match(/<meta[^>]*name="description"[^>]*content="([^"]*)"[^>]*>/i) ||
-                    html.match(/<meta[^>]*content="([^"]*)"[^>]*name="description"[^>]*>/i) ||
-                    html.match(/<meta[^>]*property="og:description"[^>]*content="([^"]*)"[^>]*>/i);
-  if (descMatch) metadata.description = descMatch[1];
-
-  const authorMatch = html.match(/<meta[^>]*name="author"[^>]*content="([^"]*)"[^>]*>/i) ||
-                      html.match(/<meta[^>]*content="([^"]*)"[^>]*name="author"[^>]*>/i);
-  if (authorMatch) metadata.author = authorMatch[1];
-
-  const dateMatch = html.match(/<meta[^>]*property="article:published_time"[^>]*content="([^"]*)"[^>]*>/i) ||
-                    html.match(/<time[^>]*datetime="([^"]*)"[^>]*>/i);
-  if (dateMatch) metadata.publishedDate = dateMatch[1];
-
-  return metadata;
+/**
+ * Extract metadata from HTML.
+ * Delegates to the richer extractMetaFromHtml from contentExtractor.js.
+ * Falls back to basic extraction if that module isn't available.
+ */
+function _extractMetadata(html) {
+  try {
+    return extractMetaFromHtml(html);
+  } catch {
+    // Fallback to basic extraction
+    const metadata = {};
+    const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (titleMatch) metadata.title = titleMatch[1].replace(/<[^>]*>/g, '').trim();
+    const descMatch = html.match(/<meta[^>]*name="description"[^>]*content="([^"]*)"[^>]*>/i) ||
+                      html.match(/<meta[^>]*content="([^"]*)"[^>]*name="description"[^>]*>/i);
+    if (descMatch) metadata.description = descMatch[1];
+    const authorMatch = html.match(/<meta[^>]*name="author"[^>]*content="([^"]*)"[^>]*>/i);
+    if (authorMatch) metadata.author = authorMatch[1];
+    const dateMatch = html.match(/<meta[^>]*property="article:published_time"[^>]*content="([^"]*)"[^>]*>/i) ||
+                      html.match(/<time[^>]*datetime="([^"]*)"[^>]*>/i);
+    if (dateMatch) metadata.publishedDate = dateMatch[1];
+    return metadata;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,7 +1441,7 @@ function extractMetadata(html) {
 
 export const readWebpageTool = {
   name: 'read_webpage',
-  description: 'Fetch and extract readable text content from a URL. Uses smart content extraction to get the main article/content while filtering out navigation, ads, and scripts. Includes automatic retry on transient failures.',
+  description: 'Fetch and extract readable content from a URL. Uses Mozilla Readability.js for article extraction, converts to clean markdown for LLM consumption. Supports PDF extraction, Jina Reader API, and automatic JS-rendering detection. Includes retry and Google cache fallback.',
   category: 'network',
   parameters: {
     type: 'object',
@@ -1309,20 +1456,42 @@ export const readWebpageTool = {
       },
       extractMode: {
         type: 'string',
-        enum: ['readable', 'text', 'markdown', 'raw'],
-        description: 'Extraction mode: readable (smart), text (plain), markdown (formatted), raw (HTML stripped)',
+        enum: ['markdown', 'readable', 'text', 'raw'],
+        description: 'Extraction mode: markdown (LLM-optimized, default), readable (plain text), text (stripped HTML), raw (original HTML)',
+      },
+      useJina: {
+        type: 'boolean',
+        description: 'Use Jina Reader API for extraction (free, handles JS rendering, returns clean markdown). Default: false',
       },
     },
     required: ['url'],
   },
-  async execute({ url, maxChars = CONFIG.WEB_READ_DEFAULT_MAX_CHARS || 15000, extractMode = 'readable' }) {
+  async execute({ url, maxChars = CONFIG.WEB_READ_DEFAULT_MAX_CHARS || 15000, extractMode = 'markdown', useJina = false }) {
     try {
       // Validate URL
       if (!url.startsWith('http://') && !url.startsWith('https://')) {
         return { success: false, error: 'URL must start with http:// or https://', url };
       }
 
-      const doFetch = async (fetchUrl) => {
+      // ── Path 1: Jina Reader (best quality, handles JS rendering) ──
+      if (useJina && extractMode === 'markdown') {
+        const jinaResult = await extractViaJina(url, { timeout: CONFIG.WEB_READ_TIMEOUT_MS || 20000 });
+        if (!jinaResult.error) {
+          return {
+            success: true,
+            url,
+            title: jinaResult.title,
+            content: jinaResult.content.substring(0, maxChars) + (jinaResult.content.length > maxChars ? '\n\n… [truncated]' : ''),
+            metadata: { extractionMethod: 'jina-reader', via: 'jina' },
+            length: jinaResult.content.length,
+            extractionMethod: 'jina-reader',
+          };
+        }
+        // Jina failed — fall through to local extraction
+      }
+
+      // ── Path 2: Local extraction (fetch + Readability.js) ──
+      const doFetchHtml = async (fetchUrl) => {
         const response = await fetchWithTimeout(fetchUrl, {
           headers: {
             'User-Agent': getRandomUA(),
@@ -1335,16 +1504,40 @@ export const readWebpageTool = {
         }, CONFIG.WEB_READ_TIMEOUT_MS || 20000);
 
         const html = await response.text();
-        return { response, html };
+        return { response, html, contentType: response.headers.get('content-type') || '' };
       };
 
-      let { response, html } = await withRetry(() => doFetch(url), { maxRetries: 2, label: 'read_webpage' });
+      let { response, html } = await withRetry(() => doFetchHtml(url), { maxRetries: 2, label: 'read_webpage' });
+      const contentType = response.headers.get('content-type') || '';
+
+      // ── PDF handling ──
+      if (isPdf(contentType, url)) {
+        // Re-fetch as binary
+        const binResponse = await fetchWithTimeout(url, {
+          headers: { 'User-Agent': getRandomUA() },
+          redirect: 'follow',
+        }, CONFIG.WEB_READ_TIMEOUT_MS || 20000);
+        const arrayBuf = await binResponse.arrayBuffer();
+        const pdfResult = await extractPdfContent(Buffer.from(arrayBuf));
+        if (pdfResult.error) {
+          return { success: false, error: pdfResult.error, url };
+        }
+        return {
+          success: true,
+          url,
+          title: pdfResult.info?.Title || url.split('/').pop() || 'PDF Document',
+          content: pdfResult.text.substring(0, maxChars) + (pdfResult.text.length > maxChars ? '\n\n… [truncated]' : ''),
+          metadata: { pages: pdfResult.pages, info: pdfResult.info, extractionMethod: 'pdf-parse' },
+          length: pdfResult.text.length,
+          extractionMethod: 'pdf-parse',
+        };
+      }
 
       // If 404, try Google cache as fallback
       if (!response.ok && response.status === 404) {
         try {
           const cacheUrl = `https://webcache.googleusercontent.com/search?q=cache:${encodeURIComponent(url)}`;
-          const cached = await doFetch(cacheUrl);
+          const cached = await doFetchHtml(cacheUrl);
           if (cached.response.ok) {
             response = cached.response;
             html = cached.html;
@@ -1365,44 +1558,24 @@ export const readWebpageTool = {
         };
       }
 
-      const metadata = extractMetadata(html);
-      let content;
-
-      switch (extractMode) {
-        case 'readable':
-          content = extractReadableText(html, maxChars);
-          break;
-        case 'text':
-          content = html
-            .replace(/<script[\s\S]*?<\/script>/gi, '')
-            .replace(/<style[\s\S]*?<\/style>/gi, '')
-            .replace(/<[^>]*>/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (content.length > maxChars) {
-            content = content.substring(0, maxChars) + '\n\n... [truncated]';
-          }
-          break;
-        case 'raw':
-          content = html;
-          if (content.length > maxChars) {
-            content = content.substring(0, maxChars) + '\n\n... [truncated]';
-          }
-          break;
-        default:
-          content = extractReadableText(html, maxChars);
-      }
+      // ── Use the new content extraction pipeline ──
+      const extracted = await extractContent(html, {
+        url,
+        mode: extractMode,
+        maxChars,
+      });
 
       return {
         success: true,
         url,
-        title: metadata.title,
-        content,
-        metadata,
-        length: content.length,
+        title: extracted.title || extracted.metadata?.title || '',
+        content: extracted.content,
+        metadata: extracted.metadata,
+        length: extracted.content.length,
         status: response.status,
         statusText: response.statusText,
-        contentType: response.headers.get('content-type'),
+        contentType,
+        extractionMethod: extracted.extractionMethod,
       };
     } catch (error) {
       return {
@@ -1552,10 +1725,16 @@ export const fetchUrlTool = {
 // ---------------------------------------------------------------------------
 
 export function createWebTools(_options = {}) {
+  // Initialize research tools with references to search/fetch tools
+  initResearchTools(webSearchTool, fetchUrlTool);
+
+  const researchTools = createResearchTools();
+
   return [
     webSearchTool,
     readWebpageTool,
     fetchUrlTool,
+    ...researchTools,
   ];
 }
 
