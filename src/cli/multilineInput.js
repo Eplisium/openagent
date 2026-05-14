@@ -36,7 +36,7 @@ let _clip = '';
 
 export class MultilineInput {
   constructor(opts = {}) {
-    this.prompt = opts.prompt || '❯ ';
+    this.prompt = opts.prompt || '▸ ';
     this.placeholder = opts.placeholder || '';
     this.statusLine = opts.statusLine || '';
     this.stdin = opts.stdin || process.stdin;
@@ -362,11 +362,8 @@ export class MultilineInput {
     }
 
     // Status bar at bottom
-    const totalChars = this.lines.reduce((s, l) => s + l.length, 0) + Math.max(0, this.lines.length - 1);
-    const status = chalk.dim(`Ln ${this.row + 1}, Col ${this.col + 1} │ ${this.lines.length} lines, ${totalChars} chars`);
-    const help = chalk.dim('↵ send · Ctrl+O newline · Ctrl+L screen · Ctrl+T theme · Ctrl+P stats · Ctrl+K exit');
+    const status = chalk.dim(`Ln ${this.row + 1}, Col ${this.col + 1} │ ↵ send · Ctrl+O newline · Ctrl+K exit`);
     out.push(' '.repeat(promptW) + status);
-    out.push(' '.repeat(promptW) + help);
 
     // Clear previous render
     this._clearRenderedBlock();

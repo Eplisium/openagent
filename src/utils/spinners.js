@@ -37,22 +37,24 @@ export function spinner(text, { color = 'cyan', spinner: spinnerName = 'dots' } 
 }
 
 /**
- * Create a thinking spinner (emoji-based, for LLM response waiting)
+ * Create a thinking spinner for LLM response waiting.
  * @param {string} [message] - Optional message to display (default: 'Thinking')
+ * @param {object} [theme] - Active CLI theme
  * @returns {{ stop: Function, setMessage: Function }}
  */
-export function thinkingSpinner(message = 'Thinking') {
-  const frames = ['🤔', '🤔.', '🤔..', '🤔...'];
+export function thinkingSpinner(message = 'Thinking', theme = null) {
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let frame = 0;
   let currentMessage = message;
   let elapsed = 0;
   const startTime = Date.now();
+  const color = theme?.muted ? chalk.hex(theme.muted) : chalk.gray;
 
   const interval = setInterval(() => {
     elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    process.stdout.write(`\r${chalk.gray(frames[frame])} ${chalk.gray(currentMessage)} ${chalk.dim(elapsed + 's')} `);
+    process.stdout.write(`\r  ${color(frames[frame])} ${color(currentMessage + '…')} ${color(elapsed + 's')} `);
     frame = (frame + 1) % frames.length;
-  }, 300);
+  }, 80);
 
   return {
     stop: () => {
@@ -96,7 +98,7 @@ export function contextualSpinner(message = 'Working...') {
  * @returns {{ clear: Function }}
  */
 export function respondingIndicator() {
-  const indicator = chalk.cyan('💬 ') + chalk.gray('AI responding...');
+  const indicator = chalk.cyan('▌ ') + chalk.gray('responding…');
   process.stdout.write(indicator + ' ');
 
   return {

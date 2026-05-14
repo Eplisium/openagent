@@ -6,6 +6,7 @@
  */
 
 import { OutputAdapter } from './OutputAdapter.js';
+import { createGatewayEvent } from './events.js';
 
 export class HttpSink extends OutputAdapter {
   /**
@@ -75,7 +76,7 @@ export class HttpSink extends OutputAdapter {
   }
 
   writeEvent(eventType, data = {}) {
-    this.aguiServer.emit({ type: eventType, data }, this.channel);
+    this.aguiServer.emit(createGatewayEvent(eventType, data), this.channel);
   }
 
   async flush() {

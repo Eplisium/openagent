@@ -43,8 +43,10 @@ export class Agent {
     this.onToolEnd = options.onToolEnd || null;
     this.onResponse = options.onResponse || null;
     this.onIntermediateContent = options.onIntermediateContent || null;
+    this.onContentDelta = options.onContentDelta || null;
     this.onIterationStart = options.onIterationStart || null;
     this.onIterationEnd = options.onIterationEnd || null;
+    this.onCheckpoint = options.onCheckpoint || null;
     this.onError = options.onError || null;
     this.onStatus = options.onStatus || null;
     this.iterationCount = 0;
@@ -763,8 +765,10 @@ When done, provide a clear summary: what changed, why, what was verified, and an
       this.onToolEnd ||
       this.onResponse ||
       this.onIntermediateContent ||
+      this.onContentDelta ||
       this.onIterationStart ||
       this.onIterationEnd ||
+      this.onCheckpoint ||
       this.onStatus
     );
   }
@@ -1139,6 +1143,12 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     }
 
     return lines.join('\n');
+  }
+
+  summarizeOlderMessages(olderMessages = []) {
+    return this.contextAllocator.summarizeOlderMessages(olderMessages, {
+      droppedCount: olderMessages.length,
+    });
   }
 
   /**
@@ -1525,6 +1535,74 @@ Task: ${userInput}`;
     }
   }
 
+  summarizeLargeToolResult(result, serializedContent, omittedChars = 0) {
+    const toolName = result.toolName || 'tool';
+    const payload = result.result || {};
+    const marker = `[truncated: ${omittedChars} chars omitted, use read_file to see full output if needed]`;
+
+    if (toolName === 'read_file' && typeof payload.content === 'string') {
+      const lines = payload.content.split(/\r?\n/);
+      const head = lines.slice(0, 80).join('\n');
+      const tail = lines.length > 120 ? lines.slice(-40).join('\n') : '';
+      return JSON.stringify({
+        success: payload.success !== false,
+        path: payload.path,
+        totalLines: payload.totalLines || lines.length,
+        showing: payload.showing,
+        contentPreview: tail ? `${head}\n\n${marker}\n\n${tail}` : head,
+        truncated: true,
+      });
+    }
+
+    if (toolName === 'exec') {
+      const stdout = typeof payload.stdout === 'string' ? payload.stdout : '';
+      const stderr = typeof payload.stderr === 'string' ? payload.stderr : '';
+      return JSON.stringify({
+        success: payload.success !== false,
+        command: payload.command,
+        exitCode: payload.exitCode,
+        signal: payload.signal,
+        stdoutPreview: stdout.split(/\r?\n/).slice(0, 120).join('\n'),
+        stderrPreview: stderr.split(/\r?\n/).slice(0, 60).join('\n'),
+        marker,
+      });
+    }
+
+    if (toolName === 'search_in_files' && Array.isArray(payload.results)) {
+      return JSON.stringify({
+        success: payload.success !== false,
+        pattern: payload.pattern,
+        searchPath: payload.searchPath,
+        filesWithMatches: payload.filesWithMatches,
+        totalMatches: payload.totalMatches,
+        topMatches: payload.results.slice(0, 3).map(entry => ({
+          file: entry.file,
+          matchCount: entry.matchCount,
+          matches: (entry.matches || []).slice(0, 3),
+        })),
+        marker,
+      });
+    }
+
+    if (toolName === 'web_search' && Array.isArray(payload.results)) {
+      return JSON.stringify({
+        success: payload.success !== false,
+        resultCount: payload.results.length,
+        topResults: payload.results.slice(0, 3).map(item => ({
+          title: item.title,
+          url: item.url,
+          snippet: item.snippet,
+        })),
+        marker,
+      });
+    }
+
+    const lines = serializedContent.split(/\r?\n/);
+    const head = lines.slice(0, 100).join('\n');
+    const tail = lines.length > 140 ? lines.slice(-40).join('\n') : '';
+    return tail ? `${head}\n\n${marker}\n\n${tail}` : `${serializedContent.slice(0, this.maxToolResultChars)}\n\n${marker}`;
+  }
+
   /**
    * Post-iteration processing shared between streaming and non-streaming paths.
    * Handles: assistant message creation, tool result injection, edit recovery hints,
@@ -1588,9 +1666,7 @@ Task: ${userInput}`;
 
       if (content.length > this.maxToolResultChars) {
         const original = content;
-        let cutPoint = this.maxToolResultChars;
-        const newlineBefore = content.lastIndexOf('\n', this.maxToolResultChars);
-        if (newlineBefore > this.maxToolResultChars * 0.8) cutPoint = newlineBefore;
+        const summarized = this.summarizeLargeToolResult(result, original, original.length - this.maxToolResultChars);
 
         let cacheInfo = '';
         try {
@@ -1603,15 +1679,15 @@ Task: ${userInput}`;
           const relPath = this.workspaceDir
             ? `workspace:.tool-cache/${path.basename(cacheFile)}`
             : cacheFile;
-          cacheInfo = `\n\n📁 Full result (${original.length} chars) cached to: ${relPath}\nUse read_file with startLine/endLine to read specific sections.`;
+          cacheInfo = `\n\nFull result (${original.length} chars) cached to: ${relPath}\nUse read_file with startLine/endLine to read specific sections.`;
         } catch (_cacheErr) {
-          cacheInfo = `\n\n... [truncated - showing ${cutPoint} of ${original.length} chars]`;
+          cacheInfo = `\n\n[full result cache unavailable; original length ${original.length} chars]`;
         }
-        content = original.substring(0, cutPoint) + cacheInfo;
+        content = summarized + cacheInfo;
 
-        const truncationMessage = `Tool result cached (${original.length} chars) — showing first ${cutPoint}`;
+        const truncationMessage = `Tool result summarized (${original.length} chars)`;
         if (!this.emitStatus('truncate', truncationMessage) && this.shouldEmitVerboseLogs()) {
-          logger.info(truncationMessage, { originalLength: original.length, truncatedTo: cutPoint });
+          logger.info(truncationMessage, { originalLength: original.length, summaryLength: content.length });
         }
       }
 
@@ -1703,6 +1779,22 @@ Task: ${userInput}`;
 
     if (this.onIterationEnd) {
       this.onIterationEnd(this.iterationCount, Date.now() - iterationStart);
+    }
+
+    if (this.onCheckpoint) {
+      this.onCheckpoint({
+        iteration: this.iterationCount,
+        messageCount: this.messages.length,
+        historyCount: this.history.length,
+        state: this.state,
+        durationMs: Date.now() - iterationStart,
+        toolResults: toolResults.map(tr => ({
+          toolName: tr.toolName,
+          success: tr.result?.success !== false,
+          error: tr.result?.success === false ? tr.result?.error : undefined,
+        })),
+        stats: this.getStats(),
+      });
     }
   }
 
@@ -1823,6 +1915,9 @@ Task: ${userInput}`;
             throw new AgentError(`API error: ${errMsg}`, 'API_ERROR', { apiError: err });
           } else if (chunk.type === 'content') {
             fullContent += chunk.content;
+            if (this.onContentDelta) {
+              this.onContentDelta(chunk.content);
+            }
           } else if (chunk.type === 'tool_calls') {
             // Capture tool calls from final stream chunk
             // These may overlap with onToolCallReady — deduplicate later
@@ -3015,6 +3110,9 @@ Task: ${userInput}`;
           throw new AgentError(`API error: ${errMsg}`, 'API_ERROR', { apiError: err });
         } else if (chunk.type === 'content') {
           fullContent += chunk.content;
+          if (this.onContentDelta) {
+            this.onContentDelta(chunk.content);
+          }
           yield { type: 'content', content: chunk.content };
         } else if (chunk.type === 'tool_calls') {
           toolCalls = chunk.toolCalls;
@@ -3242,8 +3340,8 @@ Task: ${userInput}`;
 
     if (olderMessages.length > 0) {
       newMessages.push({
-        role: 'assistant',
-        content: this.buildCompactionSummary(olderMessages),
+        role: 'system',
+        content: this.summarizeOlderMessages(olderMessages),
       });
     }
     newMessages.push(...recentMessages);

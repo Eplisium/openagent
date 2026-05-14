@@ -27,9 +27,9 @@ import { VERSION } from './cli/state.js';
 
 // ── Heavy imports deferred until start() — resolves in parallel for ~400ms startup savings ──
 // These are module-level so all existing code sees them as plain variables after resolveImports().
-let spinner, boxen, gradient, execSync, parseXmlToolCalls, hasXmlToolCalls;
+let spinner, execSync, parseXmlToolCalls, hasXmlToolCalls;
 let AgentSession, ModelBrowser, processInput, readDroppedFile, formatDroppedContent;
-let isVisionModel, buildMultimodalMessage, gradients, boxStyles;
+let isVisionModel, buildMultimodalMessage;
 let runOnboarding, createReadlineInterfaceWithTerminalReset, promptWithTerminalReset;
 
 /**
@@ -43,38 +43,31 @@ async function resolveImports() {
 
   importsPromise ||= Promise.all([
     import('./utils/spinners.js'),
-    import('boxen'),
-    import('gradient-string'),
     import('child_process'),
     import('./tools/xmlToolParser.js'),
     import('./agent/AgentSession.js'),
     import('./ModelBrowser.js'),
     import('./inputHandler.js'),
     import('./vision.js'),
-    import('./utils.js'),
     import('./cli/onboarding.js'),
     import('./cli/terminal.js'),
   ]);
 
   const results = await importsPromise;
   spinner = results[0].spinner;
-  boxen = results[1].default;
-  gradient = results[2].default;
-  execSync = results[3].execSync;
-  parseXmlToolCalls = results[4].parseXmlToolCalls;
-  hasXmlToolCalls = results[4].hasXmlToolCalls;
-  AgentSession = results[5].AgentSession;
-  ModelBrowser = results[6].ModelBrowser;
-  processInput = results[7].processInput;
-  readDroppedFile = results[7].readDroppedFile;
-  formatDroppedContent = results[7].formatDroppedContent;
-  isVisionModel = results[8].isVisionModel;
-  buildMultimodalMessage = results[8].buildMultimodalMessage;
-  gradients = results[9].gradients;
-  boxStyles = results[9].boxStyles;
-  runOnboarding = results[10].runOnboarding;
-  createReadlineInterfaceWithTerminalReset = results[11].createReadlineInterfaceWithTerminalReset;
-  promptWithTerminalReset = results[11].promptWithTerminalReset;
+  execSync = results[1].execSync;
+  parseXmlToolCalls = results[2].parseXmlToolCalls;
+  hasXmlToolCalls = results[2].hasXmlToolCalls;
+  AgentSession = results[3].AgentSession;
+  ModelBrowser = results[4].ModelBrowser;
+  processInput = results[5].processInput;
+  readDroppedFile = results[5].readDroppedFile;
+  formatDroppedContent = results[5].formatDroppedContent;
+  isVisionModel = results[6].isVisionModel;
+  buildMultimodalMessage = results[6].buildMultimodalMessage;
+  runOnboarding = results[7].runOnboarding;
+  createReadlineInterfaceWithTerminalReset = results[8].createReadlineInterfaceWithTerminalReset;
+  promptWithTerminalReset = results[8].promptWithTerminalReset;
 }
 
 
@@ -86,7 +79,6 @@ import {
 
 import {
   formatCompactNumber,
-  formatDuration,
   formatElapsedTime,
   shortenModelLabel,
   deduplicateResponse,
@@ -97,6 +89,7 @@ import {
   getShortcutSummary,
   getInputShortcutSummary,
   printAIResponse,
+  createStreamingRenderer,
   printIntermediateContent,
   printEnhancedToolCallStart,
   printEnhancedToolCallEnd,
@@ -131,14 +124,6 @@ import {
   showSmartError,
   generateErrorSuggestions,
 } from './cli/errorUtils.js';
-
-// ═══════════════════════════════════════════════════════════════════
-// 🎨 Aliases
-// ═══════════════════════════════════════════════════════════════════
-
-// Aliases resolved after imports — getters avoid undefined at module load
-function g() { return gradients; }
-function b() { return boxStyles; }
 
 // ═══════════════════════════════════════════════════════════════════
 // 💻 CLI Class
@@ -211,8 +196,8 @@ export class CLI {
       process.exit(1);
     }
 
-    console.log(chalk.green('✓ API Key configured'));
-    console.log(chalk.gray(`  Working directory: ${this.workingDir}`));
+    console.log(chalk.hex(this.theme.success)('  ✓ api key configured'));
+    console.log(chalk.hex(this.theme.muted)(`  ${this.workingDir}`));
 
     // Initialize model browser
     this.modelBrowser = new ModelBrowser();
@@ -221,10 +206,10 @@ export class CLI {
       await this.modelBrowser.init();
       const sourceSuffix = this.modelBrowser.lastLoadSource === 'cache' || this.modelBrowser.lastLoadSource === 'stale-cache'
         ? ' from cache' : '';
-      modelSpinner.success(chalk.green(`Loaded ${this.modelBrowser.models.length} models${sourceSuffix}`));
+      modelSpinner.success(chalk.hex(this.theme.success)(`Loaded ${this.modelBrowser.models.length} models${sourceSuffix}`));
     } catch (e) {
       modelSpinner.error(chalk.red(`Failed to load models: ${e.message}`));
-      console.log(chalk.yellow('⚠️ Cannot continue without models. Check your API key and internet connection.'));
+      console.log(chalk.hex(this.theme.warning)('  Cannot continue without models. Check your API key and internet connection.'));
       process.exit(1);
     }
 
@@ -255,25 +240,17 @@ export class CLI {
     // Installation directory warning
     if (isInsideInstallationDir(this.workingDir) && !this.allowFullAccess) {
       const installDir = getInstallationDir();
-      console.log(boxen(
-        chalk.yellow('⚠️  You are running OpenAgent from its installation directory.\n') +
-        chalk.yellow('The AI will NOT be able to write files here.\n') +
-        chalk.gray(`Installation: ${installDir}\n`) +
-        chalk.gray('To work on a project, run OpenAgent from your project directory:') +
-        chalk.cyan('\n  cd /path/to/your/project && openagent'),
-        { ...b().warning, title: '🛡️ Installation Protection Active', titleAlignment: 'center' }
-      ));
+      console.log(chalk.hex(this.theme.warning)('  installation protection active'));
+      console.log(chalk.hex(this.theme.muted)(`  Installation: ${installDir}`));
+      console.log(chalk.hex(this.theme.muted)('  Run OpenAgent from a project directory to allow writes.'));
     }
 
     if (this.autoSave) this.startAutoSave();
 
-    console.log(boxen(
-      `${formatCommandList()}\n\n` +
-      `${chalk.dim('Shortcuts:')} ${chalk.gray(getShortcutSummary())}\n` +
-      `${chalk.dim('Input:')} ${chalk.gray(getInputShortcutSummary())}\n` +
-      `${chalk.dim('Tip: Just type a message to run as an agentic task')}`,
-      { ...b().default, title: '🤖 Commands', titleAlignment: 'left' }
-    ));
+    console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(Math.min(process.stdout.columns || 80, 72))}`));
+    console.log(formatCommandList().split('\n').map(line => `  ${line}`).join('\n'));
+    console.log(chalk.hex(this.theme.muted)(`  ${getShortcutSummary()} · ${getInputShortcutSummary()}`));
+    console.log('');
 
     await this.mainLoop();
   }
@@ -284,7 +261,7 @@ export class CLI {
     while (true) {
       try {
         const statusLine = this.buildPromptStatusLine();
-        const promptStr = chalk.cyan('❯ ');
+        const promptStr = chalk.hex(this.theme.accent)('▸ ');
 
         let input;
         this.promptActive = true;
@@ -305,7 +282,7 @@ export class CLI {
         if (input === MultilineInput.CYCLE_THEME) {
           this.currentTheme = nextTheme(this.currentTheme);
           this.theme = getTheme(this.currentTheme);
-          console.log(chalk.hex(this.theme.accent)(`🎨 Theme: ${this.theme.name}`));
+          console.log(chalk.hex(this.theme.accent)(`  theme: ${this.theme.name}`));
           continue;
         }
         if (input === MultilineInput.SHOW_STATS) {
@@ -386,9 +363,9 @@ export class CLI {
         this.taskCount++;
         await this.runAgentTask(trimmed);
       } catch (error) {
-        console.error(chalk.red('\n💥 Unexpected error:'), error.message);
+        console.error(chalk.red('\n✗ Unexpected error:'), error.message);
         if (process.env.DEBUG) console.error(error.stack);
-        console.log(chalk.yellow('⚠️  The CLI encountered an error but will continue running.'));
+        console.log(chalk.yellow('  The CLI encountered an error but will continue running.'));
       }
     }
 
@@ -398,7 +375,7 @@ export class CLI {
   // ── Paste Mode ───────────────────────────────────────────────
 
   async handlePaste() {
-    console.log(chalk.yellow('\n📝 Paste Mode'));
+    console.log(chalk.yellow('\n  paste mode'));
     console.log(chalk.gray('Paste your content below. Type "END" on a new line to finish.\n'));
 
     const lines = [];
@@ -422,7 +399,7 @@ export class CLI {
     const charCount = pastedText.length;
     const lineCount = lines.length;
 
-    console.log(chalk.yellow(`\n📋 Content captured (${lineCount} lines, ${charCount.toLocaleString()} chars):`));
+    console.log(chalk.yellow(`\n  content captured (${lineCount} lines, ${charCount.toLocaleString()} chars):`));
     console.log(chalk.dim('─'.repeat(60)));
     for (const line of lines.slice(0, 10)) { console.log(chalk.gray(line)); }
     if (lines.length > 10) { console.log(chalk.dim(`... (${lines.length - 10} more lines)`)); }
@@ -458,7 +435,7 @@ export class CLI {
         await this.sessionSaveInFlight;
         this.lastSaveTime = Date.now();
         if (this.verbose && !this.promptActive) {
-          console.log(chalk.dim('\n💾 Auto-saved session'));
+          console.log(chalk.dim('\n  auto-saved session'));
         }
       } catch { /* auto-save failure is non-fatal */ } finally {
         this.sessionSaveInFlight = null;
@@ -489,13 +466,9 @@ export class CLI {
   // ── Banner & Status ──────────────────────────────────────────
 
   printBanner() {
-    const width = Math.min(process.stdout.columns || 80, 60);
-    const line = '─'.repeat(width);
     console.log('');
-    console.log(chalk.dim(`  ${line}`));
-    console.log(`  ${gradient.rainbow('🚀 OpenAgent')} ${chalk.gray(`v${VERSION}`)}  ${chalk.dim('·')}  ${chalk.gray('AI Agent · 400+ Models · Cross-Platform')}`);
-    console.log(chalk.dim(`  ${line}`));
-    console.log('');
+    console.log(chalk.hex(this.theme.muted)(`  openagent v${VERSION}`));
+    console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(Math.min(process.stdout.columns || 80, 72))}`));
   }
 
   buildPromptStatusLine() {
@@ -553,7 +526,7 @@ export class CLI {
     const streamStr = this.streaming ? chalk.green('stream') : chalk.yellow('chat');
 
     const segments = [
-      `${chalk.dim('🤖')} ${chalk.cyan(shortenModelLabel(this.session.agent.model))}`,
+      `${chalk.hex(this.theme.accent)(shortenModelLabel(this.session.agent.model))}`,
       `${chalk.dim('[')}${contextBar}${chalk.dim(']')} ${contextColor(context.percent + '%')}`,
       costStr,
       toolStr,
@@ -562,7 +535,7 @@ export class CLI {
     ];
 
     if (gitBranch) {
-      segments.splice(4, 0, `${chalk.dim('⎇')} ${chalk.magenta(gitBranch)}`);
+      segments.splice(4, 0, `${chalk.dim('git')} ${chalk.magenta(gitBranch)}`);
     }
 
     const workspaceLabel = getWorkspaceLabel(this);
@@ -649,13 +622,14 @@ export class CLI {
       onToolStart: this.session.agent.onToolStart,
       onToolEnd: this.session.agent.onToolEnd,
       onResponse: this.session.agent.onResponse,
+      onContentDelta: this.session.agent.onContentDelta,
       onIterationStart: this.session.agent.onIterationStart,
       onIterationEnd: this.session.agent.onIterationEnd,
       onStatus: this.session.agent.onStatus,
     };
 
-    console.log(chalk.dim('──────────────────────'));
-    console.log(chalk.dim('  Press Ctrl+C to stop and send a new message'));
+    console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(22)}`));
+    console.log(chalk.hex(this.theme.muted)('  Ctrl+C stops this task'));
 
     this.session.agent.onIterationStart = (_iteration) => {
       const iterationLabel = this.session.agent.formatIterationLabel();
@@ -678,7 +652,16 @@ export class CLI {
       }
     };
 
+    this._streamRenderer = createStreamingRenderer(this);
+    this.session.agent.onContentDelta = (delta) => {
+      this._streamRenderer?.write(delta);
+    };
+
     this.session.agent.onIntermediateContent = (content) => {
+      if (this._streamRenderer?.active) {
+        this._streamRenderer.commitIntermediate();
+        return;
+      }
       printIntermediateContent(this, content);
     };
 
@@ -695,7 +678,7 @@ export class CLI {
           let elapsed = 0;
           progressInterval = setInterval(() => {
             elapsed += 1;
-            process.stdout.write(`\r  ${chalk.yellow('⏳')} ${chalk.gray(progressMessage)} ${chalk.white(elapsed.toFixed(1) + 's')}  `);
+            process.stdout.write(`\r  ${chalk.hex(this.theme.muted)('⠋')} ${chalk.gray(progressMessage)} ${chalk.white(elapsed.toFixed(1) + 's')}  `);
           }, 1000);
         };
         const stopProgressIndicator = () => {
@@ -737,12 +720,11 @@ export class CLI {
       if (!responsePrinted) {
         // Safety net: agent completed but produced no visible response.
         // This can happen when the model returns empty content as its final answer.
-        console.log(chalk.yellow('\n  ⚠ Agent completed but produced no text response. The model may have returned empty content.'));
+        console.log(chalk.yellow('\n  Agent completed but produced no text response. The model may have returned empty content.'));
         console.log(chalk.dim('  Try rephrasing your request or using a different model.'));
       }
 
       printEnhancedTaskSummary(this, result, duration);
-      console.log(chalk.dim(`\n✨ Done in ${formatDuration(duration)}`));
 
       if (this.state?.stats) {
         this.state.stats.totalTasks++;
@@ -760,7 +742,7 @@ export class CLI {
 
     } catch (error) {
       if (error.name === 'AgentAbortError') {
-        console.log(chalk.yellow('\n⏹  Stopped by user. Ready for your next message.'));
+        console.log(chalk.yellow('\n  stopped by user. Ready for your next message.'));
       } else {
         showSmartError('task_execution', {
           message: error.message,
@@ -780,6 +762,7 @@ export class CLI {
       clearTimeout(progressTimeout);
       stopProgressIndicator();
       Object.assign(this.session.agent, previousCallbacks);
+      this._streamRenderer = null;
       this.currentTask = null;
       this.taskStartTime = null;
     }
@@ -795,13 +778,14 @@ export class CLI {
       onToolStart: this.session.agent.onToolStart,
       onToolEnd: this.session.agent.onToolEnd,
       onResponse: this.session.agent.onResponse,
+      onContentDelta: this.session.agent.onContentDelta,
       onIterationStart: this.session.agent.onIterationStart,
       onIterationEnd: this.session.agent.onIterationEnd,
       onStatus: this.session.agent.onStatus,
     };
 
-    console.log(chalk.dim('──────────────────────'));
-    console.log(chalk.dim('  Press Ctrl+C to stop and send a new message'));
+    console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(22)}`));
+    console.log(chalk.hex(this.theme.muted)('  Ctrl+C stops this task'));
 
     this.session.agent.onIterationStart = () => {
       console.log(chalk.dim(`\n── ${this.session.agent.formatIterationLabel()} ──`));
@@ -819,7 +803,15 @@ export class CLI {
         if (rendered) responsePrinted = true;
       }
     };
+    this._streamRenderer = createStreamingRenderer(this);
+    this.session.agent.onContentDelta = (delta) => {
+      this._streamRenderer?.write(delta);
+    };
     this.session.agent.onIntermediateContent = (content) => {
+      if (this._streamRenderer?.active) {
+        this._streamRenderer.commitIntermediate();
+        return;
+      }
       printIntermediateContent(this, content);
     };
     this.session.agent.onStatus = ({ type, message }) => {
@@ -854,11 +846,10 @@ export class CLI {
         if (rendered) responsePrinted = true;
       }
       if (!responsePrinted) {
-        console.log(chalk.yellow('\n  ⚠ Agent completed but produced no text response. The model may have returned empty content.'));
+        console.log(chalk.yellow('\n  Agent completed but produced no text response. The model may have returned empty content.'));
         console.log(chalk.dim('  Try rephrasing your request or using a different model.'));
       }
       printEnhancedTaskSummary(this, result, duration);
-      console.log(chalk.dim(`\n✨ Done in ${formatDuration(duration)}`));
 
       if (this.state?.stats) {
         this.state.stats.totalTasks++;
@@ -878,7 +869,7 @@ export class CLI {
       await this.saveState();
     } catch (error) {
       if (error.name === 'AgentAbortError') {
-        console.log(chalk.yellow('\n⏹  Stopped by user. Ready for your next message.'));
+        console.log(chalk.yellow('\n  stopped by user. Ready for your next message.'));
       } else {
         showSmartError('task_execution', {
           message: error.message,
@@ -896,6 +887,7 @@ export class CLI {
         try { process.stdin.setRawMode(false); } catch { /* may fail if stream closed */ }
       }
       Object.assign(this.session.agent, previousCallbacks);
+      this._streamRenderer = null;
       this.currentTask = null;
       this.taskStartTime = null;
     }
@@ -908,7 +900,7 @@ export class CLI {
     let succeeded = false;
 
     if (this.streaming) {
-      process.stdout.write(`\n${g().ai('🤖 AI')} `);
+      const streamRenderer = createStreamingRenderer(this);
       try {
         const stream = this.session.agent.client.chatStream(
           this.session.agent.messages.concat([{ role: 'user', content: message }]),
@@ -918,7 +910,10 @@ export class CLI {
         let fullContent = '';
         let sawToolCalls = false;
         for await (const chunk of stream) {
-          if (chunk.type === 'content') { fullContent += chunk.content; }
+          if (chunk.type === 'content') {
+            fullContent += chunk.content;
+            streamRenderer.write(chunk.content);
+          }
           else if (chunk.type === 'tool_calls') { sawToolCalls = true; }
           else if (chunk.type === 'done') { this.session.agent.updateUsageStats(chunk.usage); }
         }
@@ -937,8 +932,7 @@ export class CLI {
           displayContent = '[Model returned an empty response.]';
         }
 
-        process.stdout.write(chalk.white(displayContent));
-        console.log('');
+        streamRenderer.finish(displayContent);
         this.session.agent.pushMessage({ role: 'user', content: message });
         this.session.agent.pushMessage({ role: 'assistant', content: displayContent });
         succeeded = true;
@@ -946,7 +940,7 @@ export class CLI {
         console.log(chalk.red(`\n✗ ${error.message}`));
       }
     } else {
-      const thinkSpinner = spinner(chalk.gray('Thinking...'), { color: 'cyan' });
+      const thinkSpinner = spinner(chalk.gray('Thinking…'), { color: 'cyan' });
       try {
         const result = await this.session.agent.chat(message);
         thinkSpinner.stop();
@@ -980,7 +974,7 @@ export class CLI {
       case 'exit': case 'quit': case 'q':
         this.stopAutoSave();
         if (this.autoSave) {
-          try { this._syncSessionCostMeta(); await this.session.save(); this.lastSaveTime = Date.now(); console.log(chalk.dim('💾 Session auto-saved')); } catch { /* save on exit is best-effort */ }
+          try { this._syncSessionCostMeta(); await this.session.save(); this.lastSaveTime = Date.now(); console.log(chalk.dim('  session auto-saved')); } catch { /* save on exit is best-effort */ }
         }
         return false;
 
@@ -1087,7 +1081,7 @@ export class CLI {
 
     if (this.modelBrowser.models.length > 0) {
       const fallback = this.modelBrowser.models[0].id;
-      console.log(chalk.yellow(`⚠️ No model selected, using: ${fallback}`));
+      console.log(chalk.yellow(`  no model selected, using: ${fallback}`));
       return fallback;
     }
 
@@ -1104,20 +1098,15 @@ export class CLI {
       const inputCost = modelInfo?.inputPrice || 0;
       const outputCost = modelInfo?.outputPrice || 0;
 
-      console.log(boxen(
-        `${chalk.green('✓ Model switched')}\n\n` +
-        `${chalk.bold('🔄 Switched to:')} ${chalk.cyan(modelId.split('/').pop())}\n` +
-        `${chalk.gray('Context:')} ${formatCompactNumber(contextLength)}\n` +
-        `${chalk.gray('Pricing:')} $${inputCost.toFixed(2)}/M input · $${outputCost.toFixed(2)}/M output`,
-        { ...b().success, title: '🤖 Model', titleAlignment: 'center' }
-      ));
+      console.log(chalk.hex(this.theme.success)(`  ✓ model ${modelId.split('/').pop()}`));
+      console.log(chalk.hex(this.theme.muted)(`  ${formatCompactNumber(contextLength)} ctx · $${inputCost.toFixed(2)}/M input · $${outputCost.toFixed(2)}/M output`));
     }
   }
 
   // ── Doctor & Templates ───────────────────────────────────────
 
   async runDoctor() {
-    console.log(chalk.cyan('\n🏥 Running health checks...\n'));
+    console.log(chalk.hex(this.theme.accent)('\n  running health checks\n'));
     const results = [];
     for (const [key, check] of Object.entries(HEALTH_CHECKS)) {
       const checkSpinner = spinner(chalk.gray(check.name));
@@ -1140,11 +1129,7 @@ export class CLI {
     const errors = results.filter(r => r.status === 'error').length;
 
     console.log('');
-    console.log(boxen(
-      `${chalk.bold('Health Summary')}\n\n` +
-      `${chalk.green(`✓ ${healthy} healthy`)}${warnings > 0 ? ` • ${chalk.yellow(`⚠ ${warnings} warnings`)}` : ''}${errors > 0 ? ` • ${chalk.red(`✗ ${errors} errors`)}` : ''}`,
-      { ...b().info, title: '🏥 Doctor' }
-    ));
+    console.log(`  ${chalk.green(`✓ ${healthy} healthy`)}${warnings > 0 ? ` · ${chalk.yellow(`${warnings} warnings`)}` : ''}${errors > 0 ? ` · ${chalk.red(`✗ ${errors} errors`)}` : ''}`);
   }
 
   async showTemplates() {
@@ -1162,14 +1147,10 @@ export class CLI {
     if (!template) return;
     const tmpl = WORKFLOW_TEMPLATES[template];
 
-    console.log(boxen(
-      `${chalk.bold(tmpl.name)}\n\n` +
-      `${chalk.gray(tmpl.description)}\n\n` +
-      `${chalk.bold('Steps:')}` +
-      tmpl.steps.map((s, i) => `\n${chalk.cyan(i + 1)}. ${s}`).join('') +
-      `\n\n${chalk.dim('Choose whether to run it now or cancel.')}`,
-      { ...b().info, title: '📋 Template' }
-    ));
+    console.log('');
+    console.log(chalk.hex(this.theme.accent)(`  ${tmpl.name.replace(/^[^\w]+ /, '')}`));
+    console.log(chalk.hex(this.theme.muted)(`  ${tmpl.description}`));
+    tmpl.steps.forEach((s, i) => console.log(`  ${chalk.hex(this.theme.accent)(String(i + 1) + '.')} ${s}`));
 
     const { shouldRun } = await promptWithTerminalReset([{
       type: 'confirm', name: 'shouldRun',
@@ -1247,13 +1228,13 @@ export async function runCLI(options = {}) {
   process.on('SIGTERM', signalHandler);
 
   process.on('uncaughtException', (error) => {
-    console.error(chalk.red('\n💥 Uncaught Exception:'), error.message);
+    console.error(chalk.red('\n✗ Uncaught Exception:'), error.message);
     if (process.env.DEBUG) console.error(error.stack);
     // Don't exit — try to continue
   });
 
   process.on('unhandledRejection', (reason) => {
-    console.error(chalk.red('\n💥 Unhandled Rejection:'), reason?.message || reason);
+    console.error(chalk.red('\n✗ Unhandled Rejection:'), reason?.message || reason);
     if (process.env.DEBUG) console.error(reason?.stack);
     // Don't exit — try to continue
   });

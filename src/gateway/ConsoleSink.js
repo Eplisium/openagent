@@ -46,8 +46,29 @@ export class ConsoleSink extends OutputAdapter {
   writeEvent(eventType, data = {}) {
     if (this.silent) return;
     
-    if (this.verbose) {
-      console.log(chalk.dim(`[${eventType}]`), JSON.stringify(data).slice(0, 200));
+    switch (eventType) {
+      case 'iteration_start':
+        if (this.verbose) console.log(chalk.dim(`Iteration ${data.iteration} started`));
+        break;
+      case 'iteration_end':
+        if (this.verbose) console.log(chalk.dim(`Iteration ${data.iteration} ended (${data.elapsedMs || 0}ms)`));
+        break;
+      case 'tool_call_start':
+        if (this.verbose) console.log(chalk.cyan(`tool: ${data.toolName}`));
+        break;
+      case 'tool_call_end':
+        if (this.verbose) {
+          const status = data.success ? chalk.green('ok') : chalk.red('failed');
+          console.log(`${status} ${data.toolName} (${data.durationMs || 0}ms)`);
+        }
+        break;
+      case 'status':
+        if (data.message) console.log(chalk.dim(data.message));
+        break;
+      default:
+        if (this.verbose) {
+          console.log(chalk.dim(`[${eventType}]`), JSON.stringify(data).slice(0, 200));
+        }
     }
   }
 

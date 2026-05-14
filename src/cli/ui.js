@@ -4,18 +4,18 @@
 
 import chalk from '../utils/chalk-compat.js';
 import boxen from 'boxen';
-import gradient from 'gradient-string';
 import { renderMarkdown as _renderMarkdown } from './markdown.js';
+import { themes } from './themes.js';
 
 // ═══════════════════════════════════════════════════════════════════
 // 🎨 Gradients
 // ═══════════════════════════════════════════════════════════════════
 
 export const g = {
-  title: gradient(['#00D9FF', '#FF006E', '#38B000']),
-  ai: gradient(['#00D9FF', '#3A86FF']),
-  tool: gradient(['#FFBE0B', '#FF006E']),
-  success: gradient(['#38B000', '#00D9FF']),
+  title: chalk.hex(themes.catppuccin.header),
+  ai: chalk.hex(themes.catppuccin.accent),
+  tool: chalk.hex(themes.catppuccin.tool),
+  success: chalk.hex(themes.catppuccin.success),
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -143,13 +143,9 @@ export function shortenModelLabel(modelId) {
  * @param {string} version - Version string
  */
 export function printBanner(version) {
-  const width = Math.min(process.stdout.columns || 80, 60);
-  const line = '─'.repeat(width);
   console.log('');
-  console.log(chalk.dim(`  ${line}`));
-  console.log(`  ${gradient.rainbow('🚀 OpenAgent')} ${chalk.gray(`v${version}`)}  ${chalk.dim('·')}  ${chalk.gray('AI Agent · 400+ Models · Cross-Platform')}`);
-  console.log(chalk.dim(`  ${line}`));
-  console.log('');
+  console.log(chalk.hex(themes.catppuccin.muted)(`  openagent v${version}`));
+  console.log(chalk.hex(themes.catppuccin.muted)(`  ${'─'.repeat(Math.min(process.stdout.columns || 80, 72))}`));
 }
 
 /**
@@ -160,7 +156,7 @@ export function printBanner(version) {
 export function showSmartError(errorType, details = {}) {
   const { message, suggestions = [] } = details;
   
-  let content = `${chalk.red('❌ Error')}\n\n${chalk.white(message || 'An error occurred')}`;
+  let content = `${chalk.red('✗ Error')}\n\n${chalk.white(message || 'An error occurred')}`;
   
   if (suggestions.length > 0) {
     content += `\n\n${chalk.bold('Suggestions:')}`;
@@ -184,20 +180,15 @@ export function formatToolCall(toolName, args, count, startTime) {
   const elapsed = Date.now() - startTime;
   const elapsedStr = formatDuration(elapsed);
   const argPreview = formatToolArgs(toolName, args);
-  return `${chalk.yellow('⚙')} ${chalk.yellow(toolName)} ${argPreview}${chalk.dim(` [${elapsedStr}]`)}`;
+  return `${chalk.yellow('▸')} ${chalk.yellow(toolName)} ${argPreview}${chalk.dim(` [${elapsedStr}]`)}`;
 }
 
 /**
  * Print goodbye banner
  */
 export function printGoodbye() {
-  const width = Math.min(process.stdout.columns || 80, 60);
-  const line = '─'.repeat(width);
   console.log('');
-  console.log(chalk.dim(`  ${line}`));
-  console.log(`  ${g.success('👋 Session complete')}`);
-  console.log(chalk.dim(`  ${line}`));
-  console.log('');
+  console.log(chalk.dim('  session complete'));
 }
 
 /**
@@ -207,10 +198,8 @@ export function printGoodbye() {
 export function printAIResponse(content) {
   if (!content) return;
   console.log('');
-  console.log(boxen(
-    `${g.ai('🤖 AI')}\n\n${chalk.white(content)}`,
-    box.response
-  ));
+  const bar = g.ai('│');
+  console.log(String(content).split('\n').map(line => `  ${bar} ${chalk.white(line)}`).join('\n'));
 }
 
 /**

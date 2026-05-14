@@ -524,6 +524,7 @@ export class OpenRouterClient {
       // Pre-allocate content chunks array to reduce string concatenation
       const contentChunks = [];
       let contentLength = 0;
+      let lastSnapshotLength = 0;
       
       try {
         while (true) {
@@ -536,7 +537,11 @@ export class OpenRouterClient {
           
           for (const line of lines) {
             const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith(':')) continue;
+            if (!trimmed) continue;
+            if (trimmed.startsWith(':')) {
+              yield { type: 'comment', comment: trimmed.slice(1).trim(), requestId };
+              continue;
+            }
             
             if (trimmed.startsWith(DATA_PREFIX)) {
               const data = trimmed.substring(DATA_PREFIX_LEN).trim();
@@ -580,11 +585,11 @@ export class OpenRouterClient {
                   if (delta.content) {
                     contentChunks.push(delta.content);
                     contentLength += delta.content.length;
-                    // Provide fullContent periodically (every ~200 chars) to amortize join cost
-                    // while still giving consumers the cumulative content they need
-                    const periodicFull = (contentLength % 200 < delta.content.length)
-                      ? contentChunks.join('')
-                      : null;
+                    let periodicFull = null;
+                    if (this.shouldJoinContentSnapshot(contentChunks, contentLength, lastSnapshotLength)) {
+                      periodicFull = contentChunks.join('');
+                      lastSnapshotLength = contentLength;
+                    }
                     yield { type: 'content', content: delta.content, fullContent: periodicFull, requestId };
                   }
                   
@@ -656,6 +661,58 @@ export class OpenRouterClient {
     }
   }
   
+  shouldJoinContentSnapshot(contentChunks, contentLength, lastSnapshotLength) {
+    if (contentLength - lastSnapshotLength < 200) {
+      return false;
+    }
+
+    const tail = contentChunks.slice(-8).join('');
+    if (!tail) return false;
+
+    if (tail.endsWith('\n') || tail.endsWith('\n\n')) {
+      return !this.hasOpenXmlTag(tail) && this.getJsonBraceDepth(tail) === 0;
+    }
+
+    if (contentLength - lastSnapshotLength < 800) {
+      return false;
+    }
+
+    return !this.hasOpenXmlTag(tail) && this.getJsonBraceDepth(tail) === 0;
+  }
+
+  hasOpenXmlTag(text) {
+    const lastOpen = text.lastIndexOf('<');
+    const lastClose = text.lastIndexOf('>');
+    return lastOpen > lastClose;
+  }
+
+  getJsonBraceDepth(text) {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === '\\' && inString) {
+        escape = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (ch === '{' || ch === '[') depth++;
+      if ((ch === '}' || ch === ']') && depth > 0) depth--;
+    }
+
+    return depth;
+  }
+
   /**
    * Accumulate tool call fragments from streaming deltas.
    * Returns an array of indices that became "complete" in this batch

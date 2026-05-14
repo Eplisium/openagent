@@ -8,6 +8,7 @@
 
 import { EventEmitter } from 'events';
 import { SessionPool } from './SessionPool.js';
+import { GATEWAY_EVENT_TYPES, previewValue, summarizeToolResult } from './events.js';
 
 export class ChannelRouter extends EventEmitter {
   /**
@@ -119,22 +120,40 @@ export class ChannelRouter extends EventEmitter {
     }
     this.emit('task_start', { sessionKey, channelName, targetId });
 
+    let restoreCallbacks = () => {};
+
     try {
+      const adapter = this.channels.get(channelName);
+      restoreCallbacks = this._wireAgentEvents(session, adapter, targetId, {
+        sessionKey,
+        channelName,
+        internalSessionId: session.sessionId,
+      });
+
       // Run the agent task
       const result = await session.run(content);
 
       // Extract the response text
       const responseText = result?.response || result?.content || 'Task completed.';
 
+      await this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.DONE, {
+        sessionId: targetId,
+        internalSessionId: session.sessionId,
+        iteration: session.agent?.iterationCount ?? null,
+        content: responseText,
+        stopReason: result?.stopReason,
+        completed: result?.completed,
+        stats: result?.stats,
+      });
+
       // Route response back through the originating channel
-      const adapter = this.channels.get(channelName);
       if (adapter) {
         await adapter.sendMessage(targetId, responseText, {
-          sessionId: session.sessionId,
+          sessionId: targetId,
+          internalSessionId: session.sessionId,
           ...metadata,
         });
       }
-
       // Notify task end
       if (this.onTaskEnd) {
         this.onTaskEnd({ sessionKey, channelName, targetId, success: true, result });
@@ -144,10 +163,17 @@ export class ChannelRouter extends EventEmitter {
     } catch (error) {
       // Send error back through the channel
       const adapter = this.channels.get(channelName);
+      await this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.ERROR, {
+        sessionId: targetId,
+        internalSessionId: session.sessionId,
+        iteration: session.agent?.iterationCount ?? null,
+        error: error.message,
+      });
       if (adapter) {
         await adapter.sendMessage(targetId, `Error: ${error.message}`, {
           type: 'error',
-          sessionId: session.sessionId,
+          sessionId: targetId,
+          internalSessionId: session.sessionId,
         });
       }
 
@@ -155,6 +181,133 @@ export class ChannelRouter extends EventEmitter {
         this.onTaskEnd({ sessionKey, channelName, targetId, success: false, error: error.message });
       }
       this.emit('task_end', { sessionKey, channelName, targetId, success: false, error: error.message });
+    } finally {
+      restoreCallbacks();
+    }
+  }
+
+  _wireAgentEvents(session, adapter, targetId, base = {}) {
+    const agent = session.agent;
+    if (!agent || !adapter?.sendEvent) {
+      return () => {};
+    }
+
+    const previous = {
+      onToolStart: agent.onToolStart,
+      onToolEnd: agent.onToolEnd,
+      onResponse: agent.onResponse,
+      onIntermediateContent: agent.onIntermediateContent,
+      onIterationStart: agent.onIterationStart,
+      onIterationEnd: agent.onIterationEnd,
+      onStatus: agent.onStatus,
+      onContentDelta: agent.onContentDelta,
+      onCheckpoint: agent.onCheckpoint,
+    };
+    const toolStarts = new Map();
+    const eventBase = () => ({
+      sessionId: targetId,
+      internalSessionId: base.internalSessionId,
+      channelName: base.channelName,
+      sessionKey: base.sessionKey,
+      iteration: agent.iterationCount || null,
+    });
+
+    agent.onIterationStart = (iteration) => {
+      previous.onIterationStart?.(iteration);
+      this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.ITERATION_START, {
+        ...eventBase(),
+        iteration,
+      });
+    };
+
+    agent.onIterationEnd = (iteration, elapsedMs) => {
+      previous.onIterationEnd?.(iteration, elapsedMs);
+      this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.ITERATION_END, {
+        ...eventBase(),
+        iteration,
+        elapsedMs,
+      });
+    };
+
+    agent.onContentDelta = (content) => {
+      previous.onContentDelta?.(content);
+      this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.CONTENT_DELTA, {
+        ...eventBase(),
+        content,
+      });
+    };
+
+    agent.onIntermediateContent = (content) => {
+      previous.onIntermediateContent?.(content);
+      this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.THINKING, {
+        ...eventBase(),
+        content,
+      });
+    };
+
+    agent.onToolStart = (toolName, args) => {
+      previous.onToolStart?.(toolName, args);
+      const stack = toolStarts.get(toolName) || [];
+      stack.push(Date.now());
+      toolStarts.set(toolName, stack);
+      this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.TOOL_CALL_START, {
+        ...eventBase(),
+        toolName,
+        argsPreview: previewValue(args),
+      });
+    };
+
+    agent.onToolEnd = (toolName, result) => {
+      previous.onToolEnd?.(toolName, result);
+      const stack = toolStarts.get(toolName) || [];
+      const startedAt = stack.pop() || Date.now();
+      if (stack.length > 0) toolStarts.set(toolName, stack);
+      else toolStarts.delete(toolName);
+      this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.TOOL_CALL_END, {
+        ...eventBase(),
+        toolName,
+        durationMs: Date.now() - startedAt,
+        ...summarizeToolResult(result),
+      });
+    };
+
+    agent.onStatus = (status) => {
+      previous.onStatus?.(status);
+      this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.STATUS, {
+        ...eventBase(),
+        statusType: status?.type || 'status',
+        message: status?.message || String(status || ''),
+        ...status,
+      });
+    };
+
+    agent.onResponse = (response) => {
+      previous.onResponse?.(response);
+      this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.RESPONSE, {
+        ...eventBase(),
+        content: response,
+      });
+    };
+
+    agent.onCheckpoint = (checkpoint) => {
+      previous.onCheckpoint?.(checkpoint);
+      this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.CHECKPOINT, {
+        ...eventBase(),
+        ...checkpoint,
+      });
+    };
+
+    return () => {
+      Object.assign(agent, previous);
+    };
+  }
+
+  async _sendEvent(adapter, targetId, eventType, data) {
+    if (!adapter?.sendEvent) return;
+    try {
+      await adapter.sendEvent(targetId, eventType, data);
+    } catch (error) {
+      this.emit('channel_error', { name: adapter.name, error: error.message });
     }
   }
 

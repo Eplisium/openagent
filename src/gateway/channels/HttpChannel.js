@@ -13,6 +13,12 @@ import { serve } from '@hono/node-server';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
 import { ChannelAdapter } from '../ChannelAdapter.js';
+import { createGatewayEvent, GATEWAY_EVENT_TYPES } from '../events.js';
+
+const DEFAULT_HEARTBEAT_MS = 20000;
+const DEFAULT_SOFT_BUFFER_BYTES = 256 * 1024;
+const DEFAULT_HARD_BUFFER_BYTES = 1024 * 1024;
+const DEFAULT_EVENT_HISTORY_LIMIT = 500;
 
 export class HttpChannel extends ChannelAdapter {
   constructor(config = {}) {
@@ -21,9 +27,15 @@ export class HttpChannel extends ChannelAdapter {
     this.host = config.host || '0.0.0.0';
     this.authToken = config.authToken || null;
     this.server = null;
+    this.heartbeatMs = config.heartbeatMs || DEFAULT_HEARTBEAT_MS;
+    this.softBufferBytes = config.softBufferBytes || DEFAULT_SOFT_BUFFER_BYTES;
+    this.hardBufferBytes = config.hardBufferBytes || DEFAULT_HARD_BUFFER_BYTES;
+    this.eventHistoryLimit = config.eventHistoryLimit || DEFAULT_EVENT_HISTORY_LIMIT;
+    this._eventIdCounter = 0;
+    this.eventHistory = [];
 
-    /** @type {Map<string, import('hono').Context>} */
-    this.sseClients = new Map(); // clientId → stream context
+    /** @type {Map<string, object>} */
+    this.sseClients = new Map(); // clientId -> { stream, format, pendingBytes, ... }
     this._clientIdCounter = 0;
 
     this._buildApp();
@@ -40,7 +52,7 @@ export class HttpChannel extends ChannelAdapter {
     app.use('*', cors({
       origin: '*',
       allowMethods: ['GET', 'POST', 'OPTIONS'],
-      allowHeaders: ['Content-Type', 'Authorization'],
+      allowHeaders: ['Content-Type', 'Authorization', 'Accept', 'Last-Event-ID'],
     }));
 
     // Auth middleware (if token configured)
@@ -90,29 +102,57 @@ export class HttpChannel extends ChannelAdapter {
     app.get('/api/events', (c) => {
       return streamSSE(c, async (stream) => {
         const clientId = `sse-${++this._clientIdCounter}`;
+        const format = this._negotiateFormat(c);
+        const targetId = c.req.query('sessionId') || null;
+        const lastEventId = c.req.header('last-event-id') || c.req.query('lastEventId') || null;
+        const client = {
+          id: clientId,
+          stream,
+          format,
+          targetId,
+          pendingBytes: 0,
+          droppedContentDeltas: 0,
+          writeChain: Promise.resolve(),
+          heartbeatTimer: null,
+        };
+
+        this.sseClients.set(clientId, client);
 
         // Send initial connection event
-        await stream.writeSSE({
-          data: JSON.stringify({ type: 'connected', clientId }),
-        });
+        await this._writeEventToClient(client, createGatewayEvent(GATEWAY_EVENT_TYPES.CONNECTED, {
+          clientId,
+          sessionId: targetId,
+          format,
+        }), { remember: false });
 
-        this.sseClients.set(clientId, stream);
+        if (format === 'structured' && lastEventId) {
+          await this._sendStateRecovery(client, lastEventId);
+        }
+
+        client.heartbeatTimer = setInterval(() => {
+          this._writeCommentToClient(client, 'heartbeat').catch(() => {
+            this._removeClient(clientId);
+          });
+        }, this.heartbeatMs);
+        if (client.heartbeatTimer.unref) client.heartbeatTimer.unref();
 
         // Keep the stream open until client disconnects
         try {
           await new Promise((resolve, reject) => {
             stream.onAbort(() => {
-              this.sseClients.delete(clientId);
+              this._removeClient(clientId);
               resolve();
             });
             // Also handle errors
-            stream.on('error', () => {
-              this.sseClients.delete(clientId);
-              reject(new Error('SSE stream error'));
-            });
+            if (typeof stream.on === 'function') {
+              stream.on('error', () => {
+                this._removeClient(clientId);
+                reject(new Error('SSE stream error'));
+              });
+            }
           });
         } catch {
-          this.sseClients.delete(clientId);
+          this._removeClient(clientId);
         }
       });
     });
@@ -169,7 +209,10 @@ export class HttpChannel extends ChannelAdapter {
 
     // Close all SSE connections
     for (const [, stream] of this.sseClients) {
-      try { await stream.close(); } catch { /* ignore */ }
+      try {
+        if (stream.heartbeatTimer) clearInterval(stream.heartbeatTimer);
+        await stream.stream.close();
+      } catch { /* ignore */ }
     }
     this.sseClients.clear();
 
@@ -181,37 +224,22 @@ export class HttpChannel extends ChannelAdapter {
   }
 
   async sendMessage(targetId, content, metadata = {}) {
-    // For HTTP, targetId is the SSE client ID
-    // Send via SSE to the specific client, or broadcast to all
-    const event = {
-      type: metadata.type || 'response',
+    const event = this._rememberEvent(createGatewayEvent(metadata.type || GATEWAY_EVENT_TYPES.RESPONSE, {
       content,
       ...metadata,
-      timestamp: new Date().toISOString(),
-    };
+      sessionId: metadata.sessionId || targetId,
+    }));
 
-    const ssePayload = `data: ${JSON.stringify(event)}\n\n`;
+    await this._broadcastEvent(targetId, event, { legacy: true });
+  }
 
-    if (targetId && this.sseClients.has(targetId)) {
-      // Send to specific client
-      const stream = this.sseClients.get(targetId);
-      try {
-        await stream.write(ssePayload);
-      } catch {
-        this.sseClients.delete(targetId);
-      }
-    } else {
-      // Broadcast to all SSE clients
-      const dead = [];
-      for (const [id, stream] of this.sseClients) {
-        try {
-          await stream.write(ssePayload);
-        } catch {
-          dead.push(id);
-        }
-      }
-      for (const id of dead) this.sseClients.delete(id);
-    }
+  async sendEvent(targetId, eventType, data = {}) {
+    const event = this._rememberEvent(createGatewayEvent(eventType, {
+      ...data,
+      sessionId: data.sessionId || targetId,
+    }));
+
+    await this._broadcastEvent(targetId, event, { structuredOnly: true });
   }
 
   getInfo() {
@@ -219,7 +247,190 @@ export class HttpChannel extends ChannelAdapter {
       ...super.getInfo(),
       port: this.port,
       sseClients: this.sseClients.size,
+      eventHistory: this.eventHistory.length,
     };
+  }
+
+  _negotiateFormat(c) {
+    const queryFormat = (c.req.query('format') || '').toLowerCase();
+    if (queryFormat === 'structured' || queryFormat === 'json') {
+      return 'structured';
+    }
+
+    const accept = (c.req.header('accept') || '').toLowerCase();
+    if (accept.includes('application/json')) {
+      return 'structured';
+    }
+
+    return 'legacy';
+  }
+
+  _rememberEvent(event) {
+    const id = String(++this._eventIdCounter);
+    const remembered = { id, ...event };
+    this.eventHistory.push(remembered);
+    if (this.eventHistory.length > this.eventHistoryLimit) {
+      this.eventHistory = this.eventHistory.slice(-this.eventHistoryLimit);
+    }
+    return remembered;
+  }
+
+  async _broadcastEvent(targetId, event, options = {}) {
+    const writes = [];
+    for (const [, client] of this.sseClients) {
+      if (!this._clientMatchesTarget(client, targetId)) continue;
+      if (options.structuredOnly && client.format !== 'structured') continue;
+      writes.push(this._writeEventToClient(client, event, {
+        legacy: options.legacy,
+        structuredOnly: options.structuredOnly,
+        remember: false,
+      }));
+    }
+
+    const settled = await Promise.allSettled(writes);
+    for (const result of settled) {
+      if (result.status === 'rejected' && result.reason?.clientId) {
+        this._removeClient(result.reason.clientId);
+      }
+    }
+  }
+
+  _clientMatchesTarget(client, targetId) {
+    if (!targetId) return true;
+    return client.id === targetId || client.targetId === targetId || !client.targetId;
+  }
+
+  async _writeEventToClient(client, event, _options = {}) {
+    if (!client || !this.sseClients.has(client.id)) return;
+
+    if (client.format !== 'structured') {
+      const legacyTypes = new Set([
+        GATEWAY_EVENT_TYPES.CONNECTED,
+        GATEWAY_EVENT_TYPES.RESPONSE,
+        GATEWAY_EVENT_TYPES.ERROR,
+        GATEWAY_EVENT_TYPES.DONE,
+      ]);
+      if (!legacyTypes.has(event.type)) return;
+    }
+
+    if (event.type === GATEWAY_EVENT_TYPES.CONTENT_DELTA && client.pendingBytes > this.softBufferBytes) {
+      client.droppedContentDeltas++;
+      return;
+    }
+
+    const data = client.format === 'structured'
+      ? JSON.stringify(event)
+      : JSON.stringify(this._toLegacyEvent(event));
+    const size = Buffer.byteLength(data, 'utf8') + 128;
+
+    if (client.pendingBytes + size > this.hardBufferBytes) {
+      await this._writeRawToClient(client, `event: error\ndata: ${JSON.stringify({
+        type: 'error',
+        error: 'SSE client is too far behind; reconnect with Last-Event-ID to recover.',
+        timestamp: new Date().toISOString(),
+      })}\n\n`, size).catch(() => {});
+      this._removeClient(client.id);
+      return;
+    }
+
+    if (client.droppedContentDeltas > 0 && event.type !== GATEWAY_EVENT_TYPES.CONTENT_DELTA) {
+      const dropped = client.droppedContentDeltas;
+      client.droppedContentDeltas = 0;
+      await this._writeSSEObject(client, {
+        event: GATEWAY_EVENT_TYPES.STATUS,
+        id: event.id,
+        data: JSON.stringify(createGatewayEvent(GATEWAY_EVENT_TYPES.STATUS, {
+          sessionId: event.sessionId,
+          iteration: event.iteration,
+          message: `Dropped ${dropped} content_delta events because this SSE client was behind.`,
+          reason: 'backpressure',
+        })),
+      });
+    }
+
+    await this._writeSSEObject(client, {
+      id: event.id,
+      event: event.type,
+      data,
+    });
+  }
+
+  _toLegacyEvent(event) {
+    if (event.type === GATEWAY_EVENT_TYPES.DONE) {
+      return {
+        type: GATEWAY_EVENT_TYPES.RESPONSE,
+        content: event.content || event.response || '',
+        sessionId: event.sessionId,
+        timestamp: event.timestamp,
+      };
+    }
+    return event;
+  }
+
+  async _writeSSEObject(client, payload) {
+    const data = payload.data || '';
+    const size = Buffer.byteLength(data, 'utf8') + 128;
+    client.pendingBytes += size;
+    client.writeChain = client.writeChain
+      .then(() => client.stream.writeSSE(payload))
+      .catch((error) => {
+        error.clientId = client.id;
+        throw error;
+      })
+      .finally(() => {
+        client.pendingBytes = Math.max(0, client.pendingBytes - size);
+      });
+    return client.writeChain;
+  }
+
+  async _writeCommentToClient(client, comment) {
+    const payload = `: ${comment}\n\n`;
+    const size = Buffer.byteLength(payload, 'utf8');
+    return this._writeRawToClient(client, payload, size);
+  }
+
+  async _writeRawToClient(client, payload, size = Buffer.byteLength(payload, 'utf8')) {
+    client.pendingBytes += size;
+    client.writeChain = client.writeChain
+      .then(() => client.stream.write(payload))
+      .catch((error) => {
+        error.clientId = client.id;
+        throw error;
+      })
+      .finally(() => {
+        client.pendingBytes = Math.max(0, client.pendingBytes - size);
+      });
+    return client.writeChain;
+  }
+
+  async _sendStateRecovery(client, lastEventId) {
+    const lastId = Number.parseInt(lastEventId, 10);
+    const recoverable = Number.isFinite(lastId)
+      ? this.eventHistory.filter(event => Number.parseInt(event.id, 10) > lastId)
+      : [];
+    const filtered = client.targetId
+      ? recoverable.filter(event => event.sessionId === client.targetId)
+      : recoverable;
+
+    await this._writeEventToClient(client, createGatewayEvent(GATEWAY_EVENT_TYPES.STATE_RECOVERY, {
+      sessionId: client.targetId,
+      lastEventId,
+      replayedEvents: filtered.length,
+      summary: filtered.length > 0
+        ? `Replaying ${filtered.length} events since ${lastEventId}.`
+        : `No buffered events found after ${lastEventId}.`,
+    }), { remember: false });
+
+    for (const event of filtered) {
+      await this._writeEventToClient(client, event, { remember: false });
+    }
+  }
+
+  _removeClient(clientId) {
+    const client = this.sseClients.get(clientId);
+    if (!client) return;
+    if (client.heartbeatTimer) clearInterval(client.heartbeatTimer);
+    this.sseClients.delete(clientId);
   }
 }
 

@@ -1,14 +1,11 @@
 /**
- * 🎨 Display Module
+ * Display Module
  * All visual output: banners, tool call visualization, task summaries,
  * help panels, stats panels, and UI components.
  */
 
 import chalk from '../utils/chalk-compat.js';
-import boxen from 'boxen';
-import { gradients, boxStyles } from '../utils.js';
 import { renderMarkdown } from './markdown.js';
-import { renderDiff } from './diffViewer.js';
 import { COMMAND_ENTRIES, SHORTCUT_ENTRIES, INPUT_SHORTCUT_ENTRIES } from './constants.js';
 import {
   formatCompactNumber,
@@ -18,10 +15,55 @@ import {
   shortenModelLabel,
   getRelativeTime
 } from './formatting.js';
-import { getSpinnerFrame, thinkingSpinner, respondingIndicator } from '../utils/spinners.js';
+import { thinkingSpinner, respondingIndicator } from '../utils/spinners.js';
+import { VERSION } from './state.js';
 
-const g = gradients;
-const box = boxStyles;
+const TOOL_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+function termWidth(max = 72) {
+  return Math.min(process.stdout.columns || 80, max);
+}
+
+function divider(cli, label = '') {
+  const t = cli?.theme || {};
+  const line = '─'.repeat(termWidth());
+  if (!label) return chalk.hex(t.muted || '#6c7086')(`  ${line}`);
+  return chalk.hex(t.muted || '#6c7086')(`  ${label} ${'─'.repeat(Math.max(1, termWidth() - label.length - 1))}`);
+}
+
+function label(cli, text) {
+  const t = cli?.theme || {};
+  return chalk.hex(t.accent || '#89b4fa')(text);
+}
+
+function muted(cli, text) {
+  const t = cli?.theme || {};
+  return chalk.hex(t.muted || '#6c7086')(text);
+}
+
+function lineRows(text) {
+  return String(text || '').split('\n');
+}
+
+function renderWithLeftBar(cli, content) {
+  const t = cli.theme;
+  const bar = chalk.hex(t.accent)('│');
+  const body = lineRows(content).map(line => `  ${bar} ${line}`).join('\n');
+  return body;
+}
+
+function getToolStore(cli) {
+  if (!cli._toolLineStates) cli._toolLineStates = [];
+  return cli._toolLineStates;
+}
+
+function clearInline(width = 120) {
+  process.stdout.write('\r' + ' '.repeat(width) + '\r');
+}
+
+function visibleLen(str) {
+  return String(str || '').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').length;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // 🎯 Banner & Status Line
@@ -31,13 +73,10 @@ const box = boxStyles;
  * Print the OpenAgent startup banner
  */
 export function printBanner() {
-  const width = Math.min(process.stdout.columns || 80, 60);
-  const line = '─'.repeat(width);
+  const t = { muted: '#6c7086' };
   console.log('');
-  console.log(chalk.dim(`  ${line}`));
-  console.log(`  ${g.title('🚀 OpenAgent')}  ${chalk.dim('·')}  ${chalk.gray('AI Agent · 400+ Models · Cross-Platform')}`);
-  console.log(chalk.dim(`  ${line}`));
-  console.log('');
+  console.log(chalk.hex(t.muted)(`  openagent v${VERSION}`));
+  console.log(chalk.hex(t.muted)(`  ${'─'.repeat(termWidth())}`));
 }
 
 /**
@@ -47,7 +86,7 @@ export function formatCommandList(entries = COMMAND_ENTRIES) {
   const commandWidth = entries.reduce((max, [command]) => Math.max(max, command.length), 0);
   return entries
     .map(([command, description]) =>
-      `${chalk.cyan(command.padEnd(commandWidth + 2))}${chalk.gray(`- ${description}`)}`
+      `${chalk.cyan(command.padEnd(commandWidth + 2))}${chalk.gray(description)}`
     )
     .join('\n');
 }
@@ -101,16 +140,18 @@ export function buildPromptStatusLine(cli) {
 // ═══════════════════════════════════════════════════════════════════
 
 /**
- * Print AI response in a box
+ * Print AI response with a subtle left accent bar.
  */
 export function printAIResponse(cli, content) {
   if (!content || !content.trim()) return false;
-  const rendered = cli.isMarkdownEnabled() ? renderMarkdown(content) : content;
+  if (cli._streamRenderer?.active) {
+    cli._streamRenderer.finish(content);
+    cli._streamRenderer = null;
+    return true;
+  }
+  const rendered = cli.isMarkdownEnabled() ? renderMarkdown(content, cli.theme) : content;
   console.log('');
-  console.log(boxen(
-    `${g.ai('🤖 AI')}\n\n${rendered}`,
-    box.response
-  ));
+  console.log(renderWithLeftBar(cli, rendered));
   return true;
 }
 
@@ -127,15 +168,15 @@ export function printIntermediateContent(cli, content) {
   const truncated = content.length > maxLen
     ? content.substring(0, maxLen) + chalk.dim('…')
     : content;
-  console.log(chalk.dim(`   💭 ${truncated.trim()}`));
+  console.log(muted(cli, `  │ ${truncated.trim()}`));
   return true;
 }
 
 /**
  * Show thinking spinner during LLM response time
  */
-export function showThinkingSpinner() {
-  return thinkingSpinner();
+export function showThinkingSpinner(cli) {
+  return thinkingSpinner('Thinking', cli?.theme);
 }
 
 /**
@@ -143,6 +184,111 @@ export function showThinkingSpinner() {
  */
 export function showRespondingIndicator() {
   return respondingIndicator();
+}
+
+/**
+ * Create a streaming renderer for model deltas. It writes plain text with
+ * the same left accent bar used by final markdown, then replaces the raw
+ * stream region with rendered markdown when the final response arrives.
+ */
+export function createStreamingRenderer(cli) {
+  const t = cli.theme;
+  const bar = chalk.hex(t.accent)('│');
+  const cursor = chalk.hex(t.accent)('▌');
+  const prefix = `  ${bar} `;
+  const continuation = `  ${bar} `;
+  const width = Math.max(24, (process.stdout.columns || 80) - visibleLen(prefix) - 1);
+
+  let active = false;
+  let content = '';
+  let currentCol = 0;
+  let rowCount = 1;
+  let cursorVisible = false;
+  let blink = null;
+
+  const writeCursor = () => {
+    if (!active || cursorVisible) return;
+    process.stdout.write(cursor);
+    cursorVisible = true;
+  };
+  const clearCursor = () => {
+    if (!active || !cursorVisible) return;
+    process.stdout.write('\b \b');
+    cursorVisible = false;
+  };
+  const startBlink = () => {
+    if (blink) return;
+    blink = setInterval(() => {
+      if (!active) return;
+      if (cursorVisible) clearCursor();
+      else writeCursor();
+    }, 450);
+    blink.unref?.();
+  };
+  const stopBlink = () => {
+    if (blink) clearInterval(blink);
+    blink = null;
+    clearCursor();
+  };
+  const begin = () => {
+    if (active) return;
+    active = true;
+    process.stdout.write(`\n${prefix}`);
+    startBlink();
+  };
+  const newline = () => {
+    process.stdout.write(`\n${continuation}`);
+    rowCount++;
+    currentCol = 0;
+  };
+  const writeText = (text) => {
+    for (const ch of text) {
+      if (ch === '\r') continue;
+      if (ch === '\n') {
+        newline();
+        continue;
+      }
+      process.stdout.write(ch);
+      currentCol++;
+      if (currentCol >= width) newline();
+    }
+  };
+  const clearRegion = () => {
+    stopBlink();
+    if (rowCount > 1) process.stdout.write(`\x1b[${rowCount - 1}A`);
+    process.stdout.write('\r\x1b[J');
+  };
+
+  return {
+    get active() { return active; },
+    write(delta) {
+      if (!delta) return;
+      begin();
+      clearCursor();
+      content += delta;
+      writeText(delta);
+      writeCursor();
+    },
+    commitIntermediate() {
+      if (!active) return;
+      stopBlink();
+      process.stdout.write('\n');
+      active = false;
+      content = '';
+      currentCol = 0;
+      rowCount = 1;
+    },
+    finish(finalContent = content) {
+      if (!active) {
+        if (finalContent && finalContent.trim()) printAIResponse(cli, finalContent);
+        return;
+      }
+      clearRegion();
+      active = false;
+      const rendered = cli.isMarkdownEnabled() ? renderMarkdown(finalContent, cli.theme) : finalContent;
+      if (rendered && rendered.trim()) console.log(renderWithLeftBar(cli, rendered));
+    },
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -171,37 +317,42 @@ export function formatToolArgs(toolName, args) {
 /**
  * Print enhanced tool call start with timing and context
  */
-export function printEnhancedToolCallStart(cli, toolName, args, count, taskStartTime) {
-  const elapsed = Date.now() - taskStartTime;
-  const elapsedStr = formatDuration(elapsed);
+export function printEnhancedToolCallStart(cli, toolName, args, count, _taskStartTime) {
   const t = cli.theme;
-
-  const isSubagentTool = toolName.startsWith('delegate_') || toolName === 'subagent_status';
-
-  if (isSubagentTool) {
-    console.log('');
-    console.log(`${chalk.hex(t.tool)('⚡')} ${chalk.hex(t.tool).bold(toolName)} ${chalk.dim(`[${elapsedStr}]`)}`);
-    return;
-  }
-
-  const frame = getSpinnerFrame(count, 'dots');
-
+  cli._streamRenderer?.commitIntermediate();
   const argPreview = formatToolArgs(toolName, args);
-
-  let extraInfo = '';
-  if (toolName === 'edit_file' && args) {
-    const findPreview = args.find ? args.find.substring(0, 60) : '';
-    const replacePreview = args.replace ? args.replace.substring(0, 60) : '';
-    if (findPreview) {
-      extraInfo = `\n  ${chalk.dim('├─')} ${chalk.red('- ' + findPreview)}${chalk.dim(' → ')} ${chalk.green('+ ' + replacePreview)}`;
-    }
-  } else if (toolName === 'exec' && args?.command) {
-    extraInfo = `\n  ${chalk.dim('├─')} ${chalk.hex(t.muted)('$ ' + args.command.substring(0, 80))}`;
-  } else if (toolName === 'read_file' && args?.path) {
-    extraInfo = `\n  ${chalk.dim('├─')} ${chalk.hex(t.muted)(args.path)}`;
+  const startedAt = Date.now();
+  const store = getToolStore(cli);
+  for (const activeState of store.filter(s => !s.done && !s.frozen)) {
+    if (activeState.interval) clearInterval(activeState.interval);
+    activeState.frozen = true;
+    clearInline(activeState.width || 120);
+    if (activeState.text) console.log(activeState.text);
   }
+  const state = {
+    id: count,
+    toolName,
+    args,
+    startedAt,
+    frame: 0,
+    done: false,
+    width: process.stdout.columns || 120,
+    text: '',
+  };
 
-  process.stdout.write(`  ${chalk.hex(t.tool)(frame)} ${chalk.hex(t.tool)(toolName)} ${argPreview}${chalk.dim(` [${elapsedStr}]`)}${extraInfo}`);
+  const render = () => {
+    const elapsedStr = formatDuration(Date.now() - startedAt);
+    const frame = TOOL_FRAMES[state.frame % TOOL_FRAMES.length];
+    state.frame++;
+    state.text = `  ${chalk.hex(t.tool)(frame)} ${chalk.hex(t.tool)(toolName)}${argPreview ? ` ${argPreview}` : ''}${chalk.dim(` [${elapsedStr}]`)}`;
+    clearInline(state.width);
+    process.stdout.write(state.text);
+  };
+
+  render();
+  state.interval = setInterval(render, 80);
+  state.interval.unref?.();
+  store.push(state);
 }
 
 /**
@@ -209,200 +360,111 @@ export function printEnhancedToolCallStart(cli, toolName, args, count, taskStart
  */
 export function printEnhancedToolCallEnd(cli, toolName, result, taskStartTime, _count) {
   const t = cli.theme;
-  const isSubagentTool = toolName.startsWith('delegate_') || toolName === 'subagent_status';
   const resultData = result.result || result;
+  const store = getToolStore(cli);
+  const state = store.find(s => !s.done && s.toolName === toolName) || store.find(s => !s.done);
+  if (state?.interval) clearInterval(state.interval);
+  if (state) state.done = true;
 
-  if (isSubagentTool) {
-    if (resultData?.partial) {
-      const successful = resultData.summary?.successful ?? 0;
-      const total = resultData.summary?.total ?? 0;
-      console.log(chalk.hex(t.warning)(`  ⚠ ${toolName}: partial success (${successful}/${total} tasks)`));
-    } else if (result.success !== false) {
-      const taskCount = resultData?.summary?.total || resultData?.stats?.total || '';
-      const info = taskCount ? ` (${taskCount} tasks)` : '';
-      console.log(chalk.hex(t.success)(`  ✓ ${toolName} done${info}`));
-    } else {
-      console.log(chalk.hex(t.error)(`  ✗ ${toolName}: ${result.error || result.result?.error || 'failed'}`));
-    }
-    return;
-  }
-
-  const elapsed = Date.now() - taskStartTime;
+  const elapsed = state ? Date.now() - state.startedAt : Date.now() - taskStartTime;
   const elapsedStr = formatDuration(elapsed);
+  const argPreview = formatToolArgs(toolName, state?.args || {});
+  const ok = result.success !== false;
+  const status = ok ? chalk.hex(t.success)('✓') : chalk.hex(t.error)('✗');
+  const summary = ok ? summarizeToolResult(cli, toolName, resultData) : summarizeToolError(result, resultData);
+  if (!state?.frozen) clearInline(state?.width || 120);
+  console.log(`  ${chalk.hex(t.tool)('▸')} ${chalk.hex(t.tool)(toolName)}${argPreview ? ` ${argPreview}` : ''} ${status}${summary ? ` ${summary}` : ''}${chalk.dim(` [${elapsedStr}]`)}`);
+  return;
+}
 
-  if (result.success !== false) {
-    console.log(chalk.hex(t.success)(`    ✓`) + chalk.dim(` ${elapsedStr}`));
-
-    switch (toolName) {
-      case 'read_file': {
-        const content = resultData?.content || '';
-        const lines = content.split('\n');
-        const lineCount = lines.length;
-        const sizeStr = content.length > 1024
-          ? `${(content.length / 1024).toFixed(1)}KB`
-          : `${content.length}B`;
-        const cachePath = resultData?.path || resultData?.file;
-        if (cachePath && content) {
-          cli.fileContentCache.set(cachePath, content);
-        }
-        if (lineCount > 0) {
-          console.log(chalk.hex(t.muted)(`    ├─ ${lineCount} lines · ${sizeStr}`));
-          const preview = lines.slice(0, 3).join('\n');
-          if (preview) {
-            console.log(chalk.hex(t.muted)(`    └─ ${preview.split('\n').slice(0, 2).join('\n    │ ')}`));
-            if (lineCount > 3) {
-              console.log(chalk.hex(t.muted)(`    │ ${chalk.gray('...')} ${lineCount - 3} more lines`));
-            }
-          }
-        }
-        break;
-      }
-
-      case 'write_file':
-      case 'edit_file': {
-        const filePath = resultData?.path || resultData?.file || 'unknown';
-        const linesWritten = resultData?.linesWritten || resultData?.linesModified || 0;
-        const linesDeleted = resultData?.linesDeleted || 0;
-        let changeInfo = '';
-        if (linesWritten > 0 || linesDeleted > 0) {
-          const addPart = linesWritten > 0 ? chalk.hex(t.success)('+' + linesWritten) : '';
-          const delPart = linesDeleted > 0 ? chalk.hex(t.error)(' -' + linesDeleted) : '';
-          changeInfo = ` (${addPart}${delPart})`;
-        }
-        console.log(chalk.hex(t.muted)(`    └─ ${filePath}${changeInfo}`));
-
-        const cachedContent = cli.fileContentCache.get(filePath);
-        const newContent = resultData?.content;
-        if (cachedContent !== undefined && newContent !== undefined) {
-          try {
-            const themeObj = {
-              accent: (s) => chalk.hex(t.accent)(s),
-              muted: (s) => chalk.hex(t.muted)(s),
-              error: (s) => chalk.hex(t.error)(s),
-              success: (s) => chalk.hex(t.success)(s),
-            };
-            const diffOutput = renderDiff(cachedContent, newContent, filePath, themeObj);
-            console.log(diffOutput);
-            cli.fileContentCache.set(filePath, newContent);
-          } catch { /* diff rendering failure is non-critical */ }
-        } else if (newContent !== undefined) {
-          const lineCount = newContent.split('\n').length;
-          console.log(chalk.hex(t.muted)(`    │ ${lineCount} lines`));
-          cli.fileContentCache.set(filePath, newContent);
-        }
-        break;
-      }
-
-      case 'exec':
-      case 'shell_exec': {
-        const exitCode = resultData?.exitCode ?? 0;
-        const exitStr = exitCode === 0
-          ? chalk.hex(t.success)(`exit:${exitCode}`)
-          : chalk.hex(t.error)(`exit:${exitCode}`);
-        if (resultData?.stdout && resultData.stdout.length > 0) {
-          const firstLine = resultData.stdout.split('\n')[0].substring(0, 80);
-          console.log(chalk.hex(t.muted)(`    ├─ ${exitStr}`));
-          console.log(chalk.hex(t.muted)(`    └─ ${firstLine}`));
-        } else {
-          console.log(chalk.hex(t.muted)(`    └─ ${exitStr}`));
-        }
-        break;
-      }
-
-      case 'web_search': {
-        const results = resultData?.results || [];
-        const cnt = results.length;
-        if (cnt > 0) {
-          console.log(chalk.hex(t.muted)(`    ├─ ${cnt} result${cnt === 1 ? '' : 's'}`));
-          results.slice(0, 3).forEach((r, i) => {
-            const title = r.title ? r.title.substring(0, 60) : 'No title';
-            console.log(chalk.hex(t.muted)(`    │ ${i + 1}. ${title}`));
-          });
-          if (cnt > 3) {
-            console.log(chalk.hex(t.muted)(`    │ ${chalk.gray('...')} ${cnt - 3} more`));
-          }
-        }
-        break;
-      }
-
-      case 'git_status': {
-        const status = resultData?.status || {};
-        const files = Object.keys(status).length;
-        if (files > 0) {
-          console.log(chalk.hex(t.muted)(`    ├─ ${files} file${files === 1 ? '' : 's'} changed`));
-          const staged = status.filter?.length || 0;
-          const modified = status.modified?.length || 0;
-          const untracked = status.untracked?.length || 0;
-          console.log(chalk.hex(t.muted)(`    └─ ${staged ? ' +' + staged : ''}${modified ? ' ~' + modified : ''}${untracked ? ' ?' + untracked : ''}`));
-        } else {
-          console.log(chalk.hex(t.muted)(`    └─ working tree clean`));
-        }
-        break;
-      }
-
-      case 'git_log': {
-        const commits = resultData?.commits || [];
-        if (commits.length > 0) {
-          console.log(chalk.hex(t.muted)(`    ├─ ${commits.length} commits`));
-          commits.slice(0, 3).forEach((c) => {
-            const msg = c.message ? c.message.substring(0, 50) : 'No message';
-            console.log(chalk.hex(t.muted)(`    │ ${chalk.hex(t.accent)(c.hash?.substring(0, 7) || '???????')} ${msg}`));
-          });
-        }
-        break;
-      }
-
-      case 'list_directory': {
-        const entries = resultData?.entries || resultData?.files || [];
-        const fileCount = entries.length;
-        if (fileCount > 0) {
-          console.log(chalk.hex(t.muted)(`    ├─ ${fileCount} item${fileCount === 1 ? '' : 's'}`));
-          entries.slice(0, 3).map(e => typeof e === 'string' ? e : e.name).forEach(e => {
-            console.log(chalk.hex(t.muted)(`    │ ${e}`));
-          });
-          if (fileCount > 3) {
-            console.log(chalk.hex(t.muted)(`    │ ${chalk.gray('...')} ${fileCount - 3} more`));
-          }
-        }
-        break;
-      }
-
-      case 'read_webpage': {
-        const preview = [
-          resultData.title ? truncateInline(resultData.title, 90) : null,
-          resultData.status ? `HTTP ${resultData.status}` : null,
-        ].filter(Boolean).join(' • ');
-        if (preview) {
-          console.log(chalk.hex(t.muted)(`    └─ ${preview}`));
-        }
-        break;
-      }
-
-      case 'fetch_url': {
-        const preview = [
-          resultData.status ? `HTTP ${resultData.status}` : null,
-          resultData.statusText || null,
-        ].filter(Boolean).join(' ');
-        if (preview) {
-          console.log(chalk.hex(t.muted)(`    └─ ${preview}`));
-        }
-        break;
-      }
-
-      default: {
-        if (resultData?.stdout && resultData.stdout.length > 0) {
-          const preview = resultData.stdout.substring(0, 120).replace(/\n/g, ' ');
-          console.log(chalk.hex(t.muted)(`    └─ ${preview}${resultData.stdout.length > 120 ? '...' : ''}`));
-        }
-        break;
-      }
+function summarizeToolResult(cli, toolName, resultData) {
+  const t = cli.theme;
+  const dim = chalk.hex(t.muted);
+  switch (toolName) {
+    case 'read_file': {
+      const content = resultData?.content || '';
+      const filePath = resultData?.path || resultData?.file;
+      if (filePath && content) cli.fileContentCache.set(filePath, content);
+      const lineCount = content ? content.split('\n').length : 0;
+      const sizeStr = content.length > 1024 ? `${(content.length / 1024).toFixed(1)}KB` : `${content.length}B`;
+      return dim(`${lineCount} lines · ${sizeStr}`);
     }
-  } else {
-    const statusSummary = resultData?.status ? `HTTP ${resultData.status}` : null;
-    const errorMsg = result.error || result.result?.error || statusSummary || 'Unknown error';
-    const truncated = errorMsg.substring(0, 200);
-    console.log(chalk.hex(t.error)(`    ✗ ${truncated}`));
+    case 'write_file':
+    case 'edit_file': {
+      const filePath = resultData?.path || resultData?.file || '';
+      const cached = filePath ? cli.fileContentCache.get(filePath) : undefined;
+      const next = resultData?.content;
+      let additions = resultData?.linesWritten || resultData?.linesModified || 0;
+      let deletions = resultData?.linesDeleted || 0;
+      if (cached !== undefined && next !== undefined) {
+        const stats = countLineDiff(cached, next);
+        additions = stats.additions;
+        deletions = stats.deletions;
+      } else if (next !== undefined && !additions) {
+        additions = next.split('\n').length;
+      }
+      if (filePath && next !== undefined) cli.fileContentCache.set(filePath, next);
+      const parts = [];
+      if (additions) parts.push(chalk.hex(t.success)(`+${additions}`));
+      if (deletions) parts.push(chalk.hex(t.error)(`-${deletions}`));
+      return parts.length ? parts.join(' ') : dim('updated');
+    }
+    case 'exec':
+    case 'shell_exec': {
+      const exitCode = resultData?.exitCode ?? 0;
+      return exitCode === 0 ? chalk.hex(t.success)(`exit:${exitCode}`) : chalk.hex(t.error)(`exit:${exitCode}`);
+    }
+    case 'web_search': {
+      const count = resultData?.results?.length || 0;
+      return dim(`${count} result${count === 1 ? '' : 's'}`);
+    }
+    case 'list_directory': {
+      const entries = resultData?.entries || resultData?.files || [];
+      return dim(`${entries.length} item${entries.length === 1 ? '' : 's'}`);
+    }
+    case 'git_status': {
+      const status = resultData?.status || {};
+      const files = Object.keys(status).length;
+      return dim(files ? `${files} file${files === 1 ? '' : 's'} changed` : 'clean');
+    }
+    case 'read_webpage':
+    case 'fetch_url': {
+      const preview = [
+        resultData?.status ? `HTTP ${resultData.status}` : null,
+        resultData?.title || resultData?.statusText || null,
+      ].filter(Boolean).join(' · ');
+      return preview ? dim(truncateInline(preview, 70)) : '';
+    }
+    default: {
+      if (resultData?.summary?.total) return dim(`${resultData.summary.total} tasks`);
+      if (resultData?.stdout) return dim(truncateInline(resultData.stdout.replace(/\s+/g, ' '), 70));
+      return '';
+    }
   }
+}
+
+function summarizeToolError(result, resultData) {
+  const statusSummary = resultData?.status ? `HTTP ${resultData.status}` : null;
+  const errorMsg = result.error || result.result?.error || statusSummary || 'failed';
+  return truncateInline(String(errorMsg).replace(/\s+/g, ' '), 90);
+}
+
+function countLineDiff(oldContent, newContent) {
+  const oldLines = oldContent.split('\n');
+  const newLines = newContent.split('\n');
+  let additions = 0;
+  let deletions = 0;
+  const max = Math.max(oldLines.length, newLines.length);
+  for (let i = 0; i < max; i++) {
+    if (oldLines[i] === newLines[i]) continue;
+    if (i >= oldLines.length) additions++;
+    else if (i >= newLines.length) deletions++;
+    else {
+      additions++;
+      deletions++;
+    }
+  }
+  return { additions, deletions };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -462,45 +524,19 @@ export function printEnhancedTaskSummary(cli, result, duration) {
   const t = cli.theme;
   const contextColor = contextPct > 70 ? chalk.hex(t.error) : contextPct > 40 ? chalk.hex(t.warning) : chalk.hex(t.success);
 
-  const toolUsage = {};
-  if (result.stats?.toolExecutionsByName) {
-    Object.entries(result.stats.toolExecutionsByName).forEach(([tool, count]) => {
-      toolUsage[tool] = count;
-    });
-  }
-
-  const width = Math.min(process.stdout.columns || 80, 60);
-  const dividerLine = chalk.dim('─'.repeat(width));
-
-  console.log('');
-  console.log(dividerLine);
-  console.log(chalk.hex(t.success)('  ✓ Task complete'));
-  console.log('');
-
-  // Compact single-line summary
   const summaryParts = [
     chalk.hex(t.tool)(modelShort),
-    contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} ctx (${contextPct}%)`),
     chalk.white(`${seconds}s`),
     chalk.white(`${result.iterations} iter`),
     chalk.white(`${result.stats.toolExecutions} tools`),
+    contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} ctx (${contextPct}%)`),
   ];
-  console.log(`  ${summaryParts.join(chalk.dim(' · '))}`);
-
-  // Tool breakdown on one line
-  if (Object.keys(toolUsage).length > 0) {
-    const toolParts = Object.entries(toolUsage)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 6)
-      .map(([tool, cnt]) => `${tool}${chalk.dim('×')}${cnt}`);
-    console.log(chalk.hex(t.muted)(`  ${toolParts.join('  ')}`));
-  }
-
+  let line = `  ${chalk.hex(t.success)('✓')} ${summaryParts.join(chalk.dim(' · '))}`;
   if (result.performance && result.performance.totalRetries > 0) {
-    console.log(chalk.hex(t.warning)(`  ↻ ${result.performance.totalRetries} retries`));
+    line += chalk.hex(t.warning)(` · ↻ ${result.performance.totalRetries} retries`);
   }
-
-  console.log(dividerLine);
+  console.log('');
+  console.log(line);
 }
 
 /**
@@ -525,7 +561,7 @@ export function printSessionStats(cli) {
   const totalCost = (clientStats.totalCost || 0) + subagentCost + teamCost;
 
   console.log('');
-  console.log(chalk.hex(t.header)(`  ══ Session Stats ══`));
+  console.log(divider(cli, 'stats'));
   console.log(`  ${chalk.hex(t.text)('Tokens:')}   ${chalk.white(stats.totalTokensUsed.toLocaleString())}`);
   console.log(`  ${chalk.hex(t.text)('Context:')}   ${chalk.white(contextStats.usedTokens.toLocaleString())}/${chalk.white(contextStats.maxTokens.toLocaleString())} (${contextStats.percent}%)`);
   console.log(`  ${chalk.hex(t.text)('Cost:')}      ${chalk.yellow('$' + totalCost.toFixed(4))}`);
@@ -545,7 +581,7 @@ export function printSessionStats(cli) {
   console.log(`  ${chalk.hex(t.text)('Time:')}      ${chalk.white(elapsedStr)}`);
   console.log(`  ${chalk.hex(t.text)('Messages:')}  ${chalk.white(stats.totalMessages)}`);
   console.log(`  ${chalk.hex(t.text)('Theme:')}     ${chalk.hex(t.accent)(t.name)}`);
-  console.log('');
+  console.log(divider(cli));
 }
 
 /**
@@ -557,10 +593,6 @@ export async function printGoodbye(cli) {
     await cli.sessionSaveInFlight.catch(() => {});
   }
 
-  const width = Math.min(process.stdout.columns || 80, 60);
-  const line = '─'.repeat(width);
-
-  // Compute session stats for farewell
   const elapsedMs = Date.now() - cli.sessionStartTime;
   const elapsedStr = formatElapsedTime(elapsedMs);
   const taskCount = cli.taskCount || 0;
@@ -568,10 +600,7 @@ export async function printGoodbye(cli) {
   const costStr = cost > 0 ? `$${cost.toFixed(4)}` : '$0.00';
 
   console.log('');
-  console.log(chalk.dim(`  ${line}`));
-  console.log(`  ${g.success('👋 Session complete')}  ${chalk.dim('·')}  ${chalk.gray(`${taskCount} tasks`)}  ${chalk.dim('·')}  ${chalk.gray(elapsedStr)}  ${chalk.dim('·')}  ${chalk.gray(costStr)}`);
-  console.log(chalk.dim(`  ${line}`));
-  console.log('');
+  console.log(muted(cli, `  session complete · ${taskCount} tasks · ${elapsedStr} · ${costStr}`));
 
   if (cli.state) {
     cli.state.totalSessions = (cli.state.totalSessions || 0) + 1;
@@ -588,14 +617,14 @@ export async function printGoodbye(cli) {
  */
 export function showTools(cli) {
   const tools = cli.session.toolRegistry.list();
-
-  console.log(boxen(
-    `${chalk.bold('Available Tools')} (${tools.length})\n\n` +
-    tools.map(t =>
-      `${t.enabled ? chalk.green('●') : chalk.red('○')} ${chalk.cyan(t.name)} ${chalk.gray(`[${t.category}]`)}\n  ${chalk.gray(t.description.substring(0, 60))}`
-    ).join('\n'),
-    { ...box.info, title: '🛠️ Tools' }
-  ));
+  console.log('');
+  console.log(divider(cli, `tools ${tools.length}`));
+  for (const tool of tools) {
+    const mark = tool.enabled ? chalk.hex(cli.theme.success)('●') : chalk.hex(cli.theme.error)('○');
+    console.log(`  ${mark} ${label(cli, tool.name)} ${muted(cli, `[${tool.category}]`)} ${muted(cli, truncateInline(tool.description, 72))}`);
+  }
+  console.log(divider(cli));
+  return;
 }
 
 /**
@@ -606,30 +635,18 @@ export function showStats(cli) {
   const contextStats = cli.session.agent.getContextStats();
   const toolStats = cli.session.toolRegistry.getStats();
   const subagentStats = cli.session.subagentManager?.getStats() || {};
-
-  let content = `${chalk.bold('Session')}\n\n` +
-    `${chalk.cyan('Messages:')} ${stats.totalMessages}\n` +
-    `${chalk.cyan('Iterations:')} ${stats.iterations}\n` +
-    `${chalk.cyan('Tokens:')} ${stats.totalTokensUsed.toLocaleString()}\n` +
-    `${chalk.cyan('Context Est:')} ${formatCompactNumber(contextStats.usedTokens)}/${formatCompactNumber(contextStats.maxTokens)} (${contextStats.percent}%)\n` +
-    `${chalk.cyan('Compactions:')} ${contextStats.compactions}\n` +
-    `${chalk.cyan('Tool Calls:')} ${stats.toolExecutions}\n` +
-    `${chalk.cyan('Tools Used:')} ${stats.toolsUsed.join(', ') || 'None'}\n\n` +
-    `${chalk.bold('Registry')}\n\n` +
-    `${chalk.cyan('Executions:')} ${toolStats.totalExecutions}\n` +
-    `${chalk.cyan('Success Rate:')} ${toolStats.successRate}\n` +
-    `${chalk.cyan('Avg Duration:')} ${toolStats.avgDuration}`;
-
+  const t = cli.theme;
+  console.log('');
+  console.log(divider(cli, 'stats'));
+  console.log(`  ${label(cli, 'Messages')} ${stats.totalMessages} ${muted(cli, '·')} ${label(cli, 'Iterations')} ${stats.iterations} ${muted(cli, '·')} ${label(cli, 'Tokens')} ${stats.totalTokensUsed.toLocaleString()}`);
+  console.log(`  ${label(cli, 'Context')} ${formatCompactNumber(contextStats.usedTokens)}/${formatCompactNumber(contextStats.maxTokens)} (${contextStats.percent}%) ${muted(cli, '·')} ${label(cli, 'Compactions')} ${contextStats.compactions}`);
+  console.log(`  ${label(cli, 'Tools')} ${stats.toolExecutions} calls ${muted(cli, '·')} ${label(cli, 'Used')} ${muted(cli, stats.toolsUsed.join(', ') || 'none')}`);
+  console.log(`  ${label(cli, 'Registry')} ${toolStats.totalExecutions} exec ${muted(cli, '·')} ${toolStats.successRate} success ${muted(cli, '·')} ${toolStats.avgDuration} avg`);
   if (subagentStats.totalTasks > 0) {
-    content += `\n\n${chalk.bold('Subagents')}\n\n` +
-      `${chalk.cyan('Total Tasks:')} ${subagentStats.totalTasks}\n` +
-      `${chalk.cyan('Completed:')} ${subagentStats.completedTasks}\n` +
-      `${chalk.cyan('Failed:')} ${subagentStats.failedTasks}\n` +
-      `${chalk.cyan('Success Rate:')} ${subagentStats.successRate}\n` +
-      `${chalk.cyan('Avg Duration:')} ${subagentStats.avgDuration}`;
+    console.log(`  ${chalk.hex(t.tool)('Subagents')} ${subagentStats.totalTasks} total ${muted(cli, '·')} ${chalk.hex(t.success)(subagentStats.completedTasks)} done ${muted(cli, '·')} ${chalk.hex(t.error)(subagentStats.failedTasks)} failed`);
   }
-
-  console.log(boxen(content, { ...box.stats, title: '📊 Stats' }));
+  console.log(divider(cli));
+  return;
 }
 
 /**
@@ -638,58 +655,48 @@ export function showStats(cli) {
 export function showAgents(cli) {
   const subagentManager = cli.session.subagentManager;
   if (!subagentManager) {
-    console.log(chalk.gray('Subagent system not available'));
+    console.log(muted(cli, '  subagent system not available'));
     return;
   }
 
   const stats = subagentManager.getStats();
   const tasks = subagentManager.getAllTasksStatus();
   const specializations = subagentManager.constructor.listSpecializations();
-
-  const successBar = stats.totalTasks > 0
+  const t = cli.theme;
+  const agentSuccessBar = stats.totalTasks > 0
     ? miniBar(stats.completedTasks, stats.totalTasks)
-    : chalk.dim('no tasks yet');
+    : muted(cli, 'no tasks yet');
 
-  let content = `${chalk.bold.white('📊 Stats')}` +
-    `\n  Tasks: ${chalk.white(stats.totalTasks)} total ${chalk.dim('│')} ${chalk.green(stats.completedTasks)} done ${chalk.dim('│')} ${chalk.red(stats.failedTasks)} failed ${chalk.dim('│')} ${chalk.cyan(stats.runningTasks)} running` +
-    `\n  Rate:  ${successBar}  ${chalk.white(stats.successRate)}` +
-    `\n  Speed: ${chalk.white(stats.avgDuration)} avg ${stats.totalRetries > 0 ? chalk.dim(`│ ${stats.totalRetries} retries`) : ''}`;
-
+  console.log('');
+  console.log(divider(cli, 'agents'));
+  console.log(`  ${label(cli, 'Tasks')} ${stats.totalTasks} total ${muted(cli, '·')} ${chalk.hex(t.success)(stats.completedTasks)} done ${muted(cli, '·')} ${chalk.hex(t.error)(stats.failedTasks)} failed ${muted(cli, '·')} ${chalk.hex(t.tool)(stats.runningTasks)} running`);
+  console.log(`  ${label(cli, 'Rate')} ${agentSuccessBar} ${stats.successRate} ${muted(cli, '·')} ${label(cli, 'Avg')} ${stats.avgDuration}`);
   if (stats.bySpecialization && Object.keys(stats.bySpecialization).length > 0) {
-    content += `\n\n${chalk.bold.white('📈 By Specialization')}`;
+    console.log(muted(cli, '  by specialization'));
     for (const [specId, specStats] of Object.entries(stats.bySpecialization)) {
-      const spec = specializations.find(s => s.id === specId);
-      const icon = spec?.name?.charAt(0) || '🤖';
-      content += `\n  ${icon} ${chalk.cyan(specId.padEnd(14))} ${chalk.white(specStats.total)} tasks ${chalk.dim('│')} ${chalk.green(specStats.completed)} ok ${chalk.dim('│')} ${chalk.red(specStats.failed)} fail`;
+      console.log(`  ${chalk.hex(t.tool)('▸')} ${label(cli, specId.padEnd(14))} ${specStats.total} tasks ${muted(cli, '·')} ${chalk.hex(t.success)(specStats.completed)} ok ${muted(cli, '·')} ${chalk.hex(t.error)(specStats.failed)} fail`);
     }
   }
-
   if (tasks.length > 0) {
-    content += `\n\n${chalk.bold.white('🕐 Recent Tasks')}`;
-    const recentTasks = tasks.slice(-6);
-    for (const task of recentTasks) {
+    console.log(muted(cli, '  recent'));
+    for (const task of tasks.slice(-6)) {
       const stateIcon = {
-        queued: chalk.gray('○'),
-        pending: chalk.yellow('◔'),
-        running: chalk.cyan('◑'),
-        completed: chalk.green('●'),
-        failed: chalk.red('●'),
-        cancelled: chalk.gray('⊘'),
-        retrying: chalk.yellow('↻'),
-      }[task.state] || chalk.gray('?');
-
-      const dur = task.duration > 0 ? chalk.dim(` ${(task.duration / 1000).toFixed(1)}s`) : '';
-      const retry = task.retryCount > 0 ? chalk.yellow(` ↻${task.retryCount}`) : '';
-      content += `\n  ${stateIcon} ${chalk.cyan(task.specialization.padEnd(12))} ${chalk.gray(task.task)}${dur}${retry}`;
+        queued: chalk.hex(t.muted)('○'),
+        pending: chalk.hex(t.warning)('◔'),
+        running: chalk.hex(t.tool)('◑'),
+        completed: chalk.hex(t.success)('●'),
+        failed: chalk.hex(t.error)('●'),
+        cancelled: chalk.hex(t.muted)('⊘'),
+        retrying: chalk.hex(t.warning)('↻'),
+      }[task.state] || chalk.hex(t.muted)('?');
+      const dur = task.duration > 0 ? muted(cli, ` ${(task.duration / 1000).toFixed(1)}s`) : '';
+      const retry = task.retryCount > 0 ? chalk.hex(t.warning)(` ↻${task.retryCount}`) : '';
+      console.log(`  ${stateIcon} ${label(cli, task.specialization.padEnd(12))} ${muted(cli, truncateInline(task.task, 70))}${dur}${retry}`);
     }
   }
-
-  content += `\n\n${chalk.bold.white('🎯 Specializations')}`;
-  for (const spec of specializations) {
-    content += `\n  ${spec.name.padEnd(16)} ${chalk.gray(spec.description)}`;
-  }
-
-  console.log(boxen(content, { ...box.info, title: '🤝 Subagent System', titleAlignment: 'center' }));
+  console.log(muted(cli, `  specializations ${specializations.map(s => s.name).join(', ')}`));
+  console.log(divider(cli));
+  return;
 }
 
 /**
@@ -706,78 +713,51 @@ export function miniBar(current, total, length = 12) {
  */
 export function showHistory(cli) {
   if (cli.history.length === 0) {
-    console.log(chalk.gray('No history yet'));
+    console.log(muted(cli, '  no history yet'));
     return;
   }
 
   const entries = cli.history.slice(-10).reverse();
-  let totalDuration = 0;
-  let totalTools = 0;
-  let agentCount = 0;
-  let chatCount = 0;
-
-  const content = entries.map((entry, index) => {
-    totalDuration += entry.duration || 0;
-    totalTools += entry.toolsUsed || 0;
-    if (entry.type === 'agent') agentCount++;
-    if (entry.type === 'chat') chatCount++;
-
-    const typeIcon = entry.type === 'agent' ? '🤖' : entry.type === 'chat' ? '💬' : '📁';
-    const typeColor = entry.type === 'agent' ? chalk.cyan : entry.type === 'chat' ? chalk.magenta : chalk.yellow;
-
-    let durationColor;
+  console.log('');
+  console.log(divider(cli, 'history'));
+  for (const [index, entry] of entries.entries()) {
     const duration = entry.duration || 0;
-    if (duration < 5000) durationColor = chalk.green;
-    else if (duration < 30000) durationColor = chalk.yellow;
-    else durationColor = chalk.red;
-
-    const durationStr = durationColor(formatDuration(duration));
+    const durationStr = formatDuration(duration);
     const timestamp = entry.timestamp ? getRelativeTime(new Date(entry.timestamp)) : '';
-
-    const summaryParts = [];
-    if (entry.iterations !== undefined) summaryParts.push(`${entry.iterations} iter`);
-    if (entry.toolsUsed !== undefined) summaryParts.push(`${entry.toolsUsed} tools`);
-    summaryParts.push(durationStr);
-    if (timestamp) summaryParts.push(timestamp);
-
-    const summary = summaryParts.join(chalk.dim(' • '));
-
-    return `${chalk.gray(`${index + 1}.`)} ${typeIcon} ${typeColor(entry.type)}: ${truncateInline(entry.task || '', 60)}\n   ${chalk.dim(summary)}`;
-  }).join('\n\n');
-
-  const summaryContent = [
-    `${chalk.bold('Summary:')}`,
-    `  ${chalk.cyan('🤖 Agent tasks:')} ${agentCount}`,
-    `  ${chalk.magenta('💬 Chat messages:')} ${chatCount}`,
-    `  ${chalk.white('⏱️ Total time:')} ${formatDuration(totalDuration)}`,
-    `  ${chalk.yellow('🔧 Total tools:')} ${totalTools}`,
-  ].join('\n');
-
-  console.log(boxen(
-    content + '\n\n' + chalk.dim('─'.repeat(40)) + '\n\n' + summaryContent,
-    { ...box.info, title: '📜 History' }
-  ));
+    const meta = [
+      entry.iterations !== undefined ? `${entry.iterations} iter` : null,
+      entry.toolsUsed !== undefined ? `${entry.toolsUsed} tools` : null,
+      durationStr,
+      timestamp,
+    ].filter(Boolean).join(' · ');
+    const typeColor = entry.type === 'agent' ? chalk.hex(cli.theme.tool) : entry.type === 'chat' ? chalk.hex(cli.theme.accent) : chalk.hex(cli.theme.warning);
+    console.log(`  ${muted(cli, `${index + 1}.`)} ${typeColor(entry.type)} ${truncateInline(entry.task || '', 72)}`);
+    console.log(muted(cli, `     ${meta}`));
+  }
+  console.log(divider(cli));
+  return;
 }
 
 /**
  * Show help panel
  */
 export function showHelp(_cli) {
-  console.log(boxen(
-    `${chalk.bold('Commands')}\n\n` +
-    `${formatCommandList([...COMMAND_ENTRIES.slice(0, -1), ['/reset', 'Alias for /new'], COMMAND_ENTRIES.at(-1)])}\n\n` +
-    `${chalk.bold('Aliases')}\n\n` +
-    `${SHORTCUT_ENTRIES.map((entry) => {
-      const [alias, target] = entry.split('=');
-      return `${chalk.cyan(alias)}=${target}`;
-    }).join(' ')}\n\n` +
-    `${chalk.bold('Input')}\n\n` +
-    `${chalk.gray(getInputShortcutSummary())}\n\n` +
-    `${chalk.bold('Shortcuts')}\n\n` +
-    `${chalk.cyan('! <cmd>')}       - Run shell command\n` +
-    `${chalk.cyan('plain text')}    - Run as agentic task`,
-    { ...box.info, title: '📖 Help' }
-  ));
+  const cli = _cli;
+  console.log('');
+  console.log(divider(cli, 'help'));
+  console.log(formatCommandList([...COMMAND_ENTRIES.slice(0, -1), ['/reset', 'Alias for /new'], COMMAND_ENTRIES.at(-1)])
+    .split('\n')
+    .map(line => `  ${line}`)
+    .join('\n'));
+  console.log('');
+  console.log(`  ${label(cli, 'Aliases')} ${SHORTCUT_ENTRIES.map((entry) => {
+    const [alias, target] = entry.split('=');
+    return `${chalk.hex(cli.theme.accent)(alias)}=${target}`;
+  }).join(' ')}`);
+  console.log(`  ${label(cli, 'Input')} ${muted(cli, getInputShortcutSummary())}`);
+  console.log(`  ${chalk.hex(cli.theme.accent)('! <cmd>')} ${muted(cli, 'Run shell command')}`);
+  console.log(divider(cli));
+  return;
 }
 
 /**
@@ -793,38 +773,15 @@ export function showCost(cli) {
   const subagentCost = subagentStats.totalCost || 0;
   const teamCost = autoGenStats.totalTeamCost || 0;
   const totalCost = clientStats.totalCost + subagentCost + teamCost;
-
-  let content = `${chalk.bold('Session Cost')}\n\n` +
-    `${chalk.cyan('Session Duration:')} ${sessionMinutes} minutes\n`;
-
-  const cliMeta = cli.session?._cliSessionMeta;
-  if (cliMeta?.sessionStartTime) {
-    const lifetimeMinutes = Math.floor((Date.now() - cliMeta.sessionStartTime) / 60000);
-    content += `${chalk.cyan('Session Lifetime:')} ${lifetimeMinutes} minutes (across reloads)\n`;
-    if (cliMeta.taskCount > 0) {
-      content += `${chalk.cyan('Lifetime Tasks:')} ${cliMeta.taskCount}\n`;
-    }
-  }
-
-  content += `${chalk.cyan('Main Agent Cost:')} $${clientStats.totalCost.toFixed(6)}\n`;
-
-  if (subagentCost > 0) {
-    content += `${chalk.cyan('Subagent Cost:')} $${subagentCost.toFixed(6)}\n`;
-    content += `${chalk.cyan('Subagent Input Tokens:')} ${subagentStats.totalInputTokens?.toLocaleString() || 0}\n`;
-    content += `${chalk.cyan('Subagent Output Tokens:')} ${subagentStats.totalOutputTokens?.toLocaleString() || 0}\n`;
-  }
-  if (teamCost > 0) {
-    content += `${chalk.cyan('Team Cost:')} $${teamCost.toFixed(6)}\n`;
-  }
-  content += `${chalk.bold('Total Cost:')} $${totalCost.toFixed(6)}\n` +
-    `${chalk.cyan('Budget Used:')} $${clientStats.budgetUsed.toFixed(6)} / $${clientStats.budgetLimit}\n` +
-    `${chalk.cyan('Budget Remaining:')} $${clientStats.budgetRemaining.toFixed(6)}\n` +
-    `${chalk.cyan('Total Requests:')} ${clientStats.requestCount}\n` +
-    `${chalk.cyan('Avg Duration:')} ${clientStats.avgDuration}\n` +
-    `${chalk.cyan('Cache Size:')} ${clientStats.cacheSize} entries\n` +
-    `${chalk.cyan('Tasks Completed:')} ${cli.taskCount}`;
-
-  console.log(boxen(content, { ...box.stats, title: '💰 Cost' }));
+  console.log('');
+  console.log(divider(cli, 'cost'));
+  console.log(`  ${label(cli, 'Duration')} ${sessionMinutes} minutes`);
+  console.log(`  ${label(cli, 'Main')} $${clientStats.totalCost.toFixed(6)} ${muted(cli, '·')} ${label(cli, 'Subagents')} $${subagentCost.toFixed(6)} ${muted(cli, '·')} ${label(cli, 'Team')} $${teamCost.toFixed(6)}`);
+  console.log(`  ${label(cli, 'Total')} ${chalk.hex(cli.theme.warning)('$' + totalCost.toFixed(6))}`);
+  console.log(`  ${label(cli, 'Budget')} $${clientStats.budgetUsed.toFixed(6)} / $${clientStats.budgetLimit} ${muted(cli, '·')} ${label(cli, 'Remaining')} $${clientStats.budgetRemaining.toFixed(6)}`);
+  console.log(`  ${label(cli, 'Requests')} ${clientStats.requestCount} ${muted(cli, '·')} ${label(cli, 'Avg')} ${clientStats.avgDuration} ${muted(cli, '·')} ${label(cli, 'Cache')} ${clientStats.cacheSize}`);
+  console.log(divider(cli));
+  return;
 }
 
 /**
@@ -835,18 +792,13 @@ export function showContext(cli) {
 
   const contextColor = contextStats.percent > 70 ? chalk.red :
                        contextStats.percent > 40 ? chalk.yellow : chalk.green;
-
-  console.log(boxen(
-    `${chalk.bold('Context Usage')}\n\n` +
-    `${chalk.cyan('Used Tokens:')} ${formatCompactNumber(contextStats.usedTokens)} / ${formatCompactNumber(contextStats.maxTokens)}\n` +
-    `${chalk.cyan('Usage:')} ${contextColor(contextStats.percent + '%')}\n` +
-    `${chalk.cyan('Compactions:')} ${contextStats.compactions}\n` +
-    `${chalk.cyan('Last Prompt:')} ${formatCompactNumber(contextStats.lastPromptTokens)} tokens\n` +
-    `${chalk.cyan('Last Completion:')} ${formatCompactNumber(contextStats.lastCompletionTokens)} tokens\n` +
-    `${chalk.cyan('Total Messages:')} ${cli.session.agent.messages.length}\n` +
-    `${chalk.cyan('History Items:')} ${cli.session.agent.history.length}`,
-    { ...box.stats, title: '📊 Context' }
-  ));
+  console.log('');
+  console.log(divider(cli, 'context'));
+  console.log(`  ${label(cli, 'Used')} ${formatCompactNumber(contextStats.usedTokens)} / ${formatCompactNumber(contextStats.maxTokens)} ${muted(cli, '·')} ${label(cli, 'Usage')} ${contextColor(contextStats.percent + '%')}`);
+  console.log(`  ${label(cli, 'Compactions')} ${contextStats.compactions} ${muted(cli, '·')} ${label(cli, 'Last')} ${formatCompactNumber(contextStats.lastPromptTokens)} in / ${formatCompactNumber(contextStats.lastCompletionTokens)} out`);
+  console.log(`  ${label(cli, 'Messages')} ${cli.session.agent.messages.length} ${muted(cli, '·')} ${label(cli, 'History')} ${cli.session.agent.history.length}`);
+  console.log(divider(cli));
+  return;
 }
 
 /**
@@ -854,13 +806,13 @@ export function showContext(cli) {
  */
 export function showSmartSuggestions() {
   const suggestions = [
-    '💡 Try /templates for common workflows',
-    '💡 Use /doctor to check your environment',
-    '💡 Type /help to see all commands',
-    '💡 Use /stream to toggle streaming mode',
+    'Try /templates for common workflows',
+    'Use /doctor to check your environment',
+    'Type /help to see all commands',
+    'Use /stream to toggle streaming mode',
   ];
   const suggestion = suggestions[Math.floor(Math.random() * suggestions.length)];
-  console.log(chalk.dim(suggestion));
+  console.log(chalk.dim(`  ${suggestion}`));
 }
 
 /**

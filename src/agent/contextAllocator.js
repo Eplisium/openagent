@@ -104,10 +104,22 @@ export class ContextAllocator {
     }
 
     // O(n) filter + sort by original index (integers, fast comparison)
-    const result = indexed
+    let result = indexed
       .filter(e => includedSet.has(e.idx))
       .sort((a, b) => a.idx - b.idx)
       .map(e => e.msg);
+
+    const droppedOlder = categorized.older
+      .filter(entry => !includedSet.has(entry.idx))
+      .map(entry => entry.msg);
+    if (droppedOlder.length > 0) {
+      const summaryMessage = this.buildSummaryMessage(droppedOlder, {
+        droppedCount: droppedOlder.length,
+        totalOlderCount: categorized.older.length,
+      });
+      result = this.insertAfterSystemMessages(result, summaryMessage);
+      usedTokens += estimateTokens(summaryMessage);
+    }
 
     return {
       messages: result,
@@ -125,6 +137,97 @@ export class ContextAllocator {
         },
       },
     };
+  }
+
+  buildSummaryMessage(messages, options = {}) {
+    return {
+      role: 'system',
+      content: this.summarizeOlderMessages(messages, options),
+    };
+  }
+
+  insertAfterSystemMessages(messages, summaryMessage) {
+    const result = [...messages];
+    let insertAt = 0;
+    while (insertAt < result.length && result[insertAt].role === 'system') {
+      insertAt++;
+    }
+    result.splice(insertAt, 0, summaryMessage);
+    return result;
+  }
+
+  summarizeOlderMessages(messages = [], options = {}) {
+    const userRequests = [];
+    const files = new Set();
+    const toolCalls = {};
+    const failures = [];
+    const decisions = [];
+
+    for (const msg of messages) {
+      const text = this.messageToText(msg);
+      if (!text) continue;
+
+      if (msg.role === 'user') {
+        userRequests.push(text.replace(/\s+/g, ' ').slice(0, 180));
+        if (userRequests.length > 4) userRequests.shift();
+      }
+
+      if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+        for (const tc of msg.tool_calls) {
+          const name = tc.function?.name || tc.name || 'tool';
+          toolCalls[name] = (toolCalls[name] || 0) + 1;
+          const argsText = tc.function?.arguments || JSON.stringify(tc.arguments || {});
+          this.extractFileLikeTokens(argsText, files);
+        }
+      }
+
+      if (msg.role === 'tool' && /"success"\s*:\s*false|"error"\s*:/.test(text)) {
+        const match = text.match(/"error"\s*:\s*"([^"]{1,180})"/);
+        failures.push(match ? match[1] : text.replace(/\s+/g, ' ').slice(0, 180));
+        if (failures.length > 5) failures.shift();
+      }
+
+      if (msg.role === 'assistant' && /\b(decided|using|approach|implemented|changed|fixed|because)\b/i.test(text)) {
+        const sentence = text.split(/[.!?\n]/).find(part =>
+          /\b(decided|using|approach|implemented|changed|fixed|because)\b/i.test(part) &&
+          part.trim().length > 20
+        );
+        if (sentence) decisions.push(sentence.trim().slice(0, 180));
+        if (decisions.length > 5) decisions.shift();
+      }
+
+      this.extractFileLikeTokens(text, files);
+    }
+
+    const lines = [
+      '[Context compacted to preserve headroom.]',
+      '[System reminder] Earlier conversation was compacted into this summary.',
+      `Compacted messages: ${options.droppedCount ?? messages.length}${options.totalOlderCount ? ` of ${options.totalOlderCount} older messages` : ''}.`,
+    ];
+    if (userRequests.length) lines.push(`Prior user constraints/requests: ${userRequests.join(' | ')}`);
+    if (decisions.length) lines.push(`Key decisions/progress: ${decisions.join(' | ')}`);
+    const fileList = [...files].slice(0, 12);
+    if (fileList.length) lines.push(`Files and paths mentioned: ${fileList.join(', ')}`);
+    const toolSummary = Object.entries(toolCalls)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([name, count]) => `${name} x${count}`);
+    if (toolSummary.length) lines.push(`Tools used: ${toolSummary.join(', ')}`);
+    if (failures.length) lines.push(`Recent failures to avoid repeating: ${failures.join(' | ')}`);
+    lines.push('Use this summary as preserved context; prefer current file reads over stale details when editing.');
+
+    return lines.join('\n').slice(0, 2200);
+  }
+
+  extractFileLikeTokens(text, files) {
+    const regex = /(?:[A-Za-z]:\\|\.{1,2}[\\/]|[A-Za-z0-9_.-]+[\\/])[A-Za-z0-9_./\\ -]+\.[A-Za-z0-9]{1,12}/g;
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      const value = match[0].trim();
+      if (value.length > 2 && value.length < 220 && !value.startsWith('http')) {
+        files.add(value);
+      }
+    }
   }
 
   /**

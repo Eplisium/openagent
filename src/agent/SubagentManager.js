@@ -192,6 +192,7 @@ export class SubagentManager {
     this.onTaskComplete = options.onTaskComplete || null;
     this.onTaskError = options.onTaskError || null;
     this.onAllComplete = options.onAllComplete || null;
+    this.onSubagentEvent = options.onSubagentEvent || null;
     
     // Stats
     this.stats = {
@@ -494,21 +495,31 @@ ${tree}
         subagentTask.subagent = subagent;
         this.activeSubagents.add(subagent);
         
-        // Wire up progress logging for verbose mode
-        if (this.verbose) {
-          let toolCount = 0;
-          subagent.onToolStart = (toolName) => {
-            toolCount++;
+        let toolCount = 0;
+        subagent.onToolStart = (toolName, args) => {
+          toolCount++;
+          this.emitSubagentEvent(subagentTask, 'tool_call_start', { toolName, args });
+          if (this.verbose) {
             console.log(UI.progress(`🔧 ${chalk.yellow(toolName)} ${chalk.dim(`(#${toolCount})`)}`));
-          };
-          subagent.onToolEnd = (toolName, result) => {
+          }
+        };
+        subagent.onToolEnd = (toolName, result) => {
+          this.emitSubagentEvent(subagentTask, 'tool_call_end', {
+            toolName,
+            success: result?.success !== false,
+            error: result?.success === false ? result?.error : undefined,
+          });
+          if (this.verbose) {
             if (result.success !== false) {
               console.log(UI.progress(`${chalk.green('✓')} ${chalk.dim(toolName)}`));
             } else {
               console.log(UI.progress(`${chalk.red('✗')} ${chalk.dim(toolName)}: ${chalk.red(result.error || 'failed')}`));
             }
-          };
-        }
+          }
+        };
+        subagent.onIntermediateContent = (content) => {
+          this.emitSubagentEvent(subagentTask, 'thinking', { content });
+        };
         
         // Run the task
         let result;
@@ -1434,6 +1445,29 @@ Please synthesize these results into a single coherent, well-organized response.
     return new Promise((resolve) => {
       setTimeout(resolve, ms);
     });
+  }
+
+  emitSubagentEvent(subagentTask, eventType, data = {}) {
+    const payload = {
+      type: `subagent_${eventType}`,
+      subagentId: subagentTask.id,
+      specialization: subagentTask.specialization,
+      task: subagentTask.task,
+      ...data,
+    };
+
+    if (this.onSubagentEvent) {
+      this.onSubagentEvent(payload);
+    }
+
+    if (this.parentAgent?.onStatus) {
+      this.parentAgent.onStatus({
+        ...payload,
+        message: data.toolName
+          ? `Subagent ${subagentTask.id}: ${eventType} ${data.toolName}`
+          : `Subagent ${subagentTask.id}: ${eventType}`,
+      });
+    }
   }
 }
 

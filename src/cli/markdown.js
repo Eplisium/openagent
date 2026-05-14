@@ -7,6 +7,12 @@ import chalk from '../utils/chalk-compat.js';
 import { marked } from 'marked';
 import { highlightCode } from './syntaxHighlight.js';
 
+let activeTheme = {
+  accent: '#89b4fa',
+  muted: '#6c7086',
+  text: '#cdd6f4',
+};
+
 /**
  * Strip ANSI escape codes from a string for length calculations
  */
@@ -36,9 +42,9 @@ function renderInline(tokens) {
       case 'del':
         return chalk.dim.strikethrough(token.text || '');
       case 'codespan':
-        return chalk.cyan.bold.bgGray(` ${token.text || ''} `);
+        return chalk.hex(activeTheme.accent)(token.text || '');
       case 'link':
-        return `${chalk.cyan(token.text || '')} ${chalk.dim('(' + (token.href || '') + ')')}`;
+        return `${chalk.hex(activeTheme.accent)(token.text || '')} ${chalk.dim('(' + (token.href || '') + ')')}`;
       case 'image':
         return chalk.dim(`[Image: ${token.text || 'untitled'}]`);
       case 'br':
@@ -53,22 +59,20 @@ function renderInline(tokens) {
 
 const renderer = {};
 
-// Headers with gradient-underlined styling
+// Headers with subtle accent styling
 renderer.heading = function(token) {
   const text = token.text || '';
   const level = token.depth || 1;
-  const maxWidth = Math.min(process.stdout.columns || 80, 60);
 
   if (level === 1) {
-    const rule = '━'.repeat(Math.min(text.length + 4, maxWidth));
-    return `\n${chalk.bold.cyan(text)}\n${chalk.dim(rule)}\n`;
+    return `\n${chalk.hex(activeTheme.accent).bold(text)}\n`;
   }
   if (level === 2) {
-    const prefix = chalk.bold.hex('#89b4fa')('## ');
-    return `\n${prefix}${chalk.bold.white(text)}\n`;
+    const prefix = chalk.hex(activeTheme.accent).bold('## ');
+    return `\n${prefix}${chalk.bold(text)}\n`;
   }
   if (level === 3) {
-    const prefix = chalk.bold.hex('#a6e3a1')('### ');
+    const prefix = chalk.hex(activeTheme.muted).bold('### ');
     return `\n${prefix}${chalk.bold(text)}\n`;
   }
   // h4-h6: progressively dimmer
@@ -77,38 +81,33 @@ renderer.heading = function(token) {
   return `\n${dimFn('#'.repeat(level) + ' ' + text)}\n`;
 };
 
-// Code blocks with syntax highlighting and line numbers
+// Code blocks with reduced chrome and no line numbers by default.
 renderer.code = function(token) {
   const code = token?.text || '';
   const language = token?.lang || 'text';
   const highlighted = highlightCode(code, language);
   const lines = highlighted.split('\n');
-  const numbered = lines.map((line, i) => {
-    const num = String(i + 1).padStart(4);
-    return `${chalk.dim.gray(num)} │ ${line}`;
-  });
-  const maxLineLen = Math.max(...lines.map(l => l.length), 40);
-  const topBorder = chalk.dim('┌' + '─'.repeat(maxLineLen + 6) + '┐');
-  const langLabel = chalk.dim(` ${language} `);
-  const bottomBorder = chalk.dim('└' + '─'.repeat(maxLineLen + 6) + '┘');
-  return `\n${topBorder}\n${langLabel}\n${numbered.join('\n')}\n${bottomBorder}\n`;
+  const maxLineLen = Math.min(Math.max(...lines.map(l => stripAnsi(l).length), language.length + 2, 32), Math.min(90, process.stdout.columns || 80));
+  const top = chalk.hex(activeTheme.muted)(`┌─ ${language} ${'─'.repeat(Math.max(1, maxLineLen - language.length - 3))}`);
+  const bottom = chalk.hex(activeTheme.muted)(`└${'─'.repeat(Math.max(3, maxLineLen))}`);
+  return `\n${top}\n${lines.join('\n')}\n${bottom}\n`;
 };
 
 // Inline code
 renderer.codespan = function(token) {
-  return chalk.cyan.bold.bgGray(` ${token?.text || ''} `);
+  return chalk.hex(activeTheme.accent)(token?.text || '');
 };
 
 // Links
 renderer.link = function(token) {
-  return `${chalk.cyan(token?.text || '')} ${chalk.dim('(' + (token?.href || '') + ')')}`;
+  return `${chalk.hex(activeTheme.accent)(token?.text || '')} ${chalk.dim('(' + (token?.href || '') + ')')}`;
 };
 
 // Blockquotes with left-bar accent
 renderer.blockquote = function(token) {
   const inner = token.tokens ? marked.parser(token.tokens) : (token.text || '');
   const clean = inner.replace(/<\/?p>/g, '').trim();
-  const bar = chalk.hex('#89b4fa')('│');
+  const bar = chalk.hex(activeTheme.accent)('│');
   return clean.split('\n').map(line => `${bar} ${chalk.italic(line)}`).join('\n') + '\n';
 };
 
@@ -217,8 +216,9 @@ marked.use({ renderer });
  * Render markdown text for terminal display.
  * Falls back to plain text if rendering fails.
  */
-export function renderMarkdown(text) {
+export function renderMarkdown(text, theme = activeTheme) {
   if (!text || typeof text !== 'string') return text || '';
+  activeTheme = { ...activeTheme, ...(theme || {}) };
   try {
     const result = marked.parse(text);
     return typeof result === 'string' ? result.trimEnd() : text;

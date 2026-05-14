@@ -25,6 +25,38 @@ export class OutputAdapter {
     throw new Error('OutputAdapter.writeEvent() must be implemented by subclass');
   }
 
+  writeIterationStart(data = {}) {
+    return this.writeEvent('iteration_start', data);
+  }
+
+  writeIterationEnd(data = {}) {
+    return this.writeEvent('iteration_end', data);
+  }
+
+  writeContentDelta(data = {}) {
+    return this.writeEvent('content_delta', data);
+  }
+
+  writeToolCallStart(data = {}) {
+    return this.writeEvent('tool_call_start', data);
+  }
+
+  writeToolCallEnd(data = {}) {
+    return this.writeEvent('tool_call_end', data);
+  }
+
+  writeThinking(data = {}) {
+    return this.writeEvent('thinking', data);
+  }
+
+  writeStatus(data = {}) {
+    return this.writeEvent('status', data);
+  }
+
+  writeCheckpoint(data = {}) {
+    return this.writeEvent('checkpoint', data);
+  }
+
   /**
    * Write an error message
    * @param {string} message - Error message
