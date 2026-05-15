@@ -6,6 +6,8 @@
  */
 
 import { OutputAdapter } from './OutputAdapter.js';
+import { marked } from 'marked';
+import { renderMarkdown } from '../cli/markdown.js';
 
 export class WsSink extends OutputAdapter {
   /**
@@ -21,7 +23,8 @@ export class WsSink extends OutputAdapter {
    * Add a WebSocket client
    * @param {import('ws').WebSocket} ws
    */
-  addClient(ws) {
+  addClient(ws, metadata = {}) {
+    ws.openAgentFormat = metadata.format || ws.openAgentFormat || 'ansi';
     this.clients.add(ws);
     ws.on('close', () => this.clients.delete(ws));
     ws.on('error', () => this.clients.delete(ws));
@@ -59,6 +62,9 @@ export class WsSink extends OutputAdapter {
       case 'file_change':
         wsType = 'file_change';
         break;
+      case 'tool_progress':
+        wsType = 'tool_progress';
+        break;
       default:
         wsType = 'event';
     }
@@ -68,6 +74,11 @@ export class WsSink extends OutputAdapter {
       data: { content, ...metadata },
       timestamp: new Date().toISOString(),
     });
+
+    const renderContent = metadata.content || content;
+    if ((wsType === 'response' || type === 'text') && renderContent) {
+      this.writeRender(renderContent, metadata);
+    }
   }
 
   writeEvent(eventType, data = {}) {
@@ -76,6 +87,34 @@ export class WsSink extends OutputAdapter {
       data,
       timestamp: new Date().toISOString(),
     });
+    if ((eventType === 'content_delta' || eventType === 'response') && (data.content || data.delta)) {
+      this.writeRender(data.content || data.delta, data);
+    }
+  }
+
+  writeRender(content, metadata = {}) {
+    const timestamp = new Date().toISOString();
+    for (const client of this.clients) {
+      try {
+        if (client.readyState !== 1) continue;
+        const format = client.openAgentFormat || 'ansi';
+        const rendered = format === 'html'
+          ? marked.parse(String(content || ''))
+          : renderMarkdown(String(content || ''));
+        client.send(JSON.stringify({
+          type: 'render',
+          data: {
+            content,
+            rendered,
+            format,
+            role: metadata.message_role || metadata.role || 'assistant',
+          },
+          timestamp,
+        }));
+      } catch {
+        this.clients.delete(client);
+      }
+    }
   }
 
   /**

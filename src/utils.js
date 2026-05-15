@@ -5,7 +5,6 @@
 
 import chalk from './utils/chalk-compat.js';
 import { spinner } from './utils/spinners.js';
-import boxen from 'boxen';
 import gradient from 'gradient-string';
 import Table from 'cli-table3';
 
@@ -102,7 +101,12 @@ export function printTitle(text) {
  * 📦 Print Box
  */
 export function printBox(text, type = 'default') {
-  console.log(boxen(text, boxStyles[type]));
+  const style = boxStyles[type] || boxStyles.default;
+  const color = chalk[style.borderColor] || chalk.gray;
+  const width = Math.min(process.stdout.columns || 80, 72);
+  console.log(color(`  ── ${type} ${'─'.repeat(Math.max(1, width - type.length - 5))}`));
+  for (const line of String(text).split('\n')) console.log(`  ${line}`);
+  console.log(color(`  ${'─'.repeat(width)}`));
 }
 
 /**
@@ -222,12 +226,13 @@ export function printUsageStats(usage, duration) {
  * 🎭 Print Tool Call
  */
 export function printToolCall(toolCall) {
-  console.log('\n' + boxen(
-    `${colors.warning.bold('🔧 Tool Call')}\n` +
+  console.log('');
+  printBox(
+    `${colors.warning.bold('Tool Call')}\n` +
     `${colors.primary('Name:')} ${toolCall.name}\n` +
     `${colors.primary('Arguments:')}\n${JSON.stringify(toolCall.arguments, null, 2)}`,
-    boxStyles.warning
-  ));
+    'warning'
+  );
 }
 
 /**

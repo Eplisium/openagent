@@ -789,7 +789,15 @@ export class OpenRouterClient {
           if (!fixed.endsWith('}')) fixed += '}';
           args = JSON.parse(fixed);
         } catch {
-          args = { _raw: tc.arguments, _error: 'Could not parse streamed arguments' };
+          const preview = tc.arguments && tc.arguments.length > 200
+            ? tc.arguments.substring(0, 200) + '...'
+            : (tc.arguments || '');
+          args = {
+            _raw: tc.arguments,
+            _error: 'Could not parse streamed arguments as valid JSON',
+            _hint: 'The streamed arguments were malformed. Ensure arguments are a valid JSON object.',
+            _preview: preview,
+          };
         }
       }
       toolCalls.push({ id: tc.id, name: tc.name, arguments: args });

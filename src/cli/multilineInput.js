@@ -39,6 +39,7 @@ export class MultilineInput {
     this.prompt = opts.prompt || '▸ ';
     this.placeholder = opts.placeholder || '';
     this.statusLine = opts.statusLine || '';
+    this.theme = opts.theme || { muted: '#6c7086' };
     this.stdin = opts.stdin || process.stdin;
     this.stdout = opts.stdout || process.stdout;
 
@@ -362,7 +363,7 @@ export class MultilineInput {
     }
 
     // Status bar at bottom
-    const status = chalk.dim(`Ln ${this.row + 1}, Col ${this.col + 1} │ ↵ send · Ctrl+O newline · Ctrl+K exit`);
+    const status = chalk.hex(this.theme.muted)(`Ln ${this.row + 1}, Col ${this.col + 1} │ ↵ send · Ctrl+O newline · Ctrl+K exit`);
     out.push(' '.repeat(promptW) + status);
 
     // Clear previous render

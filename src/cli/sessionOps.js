@@ -4,16 +4,12 @@
  */
 
 import chalk from '../utils/chalk-compat.js';
-import boxen from 'boxen';
 import fs from '../utils/fs-compat.js';
 import path from 'path';
 import { spinner } from '../utils/spinners.js';
 import { AgentSession } from '../agent/AgentSession.js';
-import { boxStyles } from '../utils.js';
 import { promptWithTerminalReset } from './terminal.js';
 import { truncateInline, shortenModelLabel } from './formatting.js';
-
-const box = boxStyles;
 
 // ═══════════════════════════════════════════════════════════════════
 // 💾 Save & Load
@@ -427,17 +423,27 @@ export async function runShellCommand(cli, command) {
     s.stop();
 
     if (result.success) {
-      console.log(boxen(
-        `${chalk.green('✓ Success')}\n\n` +
-        `${chalk.gray('Output:')}\n${result.stdout || '(no output)'}` +
-        (result.stderr ? `\n\n${chalk.yellow('Stderr:')}\n${result.stderr}` : ''),
-        { ...box.result, title: '📟 Shell' }
-      ));
+      const width = Math.min(process.stdout.columns || 80, 72);
+      console.log('');
+      console.log(chalk.dim(`  ── shell ${'─'.repeat(Math.max(1, width - 9))}`));
+      console.log(`  ${chalk.green('✓')} ${chalk.bold('Success')}`);
+      console.log('');
+      console.log(chalk.gray('  Output:'));
+      for (const line of String(result.stdout || '(no output)').split('\n')) console.log(`  ${line}`);
+      if (result.stderr) {
+        console.log('');
+        console.log(chalk.yellow('  Stderr:'));
+        for (const line of String(result.stderr).split('\n')) console.log(`  ${line}`);
+      }
+      console.log(chalk.dim(`  ${'─'.repeat(width)}`));
     } else {
-      console.log(boxen(
-        `${chalk.red('✗ Failed')}\n\n${result.error}`,
-        box.error
-      ));
+      const width = Math.min(process.stdout.columns || 80, 72);
+      console.log('');
+      console.log(chalk.dim(`  ── shell ${'─'.repeat(Math.max(1, width - 9))}`));
+      console.log(`  ${chalk.red('✗')} ${chalk.bold('Failed')}`);
+      console.log('');
+      console.log(`  ${result.error}`);
+      console.log(chalk.dim(`  ${'─'.repeat(width)}`));
     }
   } catch (error) {
     s.error(chalk.red(`Error: ${error.message}`));

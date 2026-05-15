@@ -35,6 +35,10 @@ export class CompanionServer extends EventEmitter {
     this.wsSink = new WsSink();
     this._running = false;
     this._stateInterval = null;
+    this.lastModel = null;
+    this.lastDuration = null;
+    this.lastToolCount = 0;
+    this._activeToolStarts = new Map();
   }
 
   /**
@@ -102,18 +106,26 @@ export class CompanionServer extends EventEmitter {
       const origOnToolStart = agent.onToolStart;
       agent.onToolStart = (tool, args) => {
         if (origOnToolStart) origOnToolStart(tool, args);
+        this.lastToolCount++;
+        this._activeToolStarts.set(tool, Date.now());
         this.wsSink.writeEvent('tool_start', { tool, args });
+        this.wsSink.writeEvent('tool_progress', { tool, status: 'started', args });
       };
 
       const origOnToolEnd = agent.onToolEnd;
       agent.onToolEnd = (tool, result) => {
         if (origOnToolEnd) origOnToolEnd(tool, result);
+        const startedAt = this._activeToolStarts.get(tool);
+        this._activeToolStarts.delete(tool);
+        this.lastDuration = startedAt ? Date.now() - startedAt : this.lastDuration;
         this.wsSink.writeEvent('tool_end', { tool, result, success: !result?.error });
+        this.wsSink.writeEvent('tool_progress', { tool, status: result?.error ? 'failed' : 'completed', result });
       };
 
       const origOnResponse = agent.onResponse;
       agent.onResponse = (response) => {
         if (origOnResponse) origOnResponse(response);
+        this.lastModel = agent.model || this.lastModel;
         this.wsSink.write('response', { type: 'response', content: response });
       };
     }
@@ -130,7 +142,9 @@ export class CompanionServer extends EventEmitter {
    * @private
    */
   _handleConnection(ws, req) {
-    this.wsSink.addClient(ws);
+    const url = new URL(req.url || '/', 'http://localhost');
+    const format = url.searchParams.get('format') === 'html' ? 'html' : 'ansi';
+    this.wsSink.addClient(ws, { format });
 
     const clientIp = req.socket.remoteAddress;
     console.log(`[Companion] Client connected: ${clientIp}`);
@@ -233,12 +247,16 @@ export class CompanionServer extends EventEmitter {
     }
 
     const agent = this.session.agent;
+    const contextStats = agent?.getContextStats?.();
     return {
       sessionId: this.session.sessionId,
       status: agent?.state || 'unknown',
       model: agent?.model || 'unknown',
+      lastModel: this.lastModel || agent?.model || 'unknown',
+      lastDuration: this.lastDuration,
+      lastToolCount: this.lastToolCount,
       workingDir: this.session.workingDir,
-      contextPercent: agent?.getContextUsagePercent?.() || 0,
+      contextPercent: contextStats?.percent ?? agent?.getContextUsagePercent?.() ?? 0,
       stats: agent?.stats || {},
       connectedClients: this.wsSink.clientCount,
     };

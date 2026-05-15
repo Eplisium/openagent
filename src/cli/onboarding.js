@@ -4,12 +4,16 @@
  */
 
 import chalk from '../utils/chalk-compat.js';
-import boxen from 'boxen';
 import * as prompts from '../utils/prompts.js';
 import { CONFIG } from '../config.js';
-import { boxStyles } from '../utils.js';
+import { themes } from './themes.js';
 
-const box = boxStyles;
+const theme = themes.catppuccin;
+const accent = chalk.hex(theme.accent);
+const success = chalk.hex(theme.success);
+const errorColor = chalk.hex(theme.error);
+const warning = chalk.hex(theme.warning);
+const muted = chalk.hex(theme.muted);
 
 /**
  * Recommended models with descriptions
@@ -35,12 +39,12 @@ export async function runOnboarding(state, saveState, modelBrowser = null) {
   const width = Math.min(process.stdout.columns || 80, 60);
   const line = '─'.repeat(width);
   console.log('');
-  console.log(chalk.dim(`  ${line}`));
-  console.log(`  ${chalk.bold.cyan('🌙 Welcome to OpenAgent!')}`);
-  console.log(chalk.dim(`  ${line}`));
+  console.log(muted(`  ${line}`));
+  console.log(`  ${accent.bold('OpenAgent')}`);
+  console.log(muted(`  ${line}`));
   console.log('');
 
-  prompts.intro(chalk.gray("Let's get you set up. This takes 30 seconds."));
+  prompts.intro(muted("Let's get you set up. This takes 30 seconds."));
 
   // Step 1: API Key
   const hasApiKey = CONFIG.API_KEY && CONFIG.API_KEY.length > 0;
@@ -49,7 +53,7 @@ export async function runOnboarding(state, saveState, modelBrowser = null) {
     prompts.success('API key detected from .env');
   } else {
     prompts.warning('No API key found');
-    console.log(chalk.gray('  Get one free at https://openrouter.ai/keys\n'));
+    console.log(muted('  Get one free at https://openrouter.ai/keys\n'));
 
     const apiKey = await prompts.password('Paste your API key:', {
       placeholder: 'sk-or-...',
@@ -80,7 +84,7 @@ export async function runOnboarding(state, saveState, modelBrowser = null) {
         await fs.writeFile(envPath, envContent.trim() + '\n');
         prompts.success('API key saved to .env');
       } catch (error) {
-        console.log(chalk.red('  ✗ Could not save API key: ' + error.message));
+        console.log(errorColor('  ✗ Could not save API key: ' + error.message));
       }
     }
   }
@@ -100,10 +104,10 @@ export async function runOnboarding(state, saveState, modelBrowser = null) {
   let finalModel = selectedModel;
 
   if (selectedModel === 'browse' && modelBrowser) {
-    console.log(chalk.gray('\n  Opening model browser...\n'));
+    console.log(muted('\n  Opening model browser...\n'));
     finalModel = await modelBrowser.pickModel();
   } else if (selectedModel === 'browse') {
-    console.log(chalk.yellow('  ⚠ Model browser not available, using default'));
+    console.log(warning('  Model browser not available, using default'));
     finalModel = RECOMMENDED_MODELS[0].id;
   }
 
@@ -139,18 +143,23 @@ export async function runOnboarding(state, saveState, modelBrowser = null) {
   }
 
   // Completion message
-  console.log(boxen(
-    `${chalk.green("✅ You're all set!")}\n\n` +
-    `${chalk.bold('Quick Start:')}\n` +
-    `${chalk.green('•')} Type any message to run as an agentic task\n` +
-    `${chalk.green('•')} Use /chat for simple conversations\n` +
-    `${chalk.green('•')} Use /templates for common workflows\n` +
-    `${chalk.green('•')} Type /help for all commands\n\n` +
-    `${chalk.dim('This message will only show once.')}`,
-    { ...box.default, title: '🎉 Ready!', titleAlignment: 'center' }
-  ));
+  const panelWidth = Math.min(process.stdout.columns || 80, 72);
+  const readyRule = muted(`  ── ready ${'─'.repeat(Math.max(1, panelWidth - 11))}`);
+  const closeRule = muted(`  ${'─'.repeat(panelWidth)}`);
+  console.log('');
+  console.log(readyRule);
+  console.log(`  ${success('✓')} ${chalk.bold("You're all set!")}`);
+  console.log('');
+  console.log(`  ${chalk.bold('Quick Start:')}`);
+  console.log(`  ${success('•')} Type any message to run as an agentic task`);
+  console.log(`  ${success('•')} Use /chat for simple conversations`);
+  console.log(`  ${success('•')} Use /templates for common workflows`);
+  console.log(`  ${success('•')} Type /help for all commands`);
+  console.log('');
+  console.log(`  ${muted('This message will only show once.')}`);
+  console.log(closeRule);
 
-  prompts.outro(chalk.gray('Press Enter to continue...'));
+  prompts.outro(muted('Press Enter to continue...'));
 
   // Wait for user to press Enter
   await prompts.text('', { placeholder: 'Press Enter...' });

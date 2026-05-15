@@ -4,10 +4,23 @@
  */
 
 import chalk from '../utils/chalk-compat.js';
-import boxen from 'boxen';
-import { boxStyles } from '../utils.js';
+import { themes } from './themes.js';
 
-const box = boxStyles;
+const theme = themes.catppuccin;
+const c = {
+  error: chalk.hex(theme.error),
+  warning: chalk.hex(theme.warning),
+  success: chalk.hex(theme.success),
+  text: chalk.hex(theme.text),
+  muted: chalk.hex(theme.muted),
+  accent: chalk.hex(theme.accent),
+};
+
+function divider(label = '') {
+  const width = Math.min(process.stdout.columns || 80, 72);
+  if (!label) return c.muted(`  ${'─'.repeat(width)}`);
+  return c.muted(`  ── ${label} ${'─'.repeat(Math.max(1, width - label.length - 5))}`);
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // 🎯 Error Categorization
@@ -44,7 +57,7 @@ export function categorizeError(errorType, message, errorData) {
       return {
         statusCode: null,
         suggestions: [],
-        commandHint: `Did you mean ${chalk.cyan(correct)}?`,
+        commandHint: `Did you mean ${c.accent(correct)}?`,
       };
     }
   }
@@ -96,7 +109,7 @@ export function categorizeError(errorType, message, errorData) {
     return {
       statusCode: null,
       suggestions: [
-        `Check that ${chalk.cyan(filePath)} exists`,
+        `Check that ${c.accent(filePath)} exists`,
         'Verify file permissions',
         'Use absolute paths instead of relative paths',
       ],
@@ -204,40 +217,47 @@ export function showSmartError(errorType, details = {}) {
 
   const errorCategory = categorizeError(errorType, message, errorData);
 
-  let content = '';
-  let title = '❌ Error';
+  let title = 'Error';
   const fixSuggestions = suggestions.length > 0 ? suggestions : errorCategory.suggestions;
 
   if (httpStatus) {
-    title += ` ${chalk.yellow('⚠')} ${chalk.white(httpStatus)}`;
+    title += ` ${c.warning('⚠')} ${c.text(httpStatus)}`;
   } else if (errorCategory.statusCode) {
-    title += ` ${chalk.yellow('⚠')} ${chalk.white(errorCategory.statusCode)}`;
+    title += ` ${c.warning('⚠')} ${c.text(errorCategory.statusCode)}`;
   }
 
-  content += `${title}\n\n`;
-  content += `${chalk.white(message || 'An error occurred')}\n`;
+  console.log('');
+  console.log(divider('error'));
+  console.log(`  ${c.error('✗')} ${chalk.bold(title)}`);
+  console.log('');
+  console.log(`  ${c.text(message || 'An error occurred')}`);
 
   if (fixSuggestions.length > 0) {
-    content += `\n${chalk.bold('🔧 Fix:')}\n`;
-    for (let i = 0; i < fixSuggestions.length; i++) {
-      content += `${chalk.green(`${i + 1}.`)} ${fixSuggestions[i]}\n`;
+    console.log('');
+    console.log(`  ${chalk.bold('Suggestions:')}`);
+    for (const suggestion of fixSuggestions) {
+      console.log(`  ${c.success('•')} ${suggestion}`);
     }
   }
 
   if (errorData) {
     const detailsStr = typeof errorData === 'string' ? errorData : JSON.stringify(errorData, null, 2);
     const truncatedDetails = detailsStr.length > 500 ? detailsStr.substring(0, 500) + '...' : detailsStr;
-    content += `\n${chalk.bold('🔍 Details:')}\n`;
-    content += chalk.gray(truncatedDetails);
+    console.log('');
+    console.log(`  ${chalk.bold('Details:')}`);
+    for (const line of truncatedDetails.split('\n')) {
+      console.log(`  ${c.muted(line)}`);
+    }
   }
 
   if (context) {
-    content += `\n\n${chalk.dim('Context: ' + context)}`;
+    console.log('');
+    console.log(`  ${c.muted('Context: ' + context)}`);
   }
 
-  console.log(boxen(content, box.error));
+  console.log(divider());
 
   if (errorCategory.commandHint) {
-    console.log(chalk.dim(`\n💡 ${errorCategory.commandHint}`));
+    console.log(c.muted(`\n  ${errorCategory.commandHint}`));
   }
 }

@@ -19,6 +19,17 @@ import { thinkingSpinner, respondingIndicator } from '../utils/spinners.js';
 import { VERSION } from './state.js';
 
 const TOOL_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const DEFAULT_THEME = {
+  accent: '#89b4fa',
+  muted: '#6c7086',
+  text: '#cdd6f4',
+  success: '#a6e3a1',
+  warning: '#f9e2af',
+  error: '#f38ba8',
+  tool: '#cba6f7',
+  user: '#89b4fa',
+  assistant: '#cdd6f4',
+};
 
 function termWidth(max = 72) {
   return Math.min(process.stdout.columns || 80, max);
@@ -32,13 +43,13 @@ function divider(cli, label = '') {
 }
 
 function label(cli, text) {
-  const t = cli?.theme || {};
-  return chalk.hex(t.accent || '#89b4fa')(text);
+  const t = cli?.theme || DEFAULT_THEME;
+  return chalk.hex(t.accent || DEFAULT_THEME.accent)(text);
 }
 
 function muted(cli, text) {
-  const t = cli?.theme || {};
-  return chalk.hex(t.muted || '#6c7086')(text);
+  const t = cli?.theme || DEFAULT_THEME;
+  return chalk.hex(t.muted || DEFAULT_THEME.muted)(text);
 }
 
 function lineRows(text) {
@@ -47,14 +58,25 @@ function lineRows(text) {
 
 function renderWithLeftBar(cli, content) {
   const t = cli.theme;
-  const bar = chalk.hex(t.accent)('│');
+  const bar = chalk.hex(t.assistant || t.accent)('│');
   const body = lineRows(content).map(line => `  ${bar} ${line}`).join('\n');
   return body;
+}
+
+function renderWithRoleBar(cli, content, { role = 'assistant', prefix = '│' } = {}) {
+  const t = cli.theme || DEFAULT_THEME;
+  const color = t[role] || t.assistant || t.accent || DEFAULT_THEME.accent;
+  const marker = chalk.hex(color)(prefix);
+  return lineRows(content).map(line => `  ${marker} ${line}`).join('\n');
 }
 
 function getToolStore(cli) {
   if (!cli._toolLineStates) cli._toolLineStates = [];
   return cli._toolLineStates;
+}
+
+function activeToolStates(store) {
+  return store.filter(state => !state.done);
 }
 
 function clearInline(width = 120) {
@@ -63,6 +85,21 @@ function clearInline(width = 120) {
 
 function visibleLen(str) {
   return String(str || '').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').length;
+}
+
+function contextBar(percent = 0, length = 8, theme = DEFAULT_THEME) {
+  const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+  const filled = Math.round((pct / 100) * length);
+  const color = pct > 70 ? theme.error : pct > 40 ? theme.warning : theme.success;
+  return chalk.hex(color || DEFAULT_THEME.success)('█'.repeat(filled)) +
+    chalk.hex(theme.muted || DEFAULT_THEME.muted)('░'.repeat(Math.max(0, length - filled)));
+}
+
+function formatContextParts(cli) {
+  const contextStats = cli.session?.agent?.getContextStats?.();
+  const percent = contextStats?.percent || 0;
+  const pctColor = percent > 70 ? chalk.hex(cli.theme.error) : percent > 40 ? chalk.hex(cli.theme.warning) : chalk.hex(cli.theme.success);
+  return { contextStats, percent, pctColor };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -82,11 +119,12 @@ export function printBanner() {
 /**
  * Format command list for display
  */
-export function formatCommandList(entries = COMMAND_ENTRIES) {
+export function formatCommandList(entries = COMMAND_ENTRIES, theme = DEFAULT_THEME) {
+  const t = theme || DEFAULT_THEME;
   const commandWidth = entries.reduce((max, [command]) => Math.max(max, command.length), 0);
   return entries
     .map(([command, description]) =>
-      `${chalk.cyan(command.padEnd(commandWidth + 2))}${chalk.gray(description)}`
+      `${chalk.hex(t.accent || DEFAULT_THEME.accent)(command.padEnd(commandWidth + 2))}${chalk.hex(t.muted || DEFAULT_THEME.muted)(description)}`
     )
     .join('\n');
 }
@@ -118,21 +156,57 @@ export function buildPromptStatusLine(cli) {
 
   // Context usage
   if (cli.session?.agent) {
-    const contextStats = cli.session.agent.getContextStats();
-    const pct = contextStats.percent;
-    const pctColor = pct > 70 ? chalk.hex(t.error) : pct > 40 ? chalk.hex(t.warning) : chalk.hex(t.success);
-    parts.push(pctColor(`${pct}%`));
+    const { percent, pctColor } = formatContextParts(cli);
+    parts.push(`${contextBar(percent, 8, t)} ${pctColor(`${percent}% ctx`)}`);
   }
 
   // Task count
-  if (cli.taskCount > 0) {
-    parts.push(chalk.hex(t.muted)(`${cli.taskCount} tasks`));
+  parts.push(chalk.hex(t.muted)(`${cli.taskCount || 0} tasks`));
+
+  const workspaceDir = cli.session?.activeWorkspace?.workspaceDir;
+  if (workspaceDir) {
+    const workspaceLabel = workspaceDir.replace(/\\/g, '/').split('/').filter(Boolean).pop() || workspaceDir;
+    parts.push(chalk.hex(t.muted)(`▸ ${workspaceLabel}`));
   }
 
-  // Theme
-  parts.push(chalk.hex(t.muted)(t.name));
+  return parts.join(chalk.hex(t.muted)(' │ '));
+}
 
-  return parts.join(chalk.dim(' │ '));
+export function printUserMessage(cli, content) {
+  if (!content || !String(content).trim()) return false;
+  console.log('');
+  console.log(renderWithRoleBar(cli, String(content), { role: 'user', prefix: '▸' }));
+  return true;
+}
+
+export function printSystemMessage(cli, content) {
+  if (!content || !String(content).trim()) return false;
+  console.log(renderWithRoleBar(cli, String(content), { role: 'muted', prefix: '○' }));
+  return true;
+}
+
+export function printAssistantHeader(cli, { durationMs = null, toolCount = 0 } = {}) {
+  const t = cli.theme || DEFAULT_THEME;
+  if (cli._assistantHeaderPrintedForTask === cli.taskStartTime) return;
+  cli._assistantHeaderPrintedForTask = cli.taskStartTime || Date.now();
+  const model = shortenModelLabel(cli.session?.agent?.model || 'assistant');
+  const { contextStats, percent } = formatContextParts(cli);
+  const used = contextStats ? formatCompactNumber(contextStats.usedTokens) : '0';
+  const max = contextStats ? formatCompactNumber(contextStats.maxTokens) : '?';
+  const elapsed = durationMs == null && cli.taskStartTime ? Date.now() - cli.taskStartTime : durationMs;
+  const stats = [
+    elapsed != null ? formatDuration(elapsed) : null,
+    `${toolCount || 0} tools`,
+    `${used}/${max} ctx`,
+    `${percent}%`,
+  ].filter(Boolean).join(' · ');
+  const inner = ` ${chalk.hex(t.tool || DEFAULT_THEME.tool)(model)}  ${chalk.hex(t.muted || DEFAULT_THEME.muted)(stats)} `;
+  const width = Math.min(Math.max(visibleLen(inner), 24), termWidth(96));
+  const pad = Math.max(0, width - visibleLen(inner));
+  const top = chalk.hex(t.accent || DEFAULT_THEME.accent)(`  ╭${'─'.repeat(width)}╮`);
+  const mid = `  ${chalk.hex(t.accent || DEFAULT_THEME.accent)('│')}${inner}${' '.repeat(pad)}${chalk.hex(t.accent || DEFAULT_THEME.accent)('│')}`;
+  const bottom = chalk.hex(t.accent || DEFAULT_THEME.accent)(`  ╰${'─'.repeat(width)}╯`);
+  console.log(`\n${top}\n${mid}\n${bottom}`);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -149,6 +223,10 @@ export function printAIResponse(cli, content) {
     cli._streamRenderer = null;
     return true;
   }
+  printAssistantHeader(cli, {
+    durationMs: cli.taskStartTime ? Date.now() - cli.taskStartTime : null,
+    toolCount: cli._toolLineStates?.length || 0,
+  });
   const rendered = cli.isMarkdownEnabled() ? renderMarkdown(content, cli.theme) : content;
   console.log('');
   console.log(renderWithLeftBar(cli, rendered));
@@ -182,81 +260,69 @@ export function showThinkingSpinner(cli) {
 /**
  * Show AI responding indicator
  */
-export function showRespondingIndicator() {
-  return respondingIndicator();
+export function showRespondingIndicator(cli = null) {
+  return respondingIndicator(cli?.theme);
 }
 
-/**
- * Create a streaming renderer for model deltas. It writes plain text with
- * the same left accent bar used by final markdown, then replaces the raw
- * stream region with rendered markdown when the final response arrives.
- */
 export function createStreamingRenderer(cli) {
-  const t = cli.theme;
-  const bar = chalk.hex(t.accent)('│');
-  const cursor = chalk.hex(t.accent)('▌');
-  const prefix = `  ${bar} `;
-  const continuation = `  ${bar} `;
-  const width = Math.max(24, (process.stdout.columns || 80) - visibleLen(prefix) - 1);
-
+  const cursor = '▌';
   let active = false;
   let content = '';
-  let currentCol = 0;
-  let rowCount = 1;
-  let cursorVisible = false;
-  let blink = null;
+  let rowCount = 0;
+  let lastFrame = [];
+  let scheduled = null;
+  let fallback = false;
 
-  const writeCursor = () => {
-    if (!active || cursorVisible) return;
-    process.stdout.write(cursor);
-    cursorVisible = true;
-  };
-  const clearCursor = () => {
-    if (!active || !cursorVisible) return;
-    process.stdout.write('\b \b');
-    cursorVisible = false;
-  };
-  const startBlink = () => {
-    if (blink) return;
-    blink = setInterval(() => {
-      if (!active) return;
-      if (cursorVisible) clearCursor();
-      else writeCursor();
-    }, 450);
-    blink.unref?.();
-  };
-  const stopBlink = () => {
-    if (blink) clearInterval(blink);
-    blink = null;
-    clearCursor();
-  };
   const begin = () => {
     if (active) return;
     active = true;
-    process.stdout.write(`\n${prefix}`);
-    startBlink();
-  };
-  const newline = () => {
-    process.stdout.write(`\n${continuation}`);
-    rowCount++;
-    currentCol = 0;
-  };
-  const writeText = (text) => {
-    for (const ch of text) {
-      if (ch === '\r') continue;
-      if (ch === '\n') {
-        newline();
-        continue;
-      }
-      process.stdout.write(ch);
-      currentCol++;
-      if (currentCol >= width) newline();
-    }
+    printAssistantHeader(cli, {
+      durationMs: cli.taskStartTime ? Date.now() - cli.taskStartTime : null,
+      toolCount: cli._toolLineStates?.length || 0,
+    });
   };
   const clearRegion = () => {
-    stopBlink();
+    if (rowCount <= 0) return;
     if (rowCount > 1) process.stdout.write(`\x1b[${rowCount - 1}A`);
     process.stdout.write('\r\x1b[J');
+    rowCount = 0;
+  };
+  const sourceWithCursor = (final = false) => {
+    if (final) return content;
+    const fenceCount = (content.match(/^```/gm) || []).length;
+    if (fenceCount % 2 === 1) return `${content}${content.endsWith('\n') ? '' : '\n'}${cursor}\n\`\`\``;
+    return `${content}${cursor}`;
+  };
+  const renderFrame = (final = false) => {
+    if (!active && !final) return;
+    const started = performance.now?.() || Date.now();
+    try {
+      const source = sourceWithCursor(final);
+      const rendered = cli.isMarkdownEnabled() ? renderMarkdown(source, cli.theme) : source;
+      const frame = renderWithLeftBar(cli, rendered || '').split('\n');
+      if (!final && frame.length === lastFrame.length && frame.every((line, i) => line === lastFrame[i])) return;
+      clearRegion();
+      process.stdout.write(`${frame.join('\n')}`);
+      rowCount = frame.length;
+      lastFrame = frame;
+      cli._lastStreamRenderMs = (performance.now?.() || Date.now()) - started;
+      if (cli._lastStreamRenderMs > 5) {
+        cli._streamRenderSlowFrames = (cli._streamRenderSlowFrames || 0) + 1;
+      }
+    } catch {
+      fallback = true;
+      clearRegion();
+      process.stdout.write(renderWithLeftBar(cli, content));
+      rowCount = Math.max(1, content.split('\n').length);
+    }
+  };
+  const scheduleRender = () => {
+    if (scheduled || fallback) return;
+    scheduled = setTimeout(() => {
+      scheduled = null;
+      renderFrame(false);
+    }, 24);
+    scheduled.unref?.();
   };
 
   return {
@@ -264,29 +330,37 @@ export function createStreamingRenderer(cli) {
     write(delta) {
       if (!delta) return;
       begin();
-      clearCursor();
       content += delta;
-      writeText(delta);
-      writeCursor();
+      if (fallback) {
+        clearRegion();
+        process.stdout.write(renderWithLeftBar(cli, content + cursor));
+        rowCount = Math.max(1, content.split('\n').length);
+        return;
+      }
+      scheduleRender();
     },
     commitIntermediate() {
       if (!active) return;
-      stopBlink();
+      if (scheduled) clearTimeout(scheduled);
+      scheduled = null;
+      renderFrame(true);
       process.stdout.write('\n');
       active = false;
       content = '';
-      currentCol = 0;
-      rowCount = 1;
+      rowCount = 0;
+      lastFrame = [];
     },
     finish(finalContent = content) {
+      if (scheduled) clearTimeout(scheduled);
+      scheduled = null;
       if (!active) {
         if (finalContent && finalContent.trim()) printAIResponse(cli, finalContent);
         return;
       }
-      clearRegion();
+      content = finalContent;
+      renderFrame(true);
       active = false;
-      const rendered = cli.isMarkdownEnabled() ? renderMarkdown(finalContent, cli.theme) : finalContent;
-      if (rendered && rendered.trim()) console.log(renderWithLeftBar(cli, rendered));
+      process.stdout.write('\n');
     },
   };
 }
@@ -298,83 +372,238 @@ export function createStreamingRenderer(cli) {
 /**
  * Format tool arguments for compact display
  */
-export function formatToolArgs(toolName, args) {
+export function formatToolArgs(toolName, args, theme = DEFAULT_THEME) {
+  const t = theme || DEFAULT_THEME;
+  const dim = chalk.hex(t.muted || DEFAULT_THEME.muted);
   if (!args || Object.keys(args).length === 0) return '';
 
-  if (args.path) return chalk.dim(args.path);
-  if (args.command) return chalk.dim(args.command.substring(0, 50) + (args.command.length > 50 ? '...' : ''));
-  if (args.query) return chalk.dim(`"${args.query.substring(0, 40)}${args.query.length > 40 ? '...' : ''}"`);
-  if (args.url) return chalk.dim(args.url.substring(0, 50));
-  if (args.file) return chalk.dim(args.file);
+  const width = Math.max(36, (process.stdout.columns || 100) - 24);
+  const smart = (value, max = width) => dim(smartTruncate(String(value || ''), max));
+
+  if (args.path) return smart(args.path);
+  if (args.filePath) return smart(args.filePath);
+  if (args.command) return smart(args.command, Math.max(60, width));
+  if (args.query) return dim(`"${smartTruncate(args.query, Math.min(80, width))}"`);
+  if (args.url) return smart(args.url, Math.min(96, width));
+  if (args.file) return smart(args.file);
 
   const firstKey = Object.keys(args)[0];
   const firstVal = typeof args[firstKey] === 'string'
-    ? args[firstKey].substring(0, 40)
-    : JSON.stringify(args[firstKey]).substring(0, 40);
-  return chalk.dim(`${firstKey}: ${firstVal}${firstVal.length >= 40 ? '...' : ''}`);
+    ? args[firstKey]
+    : JSON.stringify(args[firstKey]);
+  return dim(`${firstKey}: ${smartTruncate(firstVal, Math.min(80, width))}`);
+}
+
+function smartTruncate(value, max = 80) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= max) return text;
+  const pathMatch = text.match(/(?:[A-Za-z]:)?[./\\]?[\w .-]+(?:[\\/][\w .-]+)+/);
+  if (pathMatch && pathMatch[0].length < max - 8) {
+    const before = text.slice(0, pathMatch.index).trim();
+    const after = text.slice((pathMatch.index || 0) + pathMatch[0].length).trim();
+    const remaining = max - pathMatch[0].length - 5;
+    return `${before ? smartTruncate(before, Math.floor(remaining / 2)) + ' ' : ''}${pathMatch[0]}${after ? ' ' + smartTruncate(after, Math.ceil(remaining / 2)) : ''}`;
+  }
+  const head = Math.ceil((max - 1) * 0.65);
+  const tail = Math.floor((max - 1) * 0.35);
+  return `${text.slice(0, head)}…${text.slice(-tail)}`;
+}
+
+function stopToolVisual(store, clear = true) {
+  if (store.visualState?.interval) clearInterval(store.visualState.interval);
+  if (clear && store.visualState) clearInline(store.visualState.width || 120);
+  if (store.visualState) store.visualState.interval = null;
+  store.visualState = null;
+}
+
+function renderToolState(cli, store, state) {
+  const t = cli.theme;
+  stopToolVisual(store);
+  store.visualState = state;
+  const render = () => {
+    const elapsedStr = formatDuration(Date.now() - state.startedAt);
+    const frame = TOOL_FRAMES[state.frame % TOOL_FRAMES.length];
+    state.frame++;
+    state.text = `  ${chalk.hex(t.tool)(frame)} ${chalk.hex(t.tool)(state.toolName)}${state.argPreview ? ` ${state.argPreview}` : ''}${chalk.hex(t.muted)(` [${elapsedStr}]`)}`;
+    clearInline(state.width);
+    process.stdout.write(state.text);
+  };
+  render();
+  state.interval = setInterval(render, 80);
+  state.interval.unref?.();
+}
+
+function stopBatchVisual(store) {
+  if (store.batchInterval) clearInterval(store.batchInterval);
+  store.batchInterval = null;
+  if (store.batchMode) {
+    if (store.batchRows > 1) process.stdout.write(`\x1b[${store.batchRows - 1}A`);
+    process.stdout.write('\r\x1b[J');
+  }
+  store.batchRows = 0;
+}
+
+function renderToolBatch(cli, store) {
+  const t = cli.theme;
+  const active = activeToolStates(store);
+  if (active.length === 0) return;
+  const startedAt = Math.min(...active.map(state => state.startedAt));
+  const elapsedStr = formatDuration(Date.now() - startedAt);
+  const frame = TOOL_FRAMES[store.batchFrame % TOOL_FRAMES.length];
+  store.batchFrame++;
+  store.batchWidth = process.stdout.columns || 120;
+  if (store.batchRows) {
+    if (store.batchRows > 1) process.stdout.write(`\x1b[${store.batchRows - 1}A`);
+    process.stdout.write('\r\x1b[J');
+  } else {
+    clearInline(store.batchWidth);
+  }
+  const lines = [
+    `  ${chalk.hex(t.tool)(frame)} ${active.length} tools running... ${chalk.hex(t.muted)(elapsedStr)}`,
+    ...active.slice(0, 6).map(state => `    ${chalk.hex(t.tool)('▸')} ${chalk.hex(t.tool)(state.toolName)}${state.argPreview ? ` ${state.argPreview}` : ''}`),
+  ];
+  process.stdout.write(lines.join('\n'));
+  store.batchRows = lines.length;
+}
+
+function enterToolBatch(cli, store) {
+  stopToolVisual(store);
+  if (!store.batchMode) {
+    store.batchMode = true;
+    store.batchFrame = 0;
+  }
+  if (store.batchInterval) clearInterval(store.batchInterval);
+  renderToolBatch(cli, store);
+  store.batchInterval = setInterval(() => renderToolBatch(cli, store), 80);
+  store.batchInterval.unref?.();
+}
+
+function buildToolResultLine(cli, state, toolName, result, taskStartTime) {
+  const t = cli.theme;
+  const resultData = result.result || result;
+  const elapsed = state ? Date.now() - state.startedAt : Date.now() - taskStartTime;
+  const elapsedStr = formatDuration(elapsed);
+  const argPreview = formatToolArgs(toolName, state?.args || {}, cli.theme);
+  const ok = result.success !== false;
+  const status = ok ? chalk.hex(t.success)('✓') : chalk.hex(t.error)('✗');
+  const summary = ok ? summarizeToolResult(cli, toolName, resultData) : summarizeToolError(result, resultData);
+  if (state) state.detailLines = buildToolDetailLines(cli, toolName, result, resultData);
+  return `  ${status} ${chalk.hex(t.tool)(toolName)}${argPreview ? ` ${argPreview}` : ''}${summary ? ` ${summary}` : ''}${chalk.hex(t.muted)(` [${elapsedStr}]`)}`;
+}
+
+function printPendingToolResults(store) {
+  for (const state of store.filter(s => s.done && !s.resultPrinted && s.resultLine)) {
+    console.log(state.resultLine);
+    printToolDetails(state);
+    state.resultPrinted = true;
+  }
+}
+
+function printToolDetails(state) {
+  if (!state?.detailLines?.length) return;
+  for (const line of state.detailLines.slice(0, 3)) console.log(line);
+}
+
+function exitToolBatch(cli, store) {
+  stopBatchVisual(store);
+  store.batchMode = false;
+  printPendingToolResults(store);
+  const active = activeToolStates(store);
+  if (active.length > 0) renderToolState(cli, store, active[active.length - 1]);
 }
 
 /**
  * Print enhanced tool call start with timing and context
  */
 export function printEnhancedToolCallStart(cli, toolName, args, count, _taskStartTime) {
-  const t = cli.theme;
   cli._streamRenderer?.commitIntermediate();
-  const argPreview = formatToolArgs(toolName, args);
+  const argPreview = formatToolArgs(toolName, args, cli.theme);
   const startedAt = Date.now();
   const store = getToolStore(cli);
-  for (const activeState of store.filter(s => !s.done && !s.frozen)) {
-    if (activeState.interval) clearInterval(activeState.interval);
-    activeState.frozen = true;
-    clearInline(activeState.width || 120);
-    if (activeState.text) console.log(activeState.text);
-  }
   const state = {
     id: count,
     toolName,
     args,
+    argPreview,
     startedAt,
     frame: 0,
     done: false,
     width: process.stdout.columns || 120,
     text: '',
+    resultLine: '',
+    resultPrinted: false,
+    detailLines: [],
   };
-
-  const render = () => {
-    const elapsedStr = formatDuration(Date.now() - startedAt);
-    const frame = TOOL_FRAMES[state.frame % TOOL_FRAMES.length];
-    state.frame++;
-    state.text = `  ${chalk.hex(t.tool)(frame)} ${chalk.hex(t.tool)(toolName)}${argPreview ? ` ${argPreview}` : ''}${chalk.dim(` [${elapsedStr}]`)}`;
-    clearInline(state.width);
-    process.stdout.write(state.text);
-  };
-
-  render();
-  state.interval = setInterval(render, 80);
-  state.interval.unref?.();
   store.push(state);
+
+  if (activeToolStates(store).length >= 3) {
+    enterToolBatch(cli, store);
+    return;
+  }
+
+  if (!store.batchMode) renderToolState(cli, store, state);
 }
 
 /**
  * Enhanced tool call end with rich result display
  */
 export function printEnhancedToolCallEnd(cli, toolName, result, taskStartTime, _count) {
-  const t = cli.theme;
-  const resultData = result.result || result;
   const store = getToolStore(cli);
   const state = store.find(s => !s.done && s.toolName === toolName) || store.find(s => !s.done);
   if (state?.interval) clearInterval(state.interval);
   if (state) state.done = true;
+  const resultLine = buildToolResultLine(cli, state, toolName, result, taskStartTime);
+  if (state) state.resultLine = resultLine;
 
-  const elapsed = state ? Date.now() - state.startedAt : Date.now() - taskStartTime;
-  const elapsedStr = formatDuration(elapsed);
-  const argPreview = formatToolArgs(toolName, state?.args || {});
-  const ok = result.success !== false;
-  const status = ok ? chalk.hex(t.success)('✓') : chalk.hex(t.error)('✗');
-  const summary = ok ? summarizeToolResult(cli, toolName, resultData) : summarizeToolError(result, resultData);
-  if (!state?.frozen) clearInline(state?.width || 120);
-  console.log(`  ${chalk.hex(t.tool)('▸')} ${chalk.hex(t.tool)(toolName)}${argPreview ? ` ${argPreview}` : ''} ${status}${summary ? ` ${summary}` : ''}${chalk.dim(` [${elapsedStr}]`)}`);
+  if (store.batchMode) {
+    const active = activeToolStates(store);
+    if (active.length >= 3) {
+      renderToolBatch(cli, store);
+      return;
+    }
+    exitToolBatch(cli, store);
+    return;
+  }
+
+  if (store.visualState === state) {
+    stopToolVisual(store);
+    console.log(resultLine);
+    printToolDetails(state);
+    if (state) state.resultPrinted = true;
+    const active = activeToolStates(store);
+    if (active.length > 0) renderToolState(cli, store, active[active.length - 1]);
+    return;
+  }
+
+  stopToolVisual(store);
+  console.log(resultLine);
+  printToolDetails(state);
+  if (state) state.resultPrinted = true;
+  const active = activeToolStates(store);
+  if (active.length > 0) renderToolState(cli, store, active[active.length - 1]);
   return;
+}
+
+function buildToolDetailLines(cli, toolName, result, resultData) {
+  const t = cli.theme;
+  const dim = chalk.hex(t.muted);
+  const lines = [];
+  const ok = result.success !== false;
+  if ((toolName === 'exec' || toolName === 'shell_exec') && (!ok || resultData?.stderr)) {
+    const stderr = String(resultData?.stderr || result.error || resultData?.error || '').trim();
+    const tail = stderr.split('\n').filter(Boolean).slice(-3);
+    for (const line of tail) lines.push(dim(`    └─ ${truncateInline(line, 110)}`));
+  } else if (toolName === 'read_file' && resultData?.content) {
+    const preview = String(resultData.content).split('\n').slice(0, 3).filter(Boolean);
+    for (const line of preview) lines.push(dim(`    └─ ${truncateInline(line, 110)}`));
+  } else if (!ok) {
+    const error = result.error || resultData?.error || resultData?.message;
+    if (error) lines.push(dim(`    └─ ${truncateInline(String(error), 110)}`));
+  } else if (resultData?.stdout && String(resultData.stdout).trim()) {
+    const notable = String(resultData.stdout).trim().split('\n').slice(-2);
+    for (const line of notable) lines.push(dim(`    └─ ${truncateInline(line, 110)}`));
+  }
+  return lines;
 }
 
 function summarizeToolResult(cli, toolName, resultData) {
@@ -475,6 +704,7 @@ function countLineDiff(oldContent, newContent) {
  * Print task summary (compact)
  */
 export function printTaskSummary(cli, result, duration) {
+  const t = cli.theme;
   const seconds = (duration / 1000).toFixed(1);
   const modelId = cli.session.agent.model;
   const modelShort = shortenModelLabel(modelId);
@@ -483,36 +713,37 @@ export function printTaskSummary(cli, result, duration) {
   const contextUsed = contextStats.usedTokens;
   const contextMax = contextStats.maxTokens;
   const contextPct = contextStats.percent;
-  const contextColor = contextPct > 70 ? chalk.red : contextPct > 40 ? chalk.yellow : chalk.green;
+  const contextColor = contextPct > 70 ? chalk.hex(t.error) : contextPct > 40 ? chalk.hex(t.warning) : chalk.hex(t.success);
 
   if (result.performance) {
     cli.totalTokens += result.performance.totalToolCalls * 1000;
   }
 
   console.log('');
-  console.log(chalk.dim(`  ── `) +
-    chalk.cyan(modelShort) + chalk.dim(' • ') +
-    contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} ctx est (${contextPct}%)`) + chalk.dim(' • ') +
-    chalk.white(`${result.iterations} iter`) + chalk.dim(' • ') +
-    chalk.white(`${result.stats.toolExecutions} tools`) + chalk.dim(' • ') +
-    chalk.white(`${seconds}s`) +
-    chalk.dim(' ──'));
+  console.log(chalk.hex(t.muted)(`  ── `) +
+    chalk.hex(t.tool)(modelShort) + chalk.hex(t.muted)(' • ') +
+    contextBar(contextPct, 8, t) + chalk.hex(t.muted)(' ') +
+    contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} ctx est (${contextPct}%)`) + chalk.hex(t.muted)(' • ') +
+    chalk.hex(t.text)(`${result.iterations} iter`) + chalk.hex(t.muted)(' • ') +
+    chalk.hex(t.text)(`${result.stats.toolExecutions} tools`) + chalk.hex(t.muted)(' • ') +
+    chalk.hex(t.text)(`${seconds}s`) +
+    chalk.hex(t.muted)(' ──'));
 
   if (result.performance && result.performance.totalRetries > 0) {
-    console.log(chalk.dim(`  └─ ${result.performance.totalRetries} retries`));
+    console.log(chalk.hex(t.muted)(`  └─ ${result.performance.totalRetries} retries`));
   }
   if (result.stopReason && result.stopReason !== 'completed') {
-    console.log(chalk.dim(`  └─ stop reason: ${result.stopReason}`));
+    console.log(chalk.hex(t.muted)(`  └─ stop reason: ${result.stopReason}`));
   }
   if (result.workspace?.workspaceDir) {
-    console.log(chalk.dim(`  └─ workspace: ${result.workspace.workspaceDir}`));
+    console.log(chalk.hex(t.muted)(`  └─ workspace: ${result.workspace.workspaceDir}`));
   }
 }
 
 /**
  * Enhanced task summary with visual card style
  */
-export function printEnhancedTaskSummary(cli, result, duration) {
+export async function printEnhancedTaskSummary(cli, result, duration) {
   const seconds = (duration / 1000).toFixed(1);
   const modelId = cli.session.agent.model;
   const modelShort = shortenModelLabel(modelId);
@@ -526,62 +757,28 @@ export function printEnhancedTaskSummary(cli, result, duration) {
 
   const summaryParts = [
     chalk.hex(t.tool)(modelShort),
-    chalk.white(`${seconds}s`),
-    chalk.white(`${result.iterations} iter`),
-    chalk.white(`${result.stats.toolExecutions} tools`),
-    contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} ctx (${contextPct}%)`),
+    chalk.hex(t.text)(`${seconds}s`),
+    chalk.hex(t.text)(`${result.iterations} iter`),
+    chalk.hex(t.text)(`${result.stats.toolExecutions} tools`),
+    `${contextBar(contextPct, 8, t)} ${contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} ctx (${contextPct}%)`)}`,
   ];
-  let line = `  ${chalk.hex(t.success)('✓')} ${summaryParts.join(chalk.dim(' · '))}`;
+  let line = `  ${chalk.hex(t.success)('✓')} ${summaryParts.join(chalk.hex(t.muted)(' · '))}`;
   if (result.performance && result.performance.totalRetries > 0) {
     line += chalk.hex(t.warning)(` · ↻ ${result.performance.totalRetries} retries`);
   }
   console.log('');
-  console.log(line);
-}
-
-/**
- * Print session stats inline (triggered by Ctrl+P)
- */
-export function printSessionStats(cli) {
-  if (!cli.session?.agent) {
-    console.log(chalk.gray('  No active session'));
+  const failed = result.success === false || result.error;
+  if (failed) {
+    console.log(line);
     return;
   }
-  const stats = cli.session.agent.getStats();
-  const contextStats = cli.session.agent.getContextStats();
-  const clientStats = cli.session.agent.client.getStats();
-  const subagentStats = cli.session.subagentManager?.getStats() || {};
-  const autoGenStats = cli.session.autoGenBridge?.getStats?.() || {};
-  const elapsedMs = Date.now() - cli.sessionStartTime;
-  const elapsedStr = formatElapsedTime(elapsedMs);
-  const t = cli.theme;
-
-  const subagentCost = subagentStats.totalCost || 0;
-  const teamCost = autoGenStats.totalTeamCost || 0;
-  const totalCost = (clientStats.totalCost || 0) + subagentCost + teamCost;
-
-  console.log('');
-  console.log(divider(cli, 'stats'));
-  console.log(`  ${chalk.hex(t.text)('Tokens:')}   ${chalk.white(stats.totalTokensUsed.toLocaleString())}`);
-  console.log(`  ${chalk.hex(t.text)('Context:')}   ${chalk.white(contextStats.usedTokens.toLocaleString())}/${chalk.white(contextStats.maxTokens.toLocaleString())} (${contextStats.percent}%)`);
-  console.log(`  ${chalk.hex(t.text)('Cost:')}      ${chalk.yellow('$' + totalCost.toFixed(4))}`);
-  if (subagentCost > 0 || teamCost > 0) {
-    console.log(`  ${chalk.hex(t.muted)('├─ Main:')}    ${chalk.hex(t.muted)('$' + (clientStats.totalCost || 0).toFixed(4))}`);
-    if (subagentCost > 0) {
-      console.log(`  ${chalk.hex(t.muted)('├─ Sub:')}     ${chalk.hex(t.muted)('$' + subagentCost.toFixed(4))}`);
-    }
-    if (teamCost > 0) {
-      console.log(`  ${chalk.hex(t.muted)('└─ Team:')}    ${chalk.hex(t.muted)('$' + teamCost.toFixed(4))}`);
-    }
+  for (let i = 0; i < line.length; i += 15) {
+    process.stdout.write(line.slice(i, i + 15));
+    await new Promise(resolve => {
+      setTimeout(resolve, 10);
+    });
   }
-  const budgetRemaining = (clientStats.budgetLimit || 0) - (clientStats.budgetUsed || 0);
-  console.log(`  ${chalk.hex(t.text)('Budget:')}    ${chalk.yellow('$' + (clientStats.budgetUsed || 0).toFixed(4))} used / ${chalk.green('$' + budgetRemaining.toFixed(4))} remaining`);
-  console.log(`  ${chalk.hex(t.text)('Tools:')}     ${chalk.white(stats.toolExecutions)} calls`);
-  console.log(`  ${chalk.hex(t.text)('Iterations:')} ${chalk.white(stats.iterations)}`);
-  console.log(`  ${chalk.hex(t.text)('Time:')}      ${chalk.white(elapsedStr)}`);
-  console.log(`  ${chalk.hex(t.text)('Messages:')}  ${chalk.white(stats.totalMessages)}`);
-  console.log(`  ${chalk.hex(t.text)('Theme:')}     ${chalk.hex(t.accent)(t.name)}`);
-  console.log(divider(cli));
+  console.log('');
 }
 
 /**
@@ -664,7 +861,7 @@ export function showAgents(cli) {
   const specializations = subagentManager.constructor.listSpecializations();
   const t = cli.theme;
   const agentSuccessBar = stats.totalTasks > 0
-    ? miniBar(stats.completedTasks, stats.totalTasks)
+    ? miniBar(stats.completedTasks, stats.totalTasks, 12, cli.theme)
     : muted(cli, 'no tasks yet');
 
   console.log('');
@@ -702,10 +899,11 @@ export function showAgents(cli) {
 /**
  * Create a mini progress bar
  */
-export function miniBar(current, total, length = 12) {
-  if (total === 0) return chalk.dim('░'.repeat(length));
+export function miniBar(current, total, length = 12, theme = DEFAULT_THEME) {
+  const t = theme || DEFAULT_THEME;
+  if (total === 0) return chalk.hex(t.muted)('░'.repeat(length));
   const filled = Math.round((current / total) * length);
-  return chalk.green('█'.repeat(filled)) + chalk.dim('░'.repeat(length - filled));
+  return chalk.hex(t.success)('█'.repeat(filled)) + chalk.hex(t.muted)('░'.repeat(length - filled));
 }
 
 /**
@@ -745,7 +943,7 @@ export function showHelp(_cli) {
   const cli = _cli;
   console.log('');
   console.log(divider(cli, 'help'));
-  console.log(formatCommandList([...COMMAND_ENTRIES.slice(0, -1), ['/reset', 'Alias for /new'], COMMAND_ENTRIES.at(-1)])
+  console.log(formatCommandList([...COMMAND_ENTRIES.slice(0, -1), ['/reset', 'Alias for /new'], COMMAND_ENTRIES.at(-1)], cli.theme)
     .split('\n')
     .map(line => `  ${line}`)
     .join('\n'));
@@ -772,14 +970,19 @@ export function showCost(cli) {
 
   const subagentCost = subagentStats.totalCost || 0;
   const teamCost = autoGenStats.totalTeamCost || 0;
-  const totalCost = clientStats.totalCost + subagentCost + teamCost;
+  const mainCost = clientStats.totalCost || 0;
+  const totalCost = mainCost + subagentCost + teamCost;
+  const field = (name) => label(cli, name.padEnd(10));
+  const money = (value) => `$${Number(value || 0).toFixed(6)}`;
+  const budgetLimit = clientStats.budgetLimit ?? 0;
+  const budgetRemaining = clientStats.budgetRemaining ?? (budgetLimit - (clientStats.budgetUsed || 0));
   console.log('');
   console.log(divider(cli, 'cost'));
-  console.log(`  ${label(cli, 'Duration')} ${sessionMinutes} minutes`);
-  console.log(`  ${label(cli, 'Main')} $${clientStats.totalCost.toFixed(6)} ${muted(cli, '·')} ${label(cli, 'Subagents')} $${subagentCost.toFixed(6)} ${muted(cli, '·')} ${label(cli, 'Team')} $${teamCost.toFixed(6)}`);
-  console.log(`  ${label(cli, 'Total')} ${chalk.hex(cli.theme.warning)('$' + totalCost.toFixed(6))}`);
-  console.log(`  ${label(cli, 'Budget')} $${clientStats.budgetUsed.toFixed(6)} / $${clientStats.budgetLimit} ${muted(cli, '·')} ${label(cli, 'Remaining')} $${clientStats.budgetRemaining.toFixed(6)}`);
-  console.log(`  ${label(cli, 'Requests')} ${clientStats.requestCount} ${muted(cli, '·')} ${label(cli, 'Avg')} ${clientStats.avgDuration} ${muted(cli, '·')} ${label(cli, 'Cache')} ${clientStats.cacheSize}`);
+  console.log(`  ${field('Duration')}${sessionMinutes} minutes`);
+  console.log(`  ${field('Main')}${money(mainCost)} ${muted(cli, ' · ')}${label(cli, 'Subagents')}  ${money(subagentCost)} ${muted(cli, ' · ')}${label(cli, 'Team')}  ${money(teamCost)}`);
+  console.log(`  ${field('Total')}${chalk.hex(cli.theme.warning)(money(totalCost))}`);
+  console.log(`  ${field('Budget')}${money(clientStats.budgetUsed)} / $${budgetLimit} ${muted(cli, ' · ')}${label(cli, 'Remaining')}  ${money(budgetRemaining)}`);
+  console.log(`  ${field('Requests')}${clientStats.requestCount} ${muted(cli, ' · ')}${label(cli, 'Avg')}  ${clientStats.avgDuration} ${muted(cli, ' · ')}${label(cli, 'Cache')}  ${clientStats.cacheSize}`);
   console.log(divider(cli));
   return;
 }
@@ -789,9 +992,10 @@ export function showCost(cli) {
  */
 export function showContext(cli) {
   const contextStats = cli.session.agent.getContextStats();
+  const t = cli.theme;
 
-  const contextColor = contextStats.percent > 70 ? chalk.red :
-                       contextStats.percent > 40 ? chalk.yellow : chalk.green;
+  const contextColor = contextStats.percent > 70 ? chalk.hex(t.error) :
+                       contextStats.percent > 40 ? chalk.hex(t.warning) : chalk.hex(t.success);
   console.log('');
   console.log(divider(cli, 'context'));
   console.log(`  ${label(cli, 'Used')} ${formatCompactNumber(contextStats.usedTokens)} / ${formatCompactNumber(contextStats.maxTokens)} ${muted(cli, '·')} ${label(cli, 'Usage')} ${contextColor(contextStats.percent + '%')}`);

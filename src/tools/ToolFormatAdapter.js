@@ -307,7 +307,15 @@ export class ToolFormatAdapter {
         const parsed = JSON.parse(fixed);
         return typeof parsed === 'object' && parsed !== null ? parsed : { value: parsed };
       } catch {
-        return { _raw: str, _error: 'Could not parse arguments' };
+        // Provide a descriptive error so the agent knows the arguments were malformed,
+        // not just "missing". Include a preview of the raw text for debugging.
+        const preview = str.length > 200 ? str.substring(0, 200) + '...' : str;
+        return {
+          _raw: str,
+          _error: 'Could not parse tool call arguments as valid JSON',
+          _hint: 'The arguments string was malformed. Ensure arguments are a valid JSON object with proper quoting and escaping.',
+          _preview: preview,
+        };
       }
     }
   }

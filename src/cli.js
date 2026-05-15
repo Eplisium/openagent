@@ -27,7 +27,7 @@ import { VERSION } from './cli/state.js';
 
 // ── Heavy imports deferred until start() — resolves in parallel for ~400ms startup savings ──
 // These are module-level so all existing code sees them as plain variables after resolveImports().
-let spinner, execSync, parseXmlToolCalls, hasXmlToolCalls;
+let spinner, parseXmlToolCalls, hasXmlToolCalls;
 let AgentSession, ModelBrowser, processInput, readDroppedFile, formatDroppedContent;
 let isVisionModel, buildMultimodalMessage;
 let runOnboarding, createReadlineInterfaceWithTerminalReset, promptWithTerminalReset;
@@ -43,7 +43,6 @@ async function resolveImports() {
 
   importsPromise ||= Promise.all([
     import('./utils/spinners.js'),
-    import('child_process'),
     import('./tools/xmlToolParser.js'),
     import('./agent/AgentSession.js'),
     import('./ModelBrowser.js'),
@@ -55,19 +54,18 @@ async function resolveImports() {
 
   const results = await importsPromise;
   spinner = results[0].spinner;
-  execSync = results[1].execSync;
-  parseXmlToolCalls = results[2].parseXmlToolCalls;
-  hasXmlToolCalls = results[2].hasXmlToolCalls;
-  AgentSession = results[3].AgentSession;
-  ModelBrowser = results[4].ModelBrowser;
-  processInput = results[5].processInput;
-  readDroppedFile = results[5].readDroppedFile;
-  formatDroppedContent = results[5].formatDroppedContent;
-  isVisionModel = results[6].isVisionModel;
-  buildMultimodalMessage = results[6].buildMultimodalMessage;
-  runOnboarding = results[7].runOnboarding;
-  createReadlineInterfaceWithTerminalReset = results[8].createReadlineInterfaceWithTerminalReset;
-  promptWithTerminalReset = results[8].promptWithTerminalReset;
+  parseXmlToolCalls = results[1].parseXmlToolCalls;
+  hasXmlToolCalls = results[1].hasXmlToolCalls;
+  AgentSession = results[2].AgentSession;
+  ModelBrowser = results[3].ModelBrowser;
+  processInput = results[4].processInput;
+  readDroppedFile = results[4].readDroppedFile;
+  formatDroppedContent = results[4].formatDroppedContent;
+  isVisionModel = results[5].isVisionModel;
+  buildMultimodalMessage = results[5].buildMultimodalMessage;
+  runOnboarding = results[6].runOnboarding;
+  createReadlineInterfaceWithTerminalReset = results[7].createReadlineInterfaceWithTerminalReset;
+  promptWithTerminalReset = results[7].promptWithTerminalReset;
 }
 
 
@@ -79,7 +77,6 @@ import {
 
 import {
   formatCompactNumber,
-  formatElapsedTime,
   shortenModelLabel,
   deduplicateResponse,
 } from './cli/formatting.js';
@@ -89,12 +86,13 @@ import {
   getShortcutSummary,
   getInputShortcutSummary,
   printAIResponse,
+  printUserMessage,
   createStreamingRenderer,
   printIntermediateContent,
   printEnhancedToolCallStart,
   printEnhancedToolCallEnd,
   printEnhancedTaskSummary,
-  printSessionStats,
+  buildPromptStatusLine as buildDisplayPromptStatusLine,
   printGoodbye,
   showTools,
   showStats,
@@ -103,7 +101,6 @@ import {
   showHelp,
   showCost,
   showContext,
-  getWorkspaceLabel,
 } from './cli/display.js';
 
 import {
@@ -248,7 +245,7 @@ export class CLI {
     if (this.autoSave) this.startAutoSave();
 
     console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(Math.min(process.stdout.columns || 80, 72))}`));
-    console.log(formatCommandList().split('\n').map(line => `  ${line}`).join('\n'));
+    console.log(formatCommandList(undefined, this.theme).split('\n').map(line => `  ${line}`).join('\n'));
     console.log(chalk.hex(this.theme.muted)(`  ${getShortcutSummary()} · ${getInputShortcutSummary()}`));
     console.log('');
 
@@ -269,6 +266,7 @@ export class CLI {
           input = await multilinePrompt({
             prompt: promptStr,
             statusLine: statusLine,
+            theme: this.theme,
             placeholder: 'Type your message... (Enter sends, Ctrl+O newline, Ctrl+L clear, Ctrl+T theme)',
           });
         } finally {
@@ -286,7 +284,7 @@ export class CLI {
           continue;
         }
         if (input === MultilineInput.SHOW_STATS) {
-          printSessionStats(this);
+          showStats(this);
           continue;
         }
 
@@ -472,80 +470,8 @@ export class CLI {
   }
 
   buildPromptStatusLine() {
-    if (!this.session?.agent) return chalk.dim('─ ready');
-
-    const context = this.session.agent.getContextStats();
-
-    let contextColor;
-    let contextBar;
-    const barLength = 10;
-    const filledBars = Math.round((context.percent / 100) * barLength);
-
-    if (context.percent > 70) {
-      contextColor = chalk.red;
-      contextBar = chalk.red('█'.repeat(filledBars)) + chalk.dim('░'.repeat(barLength - filledBars));
-    } else if (context.percent > 40) {
-      contextColor = chalk.yellow;
-      contextBar = chalk.yellow('█'.repeat(filledBars)) + chalk.dim('░'.repeat(barLength - filledBars));
-    } else {
-      contextColor = chalk.green;
-      contextBar = chalk.green('█'.repeat(filledBars)) + chalk.dim('░'.repeat(barLength - filledBars));
-    }
-
-    const stats = this.session.agent.getStats();
-    const clientStats = this.session.agent.client.getStats();
-    const subagentStats = this.session.subagentManager?.getStats() || {};
-    const autoGenStats = this.session.autoGenBridge?.getStats?.() || {};
-    const subagentCost = subagentStats.totalCost || 0;
-    const teamCost = autoGenStats.totalTeamCost || 0;
-    const totalCost = (clientStats.totalCost || 0) + subagentCost + teamCost;
-    const costStr = totalCost > 0
-      ? chalk.yellow(`$${totalCost.toFixed(2)}`)
-      : chalk.dim('$0.00');
-
-    const elapsedMs = Date.now() - this.sessionStartTime;
-    const elapsedStr = formatElapsedTime(elapsedMs);
-
-    const toolCount = stats.toolExecutions || 0;
-    const toolStr = toolCount > 0 ? chalk.white(`${toolCount} tools`) : chalk.dim('0 tools');
-
-    const dirParts = this.workingDir.replace(/\\/g, '/').split('/');
-    const shortDir = dirParts.length > 2 ? '…/' + dirParts.slice(-2).join('/') : this.workingDir;
-    // Git branch (cached, refreshed every 30s)
-    let gitBranch = '';
-    if (!this._gitBranchCache || Date.now() - this._gitBranchCacheTime > 30000) {
-      try {
-        gitBranch = execSync('git branch --show-current', { cwd: this.workingDir, encoding: 'utf8', timeout: 1000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-      } catch { /* not a git repo or git not available */ }
-      this._gitBranchCache = gitBranch;
-      this._gitBranchCacheTime = Date.now();
-    } else {
-      gitBranch = this._gitBranchCache;
-    }
-
-    const streamStr = this.streaming ? chalk.green('stream') : chalk.yellow('chat');
-
-    const segments = [
-      `${chalk.hex(this.theme.accent)(shortenModelLabel(this.session.agent.model))}`,
-      `${chalk.dim('[')}${contextBar}${chalk.dim(']')} ${contextColor(context.percent + '%')}`,
-      costStr,
-      toolStr,
-      streamStr,
-      `${chalk.dim(elapsedStr)}`,
-    ];
-
-    if (gitBranch) {
-      segments.splice(4, 0, `${chalk.dim('git')} ${chalk.magenta(gitBranch)}`);
-    }
-
-    const workspaceLabel = getWorkspaceLabel(this);
-    if (workspaceLabel !== 'none') {
-      segments.push(`${chalk.dim('ws')} ${chalk.gray(workspaceLabel)}`);
-    }
-
-    segments.push(`${chalk.gray(shortDir)}`);
-
-    return `${chalk.dim('─ ')}${segments.join(chalk.dim(' │ '))}`;
+    if (!this.session?.agent) return chalk.hex(this.theme.muted)('─ ready');
+    return buildDisplayPromptStatusLine(this);
   }
 
   // ── Session Management ───────────────────────────────────────
@@ -616,6 +542,8 @@ export class CLI {
     const startTime = Date.now();
     this.taskStartTime = startTime;
     this.currentTask = task;
+    this._toolLineStates = [];
+    this._assistantHeaderPrintedForTask = null;
     let toolCallCount = 0;
     let responsePrinted = false;
     const previousCallbacks = {
@@ -623,11 +551,13 @@ export class CLI {
       onToolEnd: this.session.agent.onToolEnd,
       onResponse: this.session.agent.onResponse,
       onContentDelta: this.session.agent.onContentDelta,
+      onIntermediateContent: this.session.agent.onIntermediateContent,
       onIterationStart: this.session.agent.onIterationStart,
       onIterationEnd: this.session.agent.onIterationEnd,
       onStatus: this.session.agent.onStatus,
     };
 
+    printUserMessage(this, task);
     console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(22)}`));
     console.log(chalk.hex(this.theme.muted)('  Ctrl+C stops this task'));
 
@@ -678,7 +608,7 @@ export class CLI {
           let elapsed = 0;
           progressInterval = setInterval(() => {
             elapsed += 1;
-            process.stdout.write(`\r  ${chalk.hex(this.theme.muted)('⠋')} ${chalk.gray(progressMessage)} ${chalk.white(elapsed.toFixed(1) + 's')}  `);
+            process.stdout.write(`\r  ${chalk.hex(this.theme.tool)('⠋')} ${chalk.hex(this.theme.muted)(progressMessage)} ${chalk.hex(this.theme.text)(elapsed.toFixed(1) + 's')}  `);
           }, 1000);
         };
         const stopProgressIndicator = () => {
@@ -724,7 +654,7 @@ export class CLI {
         console.log(chalk.dim('  Try rephrasing your request or using a different model.'));
       }
 
-      printEnhancedTaskSummary(this, result, duration);
+      await printEnhancedTaskSummary(this, result, duration);
 
       if (this.state?.stats) {
         this.state.stats.totalTasks++;
@@ -772,6 +702,8 @@ export class CLI {
     const startTime = Date.now();
     this.taskStartTime = startTime;
     this.currentTask = multimodalMsg.content?.find(c => c.type === 'text')?.text || '[multimodal]';
+    this._toolLineStates = [];
+    this._assistantHeaderPrintedForTask = null;
     let toolCallCount = 0;
     let responsePrinted = false;
     const previousCallbacks = {
@@ -779,11 +711,13 @@ export class CLI {
       onToolEnd: this.session.agent.onToolEnd,
       onResponse: this.session.agent.onResponse,
       onContentDelta: this.session.agent.onContentDelta,
+      onIntermediateContent: this.session.agent.onIntermediateContent,
       onIterationStart: this.session.agent.onIterationStart,
       onIterationEnd: this.session.agent.onIterationEnd,
       onStatus: this.session.agent.onStatus,
     };
 
+    printUserMessage(this, this.currentTask);
     console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(22)}`));
     console.log(chalk.hex(this.theme.muted)('  Ctrl+C stops this task'));
 
@@ -849,7 +783,7 @@ export class CLI {
         console.log(chalk.yellow('\n  Agent completed but produced no text response. The model may have returned empty content.'));
         console.log(chalk.dim('  Try rephrasing your request or using a different model.'));
       }
-      printEnhancedTaskSummary(this, result, duration);
+      await printEnhancedTaskSummary(this, result, duration);
 
       if (this.state?.stats) {
         this.state.stats.totalTasks++;

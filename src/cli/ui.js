@@ -1,83 +1,26 @@
 /**
- * UI helpers and styles for OpenAgent CLI
+ * Shared terminal formatting utilities for OpenAgent CLI.
  */
 
 import chalk from '../utils/chalk-compat.js';
-import boxen from 'boxen';
-import { renderMarkdown as _renderMarkdown } from './markdown.js';
-import { themes } from './themes.js';
 
-// ═══════════════════════════════════════════════════════════════════
-// 🎨 Gradients
-// ═══════════════════════════════════════════════════════════════════
-
-export const g = {
-  title: chalk.hex(themes.catppuccin.header),
-  ai: chalk.hex(themes.catppuccin.accent),
-  tool: chalk.hex(themes.catppuccin.tool),
-  success: chalk.hex(themes.catppuccin.success),
+const DEFAULT_THEME = {
+  muted: '#6c7086',
+  success: '#a6e3a1',
 };
-
-// ═══════════════════════════════════════════════════════════════════
-// 📦 Box Styles
-// ═══════════════════════════════════════════════════════════════════
-
-export const box = {
-  default: { padding: 1, borderStyle: 'round', borderColor: 'cyan' },
-  response: { padding: 1, borderStyle: 'round', borderColor: 'magenta' },
-  tool: { padding: 1, borderStyle: 'round', borderColor: 'yellow' },
-  result: { padding: 1, borderStyle: 'single', borderColor: 'green' },
-  error: { padding: 1, borderStyle: 'double', borderColor: 'red' },
-  info: { padding: 1, borderStyle: 'single', borderColor: 'blue' },
-  stats: { padding: 1, borderStyle: 'round', borderColor: 'cyan' },
-};
-
-// ═══════════════════════════════════════════════════════════════════
-// 📏 Terminal Utilities
-// ═══════════════════════════════════════════════════════════════════
 
 const getTerminalWidth = () => Math.min(process.stdout.columns || 80, 65);
-export const DIVIDER = () => chalk.dim('─'.repeat(getTerminalWidth()));
+export const DIVIDER = () => chalk.hex(DEFAULT_THEME.muted)('─'.repeat(getTerminalWidth()));
 
-/**
- * Strip ANSI escape codes from a string
- * @param {string} str - String with potential ANSI codes
- * @returns {string} Clean string without ANSI codes
- */
-export function stripAnsi(str) {
-  return str.replace(/\u001b\[[0-9;]*m/g, '');
+export function stripAnsi(str = '') {
+  return String(str).replace(/\u001b\[[0-9;]*[A-Za-z]/g, '');
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// 🎨 Markdown Rendering
-// ═══════════════════════════════════════════════════════════════════
-
-export const renderMarkdown = _renderMarkdown;
-
-// ═══════════════════════════════════════════════════════════════════
-// 🎯 Formatting Functions
-// ═══════════════════════════════════════════════════════════════════
-
-
-// ═══════════════════════════════════════════════════════════════════
-// 🎯 Formatting Functions
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Format a duration in milliseconds for display
- * @param {number} ms - Duration in milliseconds
- * @returns {string} Formatted duration string
- */
 export function formatDuration(ms) {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-/**
- * Format a compact number (e.g., 1.2K, 3.4M)
- * @param {number} value - Number to format
- * @returns {string} Compact number string
- */
 export function formatCompactNumber(value) {
   if (!Number.isFinite(value)) return '0';
   if (value >= 1000000) return `${(value / 1000000).toFixed(value >= 10000000 ? 0 : 1)}M`;
@@ -85,132 +28,38 @@ export function formatCompactNumber(value) {
   return Math.round(value).toString();
 }
 
-/**
- * Format tool arguments for compact display
- * @param {string} toolName - Name of the tool
- * @param {object} args - Tool arguments
- * @returns {string} Formatted argument preview
- */
 export function formatToolArgs(toolName, args) {
+  const dim = chalk.hex(DEFAULT_THEME.muted);
   if (!args || Object.keys(args).length === 0) return '';
-  
-  // Show the most relevant arg for common tools
-  if (args.path) return chalk.dim(args.path);
-  if (args.command) return chalk.dim(args.command.substring(0, 50) + (args.command.length > 50 ? '...' : ''));
-  if (args.query) return chalk.dim(`"${args.query.substring(0, 40)}${args.query.length > 40 ? '...' : ''}"`);
-  if (args.url) return chalk.dim(args.url.substring(0, 50));
-  if (args.file) return chalk.dim(args.file);
-  
-  // Fallback: show first arg
+
+  if (args.path) return dim(args.path);
+  if (args.command) return dim(args.command.substring(0, 50) + (args.command.length > 50 ? '...' : ''));
+  if (args.query) return dim(`"${args.query.substring(0, 40)}${args.query.length > 40 ? '...' : ''}"`);
+  if (args.url) return dim(args.url.substring(0, 50));
+  if (args.file) return dim(args.file);
+
   const firstKey = Object.keys(args)[0];
-  const firstVal = typeof args[firstKey] === 'string' 
-    ? args[firstKey].substring(0, 40) 
+  const firstVal = typeof args[firstKey] === 'string'
+    ? args[firstKey].substring(0, 40)
     : JSON.stringify(args[firstKey]).substring(0, 40);
-  return chalk.dim(`${firstKey}: ${firstVal}${firstVal.length >= 40 ? '...' : ''}`);
+  return dim(`${firstKey}: ${firstVal}${firstVal.length >= 40 ? '...' : ''}`);
 }
 
-/**
- * Truncate text inline with ellipsis
- * @param {string} text - Text to truncate
- * @param {number} maxLength - Maximum length
- * @returns {string} Truncated text
- */
 export function truncateInline(text, maxLength = 56) {
-  if (!text || text.length <= maxLength) {
-    return text || '';
-  }
+  if (!text || text.length <= maxLength) return text || '';
   return `${text.substring(0, maxLength - 3).trimEnd()}...`;
 }
 
-/**
- * Shorten a model label for display
- * @param {string} modelId - Full model ID
- * @returns {string} Shortened model label
- */
 export function shortenModelLabel(modelId) {
-  if (!modelId) {
-    return 'no-model';
-  }
-  return truncateInline(modelId, 28);
+  if (!modelId) return 'no-model';
+  const [provider, model] = String(modelId).split('/');
+  const knownProviders = new Set(['anthropic', 'openai', 'google', 'meta-llama', 'mistralai', 'moonshotai', 'x-ai']);
+  const label = model && knownProviders.has(provider) ? model : String(modelId).split('/').pop();
+  return truncateInline(label.replace(/-\d{8}$/, ''), 28);
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// 🖨️ Print Functions
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Print the OpenAgent banner
- * @param {string} version - Version string
- */
-export function printBanner(version) {
-  console.log('');
-  console.log(chalk.hex(themes.catppuccin.muted)(`  openagent v${version}`));
-  console.log(chalk.hex(themes.catppuccin.muted)(`  ${'─'.repeat(Math.min(process.stdout.columns || 80, 72))}`));
-}
-
-/**
- * Print a smart error with suggestions
- * @param {string} errorType - Type of error
- * @param {object} details - Error details including message and suggestions
- */
-export function showSmartError(errorType, details = {}) {
-  const { message, suggestions = [] } = details;
-  
-  let content = `${chalk.red('✗ Error')}\n\n${chalk.white(message || 'An error occurred')}`;
-  
-  if (suggestions.length > 0) {
-    content += `\n\n${chalk.bold('Suggestions:')}`;
-    for (const suggestion of suggestions) {
-      content += `\n${chalk.green('•')} ${suggestion}`;
-    }
-  }
-  
-  console.log(boxen(content, box.error));
-}
-
-/**
- * Format a tool call for display
- * @param {string} toolName - Name of the tool
- * @param {object} args - Tool arguments
- * @param {number} count - Call count
- * @param {number} startTime - Task start time
- * @returns {string} Formatted tool call string
- */
-export function formatToolCall(toolName, args, count, startTime) {
-  const elapsed = Date.now() - startTime;
-  const elapsedStr = formatDuration(elapsed);
-  const argPreview = formatToolArgs(toolName, args);
-  return `${chalk.yellow('▸')} ${chalk.yellow(toolName)} ${argPreview}${chalk.dim(` [${elapsedStr}]`)}`;
-}
-
-/**
- * Print goodbye banner
- */
-export function printGoodbye() {
-  console.log('');
-  console.log(chalk.dim('  session complete'));
-}
-
-/**
- * Print AI response in a box
- * @param {string} content - Response content
- */
-export function printAIResponse(content) {
-  if (!content) return;
-  console.log('');
-  const bar = g.ai('│');
-  console.log(String(content).split('\n').map(line => `  ${bar} ${chalk.white(line)}`).join('\n'));
-}
-
-/**
- * Create a mini progress bar
- * @param {number} current - Current value
- * @param {number} total - Total value
- * @param {number} length - Bar length
- * @returns {string} Progress bar string
- */
 export function miniBar(current, total, length = 12) {
-  if (total === 0) return chalk.dim('░'.repeat(length));
+  if (total === 0) return chalk.hex(DEFAULT_THEME.muted)('░'.repeat(length));
   const filled = Math.round((current / total) * length);
-  return chalk.green('█'.repeat(filled)) + chalk.dim('░'.repeat(length - filled));
+  return chalk.hex(DEFAULT_THEME.success)('█'.repeat(filled)) + chalk.hex(DEFAULT_THEME.muted)('░'.repeat(length - filled));
 }

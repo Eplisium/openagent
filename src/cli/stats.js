@@ -3,8 +3,15 @@
  */
 
 import chalk from '../utils/chalk-compat.js';
-import boxen from 'boxen';
-import { box, formatCompactNumber, miniBar } from './ui.js';
+import { formatCompactNumber, miniBar } from './ui.js';
+
+function printPanel(label, lines) {
+  const width = Math.min(process.stdout.columns || 80, 65);
+  console.log('');
+  console.log(chalk.dim(`  ── ${label} ${'─'.repeat(Math.max(1, width - label.length - 4))}`));
+  for (const line of lines) console.log(`  ${line}`);
+  console.log(chalk.dim(`  ${'─'.repeat(width)}`));
+}
 
 /**
  * Show session statistics (agent stats, tool stats, subagent stats).
@@ -16,30 +23,36 @@ export function showStats(session) {
   const toolStats = session.toolRegistry.getStats();
   const subagentStats = session.subagentManager?.getStats() || {};
 
-  let content = `${chalk.bold('Session')}\n\n` +
-    `${chalk.cyan('Messages:')} ${stats.totalMessages}\n` +
-    `${chalk.cyan('Iterations:')} ${stats.iterations}\n` +
-    `${chalk.cyan('Tokens:')} ${stats.totalTokensUsed.toLocaleString()}\n` +
-    `${chalk.cyan('Context Est:')} ${formatCompactNumber(contextStats.usedTokens)}/${formatCompactNumber(contextStats.maxTokens)} (${contextStats.percent}%)\n` +
-    `${chalk.cyan('Compactions:')} ${contextStats.compactions}\n` +
-    `${chalk.cyan('Tool Calls:')} ${stats.toolExecutions}\n` +
-    `${chalk.cyan('Tools Used:')} ${stats.toolsUsed.join(', ') || 'None'}\n\n` +
-    `${chalk.bold('Registry')}\n\n` +
-    `${chalk.cyan('Executions:')} ${toolStats.totalExecutions}\n` +
-    `${chalk.cyan('Success Rate:')} ${toolStats.successRate}\n` +
-    `${chalk.cyan('Avg Duration:')} ${toolStats.avgDuration}`;
+  const lines = [
+    `${chalk.bold('Session')}`,
+    `${chalk.cyan('Messages:')} ${stats.totalMessages}`,
+    `${chalk.cyan('Iterations:')} ${stats.iterations}`,
+    `${chalk.cyan('Tokens:')} ${stats.totalTokensUsed.toLocaleString()}`,
+    `${chalk.cyan('Context Est:')} ${formatCompactNumber(contextStats.usedTokens)}/${formatCompactNumber(contextStats.maxTokens)} (${contextStats.percent}%)`,
+    `${chalk.cyan('Compactions:')} ${contextStats.compactions}`,
+    `${chalk.cyan('Tool Calls:')} ${stats.toolExecutions}`,
+    `${chalk.cyan('Tools Used:')} ${stats.toolsUsed.join(', ') || 'None'}`,
+    '',
+    `${chalk.bold('Registry')}`,
+    `${chalk.cyan('Executions:')} ${toolStats.totalExecutions}`,
+    `${chalk.cyan('Success Rate:')} ${toolStats.successRate}`,
+    `${chalk.cyan('Avg Duration:')} ${toolStats.avgDuration}`,
+  ];
 
   if (subagentStats.totalTasks > 0) {
-    content += `\n\n${chalk.bold('Subagents')}\n\n` +
-      `${chalk.cyan('Total Tasks:')} ${subagentStats.totalTasks}\n` +
-      `${chalk.cyan('Completed:')} ${subagentStats.completedTasks}\n` +
-      `${chalk.cyan('Failed:')} ${subagentStats.failedTasks}\n` +
-      `${chalk.cyan('Success Rate:')} ${subagentStats.successRate}\n` +
-      `${chalk.cyan('Avg Duration:')} ${subagentStats.avgDuration}` +
-      (subagentStats.totalCost > 0 ? `\n${chalk.cyan('Subagent Cost:')} $${subagentStats.totalCost.toFixed(6)}` : '');
+    lines.push(
+      '',
+      `${chalk.bold('Subagents')}`,
+      `${chalk.cyan('Total Tasks:')} ${subagentStats.totalTasks}`,
+      `${chalk.cyan('Completed:')} ${subagentStats.completedTasks}`,
+      `${chalk.cyan('Failed:')} ${subagentStats.failedTasks}`,
+      `${chalk.cyan('Success Rate:')} ${subagentStats.successRate}`,
+      `${chalk.cyan('Avg Duration:')} ${subagentStats.avgDuration}`,
+    );
+    if (subagentStats.totalCost > 0) lines.push(`${chalk.cyan('Subagent Cost:')} $${subagentStats.totalCost.toFixed(6)}`);
   }
 
-  console.log(boxen(content, { ...box.stats, title: '📊 Stats' }));
+  printPanel('stats', lines);
 }
 
 /**
@@ -57,23 +70,27 @@ export function showCost(session, sessionStartTime, taskCount) {
   const subagentCost = subagentStats.totalCost || 0;
   const totalCost = clientStats.totalCost + subagentCost;
 
-  let content = `${chalk.bold('Session Cost')}\n\n` +
-    `${chalk.cyan('Session Duration:')} ${sessionMinutes} minutes\n` +
-    `${chalk.cyan('Main Agent Cost:')} $${clientStats.totalCost.toFixed(6)}\n`;
+  const lines = [
+    `${chalk.bold('Session Cost')}`,
+    `${chalk.cyan('Session Duration:')} ${sessionMinutes} minutes`,
+    `${chalk.cyan('Main Agent Cost:')} $${clientStats.totalCost.toFixed(6)}`,
+  ];
 
   if (subagentCost > 0) {
-    content += `${chalk.cyan('Subagent Cost:')} $${subagentCost.toFixed(6)}\n`;
+    lines.push(`${chalk.cyan('Subagent Cost:')} $${subagentCost.toFixed(6)}`);
   }
 
-  content += `${chalk.bold('Total Cost:')} $${totalCost.toFixed(6)}\n` +
-    `${chalk.cyan('Budget Used:')} $${clientStats.budgetUsed.toFixed(6)} / $${clientStats.budgetLimit}\n` +
-    `${chalk.cyan('Budget Remaining:')} $${clientStats.budgetRemaining.toFixed(6)}\n` +
-    `${chalk.cyan('Total Requests:')} ${clientStats.requestCount}\n` +
-    `${chalk.cyan('Avg Duration:')} ${clientStats.avgDuration}\n` +
-    `${chalk.cyan('Cache Size:')} ${clientStats.cacheSize} entries\n` +
-    `${chalk.cyan('Tasks Completed:')} ${taskCount}`;
+  lines.push(
+    `${chalk.bold('Total Cost:')} $${totalCost.toFixed(6)}`,
+    `${chalk.cyan('Budget Used:')} $${clientStats.budgetUsed.toFixed(6)} / $${clientStats.budgetLimit}`,
+    `${chalk.cyan('Budget Remaining:')} ${clientStats.budgetRemaining.toFixed(6)}`,
+    `${chalk.cyan('Total Requests:')} ${clientStats.requestCount}`,
+    `${chalk.cyan('Avg Duration:')} ${clientStats.avgDuration}`,
+    `${chalk.cyan('Cache Size:')} ${clientStats.cacheSize} entries`,
+    `${chalk.cyan('Tasks Completed:')} ${taskCount}`,
+  );
 
-  console.log(boxen(content, { ...box.stats, title: '💰 Cost' }));
+  printPanel('cost', lines);
 }
 
 /**
@@ -138,5 +155,5 @@ export function showAgents(session) {
     content += `\n  ${spec.name.padEnd(16)} ${chalk.gray(spec.description)}`;
   }
 
-  console.log(boxen(content, { ...box.info, title: '🤝 Subagent System', titleAlignment: 'center' }));
+  printPanel('agents', content.split('\n'));
 }

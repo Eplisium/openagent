@@ -6,8 +6,103 @@
  * that can be applied throughout the UI.
  */
 
-export const themes = {
+const syntaxPalettes = {
   catppuccin: {
+    syntaxKeyword: '#cba6f7',
+    syntaxString: '#a6e3a1',
+    syntaxNumber: '#fab387',
+    syntaxComment: '#6c7086',
+    syntaxFunction: '#f9e2af',
+    syntaxType: '#89b4fa',
+    syntaxProperty: '#89b4fa',
+    syntaxOperator: '#cdd6f4',
+    syntaxPunctuation: '#9399b2',
+  },
+  nord: {
+    syntaxKeyword: '#b48ead',
+    syntaxString: '#a3be8c',
+    syntaxNumber: '#d08770',
+    syntaxComment: '#4c566a',
+    syntaxFunction: '#ebcb8b',
+    syntaxType: '#81a1c1',
+    syntaxProperty: '#8fbcbb',
+    syntaxOperator: '#eceff4',
+    syntaxPunctuation: '#d8dee9',
+  },
+  dracula: {
+    syntaxKeyword: '#ff79c6',
+    syntaxString: '#f1fa8c',
+    syntaxNumber: '#bd93f9',
+    syntaxComment: '#6272a4',
+    syntaxFunction: '#50fa7b',
+    syntaxType: '#8be9fd',
+    syntaxProperty: '#8be9fd',
+    syntaxOperator: '#ff79c6',
+    syntaxPunctuation: '#f8f8f2',
+  },
+  monokai: {
+    syntaxKeyword: '#f92672',
+    syntaxString: '#e6db74',
+    syntaxNumber: '#ae81ff',
+    syntaxComment: '#75715e',
+    syntaxFunction: '#a6e22e',
+    syntaxType: '#66d9ef',
+    syntaxProperty: '#66d9ef',
+    syntaxOperator: '#f92672',
+    syntaxPunctuation: '#f8f8f2',
+  },
+  gruvbox: {
+    syntaxKeyword: '#fb4934',
+    syntaxString: '#b8bb26',
+    syntaxNumber: '#d3869b',
+    syntaxComment: '#928374',
+    syntaxFunction: '#fabd2f',
+    syntaxType: '#83a598',
+    syntaxProperty: '#8ec07c',
+    syntaxOperator: '#fe8019',
+    syntaxPunctuation: '#ebdbb2',
+  },
+  light: {
+    syntaxKeyword: '#d73a49',
+    syntaxString: '#22863a',
+    syntaxNumber: '#005cc5',
+    syntaxComment: '#6a737d',
+    syntaxFunction: '#6f42c1',
+    syntaxType: '#005cc5',
+    syntaxProperty: '#032f62',
+    syntaxOperator: '#d73a49',
+    syntaxPunctuation: '#24292e',
+  },
+  tokyonight: {
+    syntaxKeyword: '#bb9af7',
+    syntaxString: '#9ece6a',
+    syntaxNumber: '#ff9e64',
+    syntaxComment: '#565f89',
+    syntaxFunction: '#e0af68',
+    syntaxType: '#7dcfff',
+    syntaxProperty: '#7aa2f7',
+    syntaxOperator: '#89ddff',
+    syntaxPunctuation: '#c0caf5',
+  },
+  solarized: {
+    syntaxKeyword: '#859900',
+    syntaxString: '#2aa198',
+    syntaxNumber: '#d33682',
+    syntaxComment: '#586e75',
+    syntaxFunction: '#b58900',
+    syntaxType: '#268bd2',
+    syntaxProperty: '#6c71c4',
+    syntaxOperator: '#cb4b16',
+    syntaxPunctuation: '#93a1a1',
+  },
+};
+
+function withSyntax(id, theme) {
+  return { ...theme, ...syntaxPalettes[id] };
+}
+
+export const themes = {
+  catppuccin: withSyntax('catppuccin', {
     name: 'Catppuccin Mocha',
     bg: '', // terminal default
     text: '#cdd6f4',
@@ -20,8 +115,8 @@ export const themes = {
     user: '#89b4fa',
     assistant: '#cdd6f4',
     header: '#cba6f7',
-  },
-  nord: {
+  }),
+  nord: withSyntax('nord', {
     name: 'Nord',
     text: '#eceff4',
     accent: '#88c0d0',
@@ -33,8 +128,8 @@ export const themes = {
     user: '#88c0d0',
     assistant: '#eceff4',
     header: '#b48ead',
-  },
-  dracula: {
+  }),
+  dracula: withSyntax('dracula', {
     name: 'Dracula',
     text: '#f8f8f2',
     accent: '#bd93f9',
@@ -46,8 +141,8 @@ export const themes = {
     user: '#bd93f9',
     assistant: '#f8f8f2',
     header: '#ff79c6',
-  },
-  monokai: {
+  }),
+  monokai: withSyntax('monokai', {
     name: 'Monokai',
     text: '#f8f8f2',
     accent: '#66d9ef',
@@ -59,8 +154,8 @@ export const themes = {
     user: '#66d9ef',
     assistant: '#f8f8f2',
     header: '#f92672',
-  },
-  gruvbox: {
+  }),
+  gruvbox: withSyntax('gruvbox', {
     name: 'Gruvbox',
     text: '#ebdbb2',
     accent: '#83a598',
@@ -72,8 +167,8 @@ export const themes = {
     user: '#83a598',
     assistant: '#ebdbb2',
     header: '#d3869b',
-  },
-  light: {
+  }),
+  light: withSyntax('light', {
     name: 'Light',
     text: '#333333',
     accent: '#0066cc',
@@ -85,8 +180,8 @@ export const themes = {
     user: '#0066cc',
     assistant: '#333333',
     header: '#005cc5',
-  },
-  tokyonight: {
+  }),
+  tokyonight: withSyntax('tokyonight', {
     name: 'Tokyo Night',
     text: '#c0caf5',
     accent: '#7aa2f7',
@@ -98,8 +193,8 @@ export const themes = {
     user: '#7aa2f7',
     assistant: '#c0caf5',
     header: '#bb9af7',
-  },
-  solarized: {
+  }),
+  solarized: withSyntax('solarized', {
     name: 'Solarized Dark',
     text: '#839496',
     accent: '#268bd2',
@@ -111,7 +206,7 @@ export const themes = {
     user: '#268bd2',
     assistant: '#93a1a1',
     header: '#6c71c4',
-  },
+  }),
 };
 
 /**

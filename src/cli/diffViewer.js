@@ -1,42 +1,123 @@
-// chalk removed — not used in this file
+import chalk from '../utils/chalk-compat.js';
+import { highlightCode } from './syntaxHighlight.js';
 
-export function renderDiff(oldContent, newContent, filePath, theme) {
+export function renderDiff(oldContent, newContent, filePath, theme = {}, options = {}) {
+  const { stat = false, contextLines = 3 } = options;
   const oldLines = oldContent.split('\n');
   const newLines = newContent.split('\n');
   const diff = computeDiff(oldLines, newLines);
+  const stats = getDiffStats(diff);
+  const colors = normalizeTheme(theme);
+  const fileSize = Buffer.byteLength(newContent || '', 'utf8');
+  const sizeLabel = fileSize > 1024 ? `${(fileSize / 1024).toFixed(1)}KB` : `${fileSize}B`;
 
   const lines = [];
-  lines.push(theme.accent(`  ┌─ ${filePath}`));
+  lines.push(colors.accent(`  ┌─ ${filePath} ${colors.muted(`(${sizeLabel})`)}`));
+
+  if (stat) {
+    const total = Math.max(1, stats.additions + stats.deletions);
+    const width = 28;
+    const addWidth = Math.round((stats.additions / total) * width);
+    const delWidth = Math.round((stats.deletions / total) * width);
+    const bar = colors.success('+'.repeat(addWidth)) + colors.error('-'.repeat(delWidth));
+    lines.push(`  │ ${bar} ${colors.success(`+${stats.additions}`)} ${colors.error(`-${stats.deletions}`)}`);
+    lines.push(colors.accent('  └─'));
+    return lines.join('\n');
+  }
 
   let lastWasChange = false;
-  for (const hunk of diff.hunks) {
+  for (const hunk of compactHunks(diff.hunks, contextLines)) {
     for (const line of hunk.lines) {
       const num = String(line.oldNum || line.newNum || '').padStart(4);
+      const content = highlightLine(line.content, filePath, theme);
       switch (line.type) {
         case 'context':
           if (lastWasChange) lines.push('');
-          lines.push(`  ${theme.muted(num)} │ ${line.content}`);
+          lines.push(`  ${colors.muted(num)} │ ${content}`);
           lastWasChange = false;
           break;
         case 'remove':
-          lines.push(`  ${theme.muted(num)} │ ${theme.error('- ' + line.content)}`);
+          lines.push(`  ${colors.muted(num)} │ ${colors.error('- ' + content)}`);
           lastWasChange = true;
           break;
         case 'add':
-          lines.push(`  ${theme.muted(num)} │ ${theme.success('+ ' + line.content)}`);
+          lines.push(`  ${colors.muted(num)} │ ${colors.success('+ ' + content)}`);
           lastWasChange = true;
+          break;
+        case 'skip':
+          lines.push(colors.muted(`  .... │ ${line.content}`));
+          lastWasChange = false;
           break;
       }
     }
     lines.push('');
   }
 
-  const stats = getDiffStats(diff);
-  const addStr = theme.success(`+${stats.additions}`);
-  const delStr = theme.error(`-${stats.deletions}`);
+  const addStr = colors.success(`+${stats.additions}`);
+  const delStr = colors.error(`-${stats.deletions}`);
   lines.push(`  └─ ${addStr} ${delStr}`);
 
   return lines.join('\n');
+}
+
+function normalizeTheme(theme = {}) {
+  const role = (name, fallback) => {
+    if (typeof theme[name] === 'function') return theme[name];
+    if (typeof theme[name] === 'string') return chalk.hex(theme[name]);
+    return fallback;
+  };
+  return {
+    accent: role('accent', chalk.cyan),
+    muted: role('muted', chalk.gray),
+    success: role('success', chalk.green),
+    error: role('error', chalk.red),
+  };
+}
+
+function highlightLine(content, filePath, theme) {
+  const ext = String(filePath || '').split('.').pop() || 'text';
+  const lang = {
+    js: 'javascript',
+    jsx: 'javascript',
+    ts: 'typescript',
+    tsx: 'typescript',
+    py: 'python',
+    yml: 'yaml',
+    yaml: 'yaml',
+    json: 'json',
+    rs: 'rust',
+    sh: 'bash',
+  }[ext] || ext;
+  return highlightCode(content, lang, theme);
+}
+
+function compactHunks(hunks, contextLines) {
+  if (contextLines < 0) return hunks;
+  return hunks.map((hunk) => {
+    const changed = new Set();
+    hunk.lines.forEach((line, index) => {
+      if (line.type !== 'context') {
+        const start = Math.max(0, index - contextLines);
+        const end = Math.min(hunk.lines.length - 1, index + contextLines);
+        for (let i = start; i <= end; i++) changed.add(i);
+      }
+    });
+    const lines = [];
+    let skipped = 0;
+    hunk.lines.forEach((line, index) => {
+      if (changed.has(index) || line.type !== 'context') {
+        if (skipped > 0) {
+          lines.push({ type: 'skip', content: `${skipped} unchanged line${skipped === 1 ? '' : 's'}` });
+          skipped = 0;
+        }
+        lines.push(line);
+      } else {
+        skipped++;
+      }
+    });
+    if (skipped > 0) lines.push({ type: 'skip', content: `${skipped} unchanged line${skipped === 1 ? '' : 's'}` });
+    return { ...hunk, lines };
+  });
 }
 
 function computeDiff(oldLines, newLines) {

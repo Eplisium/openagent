@@ -140,10 +140,15 @@ export class ChannelRouter extends EventEmitter {
         sessionId: targetId,
         internalSessionId: session.sessionId,
         iteration: session.agent?.iterationCount ?? null,
+        iterations: result?.iterations ?? session.agent?.iterationCount ?? null,
         content: responseText,
         stopReason: result?.stopReason,
         completed: result?.completed,
         stats: result?.stats,
+        performance: result?.performance,
+        model: session.agent?.model,
+        contextPercent: session.agent?.getContextStats?.()?.percent ?? session.agent?.getContextUsagePercent?.() ?? null,
+        durationMs: result?.durationMs ?? result?.performance?.duration ?? null,
       });
 
       // Route response back through the originating channel
@@ -253,6 +258,7 @@ export class ChannelRouter extends EventEmitter {
       this._sendEvent(adapter, targetId, GATEWAY_EVENT_TYPES.TOOL_CALL_START, {
         ...eventBase(),
         toolName,
+        args,
         argsPreview: previewValue(args),
       });
     };
@@ -267,6 +273,7 @@ export class ChannelRouter extends EventEmitter {
         ...eventBase(),
         toolName,
         durationMs: Date.now() - startedAt,
+        result,
         ...summarizeToolResult(result),
       });
     };

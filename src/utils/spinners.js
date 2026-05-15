@@ -70,16 +70,19 @@ export function thinkingSpinner(message = 'Thinking', theme = null) {
  * @param {string} message - Initial message (e.g., 'Working...', 'Reading file...')
  * @returns {{ stop: Function, setMessage: Function, getElapsed: Function }}
  */
-export function contextualSpinner(message = 'Working...') {
+export function contextualSpinner(message = 'Working...', theme = null) {
   let currentMessage = message;
   let elapsed = 0;
   const startTime = Date.now();
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let frame = 0;
+  const toolColor = theme?.tool ? chalk.hex(theme.tool) : chalk.yellow;
+  const mutedColor = theme?.muted ? chalk.hex(theme.muted) : chalk.gray;
+  const textColor = theme?.text ? chalk.hex(theme.text) : chalk.white;
 
   const interval = setInterval(() => {
     elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    process.stdout.write(`\r  ${chalk.yellow(frames[frame])} ${chalk.gray(currentMessage)} ${chalk.white(elapsed + 's')}  `);
+    process.stdout.write(`\r  ${toolColor(frames[frame])} ${mutedColor(currentMessage)} ${textColor(elapsed + 's')}  `);
     frame = (frame + 1) % frames.length;
   }, 80);
 
@@ -97,14 +100,13 @@ export function contextualSpinner(message = 'Working...') {
  * Create an AI responding indicator
  * @returns {{ clear: Function }}
  */
-export function respondingIndicator() {
-  const indicator = chalk.cyan('▌ ') + chalk.gray('responding…');
-  process.stdout.write(indicator + ' ');
+export function respondingIndicator(theme = null, message = 'Thinking') {
+  const spinner = thinkingSpinner(message, theme);
 
   return {
-    clear: () => {
-      process.stdout.write('\r' + ' '.repeat(indicator.length + 5) + '\r');
-    }
+    clear: () => spinner.stop(),
+    stop: () => spinner.stop(),
+    setMessage: (msg) => spinner.setMessage(msg),
   };
 }
 

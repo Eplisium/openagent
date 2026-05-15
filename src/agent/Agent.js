@@ -1718,6 +1718,24 @@ Task: ${userInput}`;
       this.pushMessage({ role: 'user', content: hint });
     }
 
+    // Argument parse failure recovery hints — when the model's tool call arguments
+    // were malformed JSON and couldn't be parsed, help it break the retry loop.
+    const parseFailures = toolResults.filter(r =>
+      r.result &&
+      r.result.success === false &&
+      r.result.error &&
+      r.result.error.includes('could not be parsed as valid JSON')
+    );
+    if (parseFailures.length > 0) {
+      const failure = parseFailures[0];
+      const hint = `[System] Tool "${failure.toolName}" failed because your arguments were not valid JSON. ` +
+        `This happens when the arguments string is truncated, contains unescaped characters, or is improperly formatted. ` +
+        `FIX: Output the tool call with a proper JSON arguments object, e.g.: {"path": "...", "content": "..."}. ` +
+        `For large content, break it into smaller chunks or use append_file after an initial write_file. ` +
+        `Do NOT retry with the same malformed arguments.`;
+      this.pushMessage({ role: 'user', content: hint });
+    }
+
     // Record in history
     const iterationRecord = {
       iteration: this.iterationCount,

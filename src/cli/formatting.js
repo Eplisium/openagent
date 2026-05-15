@@ -60,7 +60,10 @@ export function truncateInline(text, maxLength = 56) {
  */
 export function shortenModelLabel(modelId) {
   if (!modelId) return 'unknown';
-  return modelId.split('/').pop();
+  const [provider, model] = String(modelId).split('/');
+  const knownProviders = new Set(['anthropic', 'openai', 'google', 'meta-llama', 'mistralai', 'moonshotai', 'x-ai']);
+  const label = model && knownProviders.has(provider) ? model : String(modelId).split('/').pop();
+  return truncateInline(label.replace(/-\d{8}$/, ''), 28);
 }
 
 /**

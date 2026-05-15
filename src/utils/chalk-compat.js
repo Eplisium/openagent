@@ -43,15 +43,54 @@ const BG_STYLES = {
 
 const ALL_STYLES = { ...STYLES, ...BG_STYLES };
 
+function parseHexColor(hex) {
+  const clean = String(hex || '').replace(/^#/, '').trim();
+  const expanded = clean.length === 3
+    ? clean.split('').map(ch => ch + ch).join('')
+    : clean;
+  if (!/^[0-9a-f]{6}$/i.test(expanded)) return null;
+  return [
+    Number.parseInt(expanded.slice(0, 2), 16),
+    Number.parseInt(expanded.slice(2, 4), 16),
+    Number.parseInt(expanded.slice(4, 6), 16),
+  ];
+}
+
+function ansiColor(open, close) {
+  return (text) => {
+    const value = text || '';
+    if (!value) return '';
+    return `${open}${value}${close}`;
+  };
+}
+
+function fgHex(hex) {
+  const rgb = parseHexColor(hex);
+  return rgb ? ansiColor(`\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`, '\x1b[39m') : (text) => text || '';
+}
+
+function bgHex(hex) {
+  const rgb = parseHexColor(hex);
+  return rgb ? ansiColor(`\x1b[48;2;${rgb[0]};${rgb[1]};${rgb[2]}m`, '\x1b[49m') : (text) => text || '';
+}
+
+function fgRgb(r, g, b) {
+  return ansiColor(`\x1b[38;2;${r};${g};${b}m`, '\x1b[39m');
+}
+
+function bgRgb(r, g, b) {
+  return ansiColor(`\x1b[48;2;${r};${g};${b}m`, '\x1b[49m');
+}
+
 function createChainedStyle(appliedFns = []) {
   return new Proxy(function () {}, {
     get(_, prop) {
       if (prop === 'toJSON') return () => '';
       // Handle chalk methods not available in picocolors (hex, rgb, ansi256 + bg variants)
-      if (prop === 'hex') return () => (text) => text;
-      if (prop === 'bgHex') return () => (text) => text;
-      if (prop === 'rgb') return () => (text) => text;
-      if (prop === 'bgRgb') return () => (text) => text;
+      if (prop === 'hex') return (hex) => createChainedStyle([...appliedFns, fgHex(hex)]);
+      if (prop === 'bgHex') return (hex) => createChainedStyle([...appliedFns, bgHex(hex)]);
+      if (prop === 'rgb') return (r, g, b) => createChainedStyle([...appliedFns, fgRgb(r, g, b)]);
+      if (prop === 'bgRgb') return (r, g, b) => createChainedStyle([...appliedFns, bgRgb(r, g, b)]);
       if (prop === 'ansi256') return () => (text) => text;
       if (prop === 'bgAnsi256') return () => (text) => text;
       const fn = ALL_STYLES[prop];

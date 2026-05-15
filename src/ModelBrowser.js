@@ -8,7 +8,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import chalk from './utils/chalk-compat.js';
 // ora removed — not used
-import boxen from 'boxen';
 import inquirer from './utils/inquirer-compat.js';
 import { promptWithTerminalReset } from './cli/terminal.js';
 
@@ -514,20 +513,22 @@ export class ModelBrowser {
       ? new Date(model.created * 1000).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
       : 'Unknown';
     
-    console.log(boxen(
-      `${chalk.bold(model.name)}\n\n` +
-      `${chalk.gray('ID:')} ${chalk.cyan(model.id)}\n` +
-      `${chalk.gray('Provider:')} ${model.provider}\n` +
-      `${chalk.gray('Context:')} ${this.formatContext(model.contextLength)}\n` +
-      `${chalk.gray('Max Output:')} ${this.formatContext(model.maxOutput)}\n` +
-      `${chalk.gray('Input Price:')} $${model.inputPrice.toFixed(2)}/M tokens\n` +
-      `${chalk.gray('Output Price:')} $${model.outputPrice.toFixed(2)}/M tokens\n` +
-      `${chalk.gray('Vision:')} ${model.supportsVision ? '✓' : '✗'}\n` +
-      `${chalk.gray('Tools:')} ${model.supportsTools ? '✓' : '✗'}\n` +
-      `${chalk.gray('Released:')} ${releaseDate}\n` +
-      `${chalk.gray('Favorite:')} ${isFav ? '⭐' : '✗'}`,
-      { padding: 1, borderStyle: 'round', borderColor: 'cyan' }
-    ));
+    const width = Math.min(process.stdout.columns || 80, 72);
+    console.log('');
+    console.log(chalk.gray(`  ── model ${'─'.repeat(Math.max(1, width - 9))}`));
+    console.log(`  ${chalk.bold(model.name)}`);
+    console.log('');
+    console.log(`  ${chalk.gray('ID:')} ${chalk.cyan(model.id)}`);
+    console.log(`  ${chalk.gray('Provider:')} ${model.provider}`);
+    console.log(`  ${chalk.gray('Context:')} ${this.formatContext(model.contextLength)}`);
+    console.log(`  ${chalk.gray('Max Output:')} ${this.formatContext(model.maxOutput)}`);
+    console.log(`  ${chalk.gray('Input Price:')} $${model.inputPrice.toFixed(2)}/M tokens`);
+    console.log(`  ${chalk.gray('Output Price:')} $${model.outputPrice.toFixed(2)}/M tokens`);
+    console.log(`  ${chalk.gray('Vision:')} ${model.supportsVision ? '✓' : '✗'}`);
+    console.log(`  ${chalk.gray('Tools:')} ${model.supportsTools ? '✓' : '✗'}`);
+    console.log(`  ${chalk.gray('Released:')} ${releaseDate}`);
+    console.log(`  ${chalk.gray('Favorite:')} ${isFav ? '★' : '✗'}`);
+    console.log(chalk.gray(`  ${'─'.repeat(width)}`));
   }
 
   /**

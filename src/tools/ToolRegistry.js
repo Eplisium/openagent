@@ -370,7 +370,21 @@ export class ToolRegistry {
     if (!tool.parameters || !tool.parameters.required) {
       return null;
     }
-    
+
+    // If args failed JSON parsing upstream, give a clear explanation instead of
+    // per-parameter "missing" errors that send the LLM into a retry loop.
+    if (args && args._error && args._raw) {
+      const preview = args._preview || (args._raw.length > 200 ? args._raw.substring(0, 200) + '...' : args._raw);
+      return (
+        `Tool call arguments could not be parsed as valid JSON. ` +
+        `The model produced malformed argument text instead of a proper JSON object. ` +
+        `Required parameters: ${tool.parameters.required.join(', ')}. ` +
+        `Raw argument preview: ${preview}. ` +
+        (args._hint ? args._hint + ' ' : '') +
+        `Please retry with a valid JSON object containing all required fields.`
+      );
+    }
+
     for (const required of tool.parameters.required) {
       if (args[required] === undefined || args[required] === null) {
         return `Missing required parameter: ${required}`;
