@@ -543,6 +543,7 @@ export class CLI {
     this.taskStartTime = startTime;
     this.currentTask = task;
     this._toolLineStates = [];
+    this._taskCostStart = this.session?.agent?.client?.getStats?.()?.totalCost || 0;
     this._assistantHeaderPrintedForTask = null;
     let toolCallCount = 0;
     let responsePrinted = false;
@@ -656,10 +657,14 @@ export class CLI {
 
       await printEnhancedTaskSummary(this, result, duration);
 
+      // Reconcile cli.totalCost from client's actual cost tracking
+      const clientStats = this.session?.agent?.client?.getStats?.();
+      this.totalCost = clientStats?.totalCost ?? this.totalCost;
+
       if (this.state?.stats) {
         this.state.stats.totalTasks++;
         this.state.stats.totalTokens += result.stats?.totalTokensUsed || 0;
-        this.state.stats.totalCost += result.performance?.totalCost || 0;
+        this.state.stats.totalCost = this.totalCost;
       }
       this.history.push({
         type: 'agent', task,
@@ -703,6 +708,7 @@ export class CLI {
     this.taskStartTime = startTime;
     this.currentTask = multimodalMsg.content?.find(c => c.type === 'text')?.text || '[multimodal]';
     this._toolLineStates = [];
+    this._taskCostStart = this.session?.agent?.client?.getStats?.()?.totalCost || 0;
     this._assistantHeaderPrintedForTask = null;
     let toolCallCount = 0;
     let responsePrinted = false;
@@ -785,10 +791,14 @@ export class CLI {
       }
       await printEnhancedTaskSummary(this, result, duration);
 
+      // Reconcile cli.totalCost from client's actual cost tracking
+      const clientStats = this.session?.agent?.client?.getStats?.();
+      this.totalCost = clientStats?.totalCost ?? this.totalCost;
+
       if (this.state?.stats) {
         this.state.stats.totalTasks++;
         this.state.stats.totalTokens += result.stats?.totalTokensUsed || 0;
-        this.state.stats.totalCost += result.performance?.totalCost || 0;
+        this.state.stats.totalCost = this.totalCost;
       }
       this.history.push({
         type: 'agent', task: this.currentTask,
@@ -843,13 +853,14 @@ export class CLI {
 
         let fullContent = '';
         let sawToolCalls = false;
+        let lastUsage = null;
         for await (const chunk of stream) {
           if (chunk.type === 'content') {
             fullContent += chunk.content;
             streamRenderer.write(chunk.content);
           }
           else if (chunk.type === 'tool_calls') { sawToolCalls = true; }
-          else if (chunk.type === 'done') { this.session.agent.updateUsageStats(chunk.usage); }
+          else if (chunk.type === 'done') { lastUsage = chunk.usage; this.session.agent.updateUsageStats(chunk.usage); }
         }
 
         let displayContent = fullContent;
@@ -866,7 +877,7 @@ export class CLI {
           displayContent = '[Model returned an empty response.]';
         }
 
-        streamRenderer.finish(displayContent);
+        streamRenderer.finish(displayContent, lastUsage);
         this.session.agent.pushMessage({ role: 'user', content: message });
         this.session.agent.pushMessage({ role: 'assistant', content: displayContent });
         succeeded = true;

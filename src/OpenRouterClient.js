@@ -92,6 +92,9 @@ export class OpenRouterClient {
     this.totalCost = 0;
     this.totalInputTokens = 0;
     this.totalOutputTokens = 0;
+    this.totalCachedTokens = 0;
+    this.totalUpstreamCost = 0;
+    this._hasActualCost = false;
     this.requestHistory = [];
     
     // Response cache for identical requests (content-hashed keys) — LRU eviction
@@ -1274,6 +1277,10 @@ export class OpenRouterClient {
   trackRequest(requestId, payload, result, duration) {
     this.requestCount++;
     
+    let perRequestCost = 0;
+    let cachedTokens = 0;
+    let upstreamCost = null;
+    
     // Use actual usage data from API response
     if (result.usage) {
       const inputTokens = result.usage.prompt_tokens || 0;
@@ -1282,14 +1289,28 @@ export class OpenRouterClient {
       this.totalInputTokens += inputTokens;
       this.totalOutputTokens += outputTokens;
       
-      // Use actual cost from API if available, otherwise estimate
-      const actualCost = result.usage.cost;
-      const estimatedCost = actualCost !== undefined
-        ? actualCost
-        : (inputTokens * 0.00001) + (outputTokens * 0.00003);
+      // Track cached tokens for transparency
+      cachedTokens = result.usage.prompt_tokens_details?.cached_tokens || 0;
+      this.totalCachedTokens += cachedTokens;
       
-      this.totalCost += estimatedCost;
-      this.budgetUsed += estimatedCost;
+      // Track upstream cost (what the provider actually charged)
+      if (result.usage.cost_details?.upstream_inference_cost != null) {
+        upstreamCost = result.usage.cost_details.upstream_inference_cost;
+        this.totalUpstreamCost += upstreamCost;
+      }
+      
+      // Use actual cost from OpenRouter (always available in current API)
+      const actualCost = result.usage.cost;
+      if (actualCost != null && actualCost > 0) {
+        perRequestCost = actualCost;
+        this._hasActualCost = true;
+      } else {
+        // Fallback estimate only when API doesn't provide cost
+        perRequestCost = (inputTokens * 0.00001) + (outputTokens * 0.00003);
+      }
+      
+      this.totalCost += perRequestCost;
+      this.budgetUsed += perRequestCost;
     }
     
     this.requestHistory.push({
@@ -1298,8 +1319,11 @@ export class OpenRouterClient {
       model: payload.model,
       duration,
       success: true,
-      tokens: result.usage?.total_tokens || 0,
-      cost: this.totalCost,
+      inputTokens: result.usage?.prompt_tokens || 0,
+      outputTokens: result.usage?.completion_tokens || 0,
+      cachedTokens,
+      upstreamCost,
+      cost: perRequestCost,
     });
     
     // Keep history limited to 100 entries max
@@ -1349,11 +1373,43 @@ export class OpenRouterClient {
       ? this.requestHistory.reduce((sum, r) => sum + r.duration, 0) / this.requestHistory.length
       : 0;
     
+    const totalTokens = this.totalInputTokens + this.totalOutputTokens;
+    const lastRequest = this.requestHistory.length > 0
+      ? this.requestHistory[this.requestHistory.length - 1]
+      : null;
+    const avgCost = this.requestCount > 0 ? this.totalCost / this.requestCount : 0;
+    
+    // Per-model cost breakdown
+    const costByModel = {};
+    for (const req of this.requestHistory) {
+      const model = req.model || 'unknown';
+      if (!costByModel[model]) {
+        costByModel[model] = { cost: 0, requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+      }
+      costByModel[model].cost += req.cost;
+      costByModel[model].requests++;
+      costByModel[model].inputTokens += req.inputTokens || 0;
+      costByModel[model].outputTokens += req.outputTokens || 0;
+      costByModel[model].cachedTokens += req.cachedTokens || 0;
+    }
+    
     return {
       requestCount: this.requestCount,
       totalCost: this.totalCost,
       totalInputTokens: this.totalInputTokens,
       totalOutputTokens: this.totalOutputTokens,
+      totalTokens,
+      totalCachedTokens: this.totalCachedTokens,
+      totalUpstreamCost: this.totalUpstreamCost,
+      hasActualCost: this._hasActualCost,
+      lastRequestCost: lastRequest?.cost || 0,
+      avgCostPerRequest: avgCost,
+      costPerToken: totalTokens > 0 ? this.totalCost / totalTokens : 0,
+      costPerThousandTokens: totalTokens > 0 ? (this.totalCost / totalTokens) * 1000 : 0,
+      cacheHitRate: this.totalInputTokens > 0
+        ? Math.round((this.totalCachedTokens / this.totalInputTokens) * 100)
+        : 0,
+      costByModel,
       budgetUsed: this.budgetUsed,
       budgetLimit: this.budgetLimit,
       budgetRemaining: this.budgetLimit - this.budgetUsed,
@@ -1376,6 +1432,9 @@ export class OpenRouterClient {
     this.totalCost = 0;
     this.totalInputTokens = 0;
     this.totalOutputTokens = 0;
+    this.totalCachedTokens = 0;
+    this.totalUpstreamCost = 0;
+    this._hasActualCost = false;
     this.budgetUsed = 0;
     this.clearCache();
     this.inFlightRequests.clear();

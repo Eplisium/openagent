@@ -87,6 +87,29 @@ function visibleLen(str) {
   return String(str || '').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').length;
 }
 
+/**
+ * Smart money formatting: more decimal places for small costs, fewer for large.
+ */
+function formatSmartMoney(value) {
+  const v = Number(value || 0);
+  if (v === 0) return '$0.00';
+  if (v < 0.01) return '$' + v.toFixed(6);
+  if (v < 1) return '$' + v.toFixed(4);
+  return '$' + v.toFixed(2);
+}
+
+/**
+ * Format compact cost (single-line, minimal)
+ */
+function formatCompactCost(value) {
+  const v = Number(value || 0);
+  if (v === 0) return '$0.00';
+  if (v < 0.001) return '$' + v.toFixed(6);
+  if (v < 0.01) return '$' + v.toFixed(4);
+  if (v < 1) return '$' + v.toFixed(3);
+  return '$' + v.toFixed(2);
+}
+
 function contextBar(percent = 0, length = 8, theme = DEFAULT_THEME) {
   const pct = Math.max(0, Math.min(100, Number(percent) || 0));
   const filled = Math.round((pct / 100) * length);
@@ -185,7 +208,7 @@ export function printSystemMessage(cli, content) {
   return true;
 }
 
-export function printAssistantHeader(cli, { durationMs = null, toolCount = 0 } = {}) {
+export function printAssistantHeader(cli, { durationMs = null, toolCount = 0, usage = null } = {}) {
   const t = cli.theme || DEFAULT_THEME;
   if (cli._assistantHeaderPrintedForTask === cli.taskStartTime) return;
   cli._assistantHeaderPrintedForTask = cli.taskStartTime || Date.now();
@@ -199,8 +222,21 @@ export function printAssistantHeader(cli, { durationMs = null, toolCount = 0 } =
     `${toolCount || 0} tools`,
     `${used}/${max} ctx`,
     `${percent}%`,
-  ].filter(Boolean).join(' · ');
-  const inner = ` ${chalk.hex(t.tool || DEFAULT_THEME.tool)(model)}  ${chalk.hex(t.muted || DEFAULT_THEME.muted)(stats)} `;
+  ].filter(Boolean);
+  // Add cost and token counts if available from usage
+  if (usage) {
+    const cost = usage.cost;
+    if (cost != null && cost > 0) {
+      stats.push(formatCompactCost(cost));
+    }
+    const inputT = usage.prompt_tokens || 0;
+    const outputT = usage.completion_tokens || 0;
+    if (inputT > 0 || outputT > 0) {
+      stats.push(`${formatCompactNumber(inputT)}→${formatCompactNumber(outputT)} tok`);
+    }
+  }
+  const statsStr = stats.join(' · ');
+  const inner = ` ${chalk.hex(t.tool || DEFAULT_THEME.tool)(model)}  ${chalk.hex(t.muted || DEFAULT_THEME.muted)(statsStr)} `;
   const width = Math.min(Math.max(visibleLen(inner), 24), termWidth(96));
   const pad = Math.max(0, width - visibleLen(inner));
   const top = chalk.hex(t.accent || DEFAULT_THEME.accent)(`  ╭${'─'.repeat(width)}╮`);
@@ -216,16 +252,17 @@ export function printAssistantHeader(cli, { durationMs = null, toolCount = 0 } =
 /**
  * Print AI response with a subtle left accent bar.
  */
-export function printAIResponse(cli, content) {
+export function printAIResponse(cli, content, usage = null) {
   if (!content || !content.trim()) return false;
   if (cli._streamRenderer?.active) {
-    cli._streamRenderer.finish(content);
+    cli._streamRenderer.finish(content, usage);
     cli._streamRenderer = null;
     return true;
   }
   printAssistantHeader(cli, {
     durationMs: cli.taskStartTime ? Date.now() - cli.taskStartTime : null,
     toolCount: cli._toolLineStates?.length || 0,
+    usage,
   });
   const rendered = cli.isMarkdownEnabled() ? renderMarkdown(content, cli.theme) : content;
   console.log('');
@@ -244,8 +281,8 @@ export function printIntermediateContent(cli, content) {
   // Truncate long intermediate content to keep the display clean
   const maxLen = 500;
   const truncated = content.length > maxLen
-    ? content.substring(0, maxLen) + chalk.dim('…')
-    : content;
+  ? content.substring(0, maxLen) + chalk.dim(' [...]')
+  : content;
   console.log(muted(cli, `  │ ${truncated.trim()}`));
   return true;
 }
@@ -350,17 +387,32 @@ export function createStreamingRenderer(cli) {
       rowCount = 0;
       lastFrame = [];
     },
-    finish(finalContent = content) {
+    finish(finalContent = content, usage = null) {
       if (scheduled) clearTimeout(scheduled);
       scheduled = null;
       if (!active) {
-        if (finalContent && finalContent.trim()) printAIResponse(cli, finalContent);
+        if (finalContent && finalContent.trim()) printAIResponse(cli, finalContent, usage);
         return;
       }
       content = finalContent;
       renderFrame(true);
       active = false;
       process.stdout.write('\n');
+      // Show compact inline usage summary after stream completes
+      if (usage) {
+        const t = cli.theme || DEFAULT_THEME;
+        const parts = [];
+        const cost = usage.cost;
+        if (cost != null && cost > 0) parts.push(formatCompactCost(cost));
+        const inT = usage.prompt_tokens || 0;
+        const outT = usage.completion_tokens || 0;
+        if (inT > 0 || outT > 0) parts.push(`${formatCompactNumber(inT)}→${formatCompactNumber(outT)} tok`);
+        const cached = usage.prompt_tokens_details?.cached_tokens || 0;
+        if (cached > 0) parts.push(`${formatCompactNumber(cached)} cached`);
+        if (parts.length > 0) {
+          console.log(chalk.hex(t.muted)(`  └─ ${parts.join(' · ')}`));
+        }
+      }
     },
   };
 }
@@ -755,11 +807,18 @@ export async function printEnhancedTaskSummary(cli, result, duration) {
   const t = cli.theme;
   const contextColor = contextPct > 70 ? chalk.hex(t.error) : contextPct > 40 ? chalk.hex(t.warning) : chalk.hex(t.success);
 
+  // Get per-task cost from client (snapshot-based diff)
+  const clientStats = cli.session?.agent?.client?.getStats?.();
+  const costAtStart = cli._taskCostStart || 0;
+  const currentTotal = clientStats?.totalCost || 0;
+  const taskCost = currentTotal - costAtStart;
+
   const summaryParts = [
     chalk.hex(t.tool)(modelShort),
     chalk.hex(t.text)(`${seconds}s`),
     chalk.hex(t.text)(`${result.iterations} iter`),
     chalk.hex(t.text)(`${result.stats.toolExecutions} tools`),
+    ...(taskCost > 0 ? [chalk.hex(t.text)(formatCompactCost(taskCost))] : []),
     `${contextBar(contextPct, 8, t)} ${contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} ctx (${contextPct}%)`)}`,
   ];
   let line = `  ${chalk.hex(t.success)('✓')} ${summaryParts.join(chalk.hex(t.muted)(' · '))}`;
@@ -793,8 +852,10 @@ export async function printGoodbye(cli) {
   const elapsedMs = Date.now() - cli.sessionStartTime;
   const elapsedStr = formatElapsedTime(elapsedMs);
   const taskCount = cli.taskCount || 0;
-  const cost = cli.totalCost || 0;
-  const costStr = cost > 0 ? `$${cost.toFixed(4)}` : '$0.00';
+  // Reconcile from client for accurate cost
+  const clientStats = cli.session?.agent?.client?.getStats?.();
+  const cost = clientStats?.totalCost ?? cli.totalCost ?? 0;
+  const costStr = cost > 0 ? formatCompactCost(cost) : '$0.00';
 
   console.log('');
   console.log(muted(cli, `  session complete · ${taskCount} tasks · ${elapsedStr} · ${costStr}`));
@@ -967,22 +1028,62 @@ export function showCost(cli) {
   const autoGenStats = cli.session.autoGenBridge?.getStats?.() || {};
   const sessionDuration = Date.now() - cli.sessionStartTime;
   const sessionMinutes = Math.floor(sessionDuration / 60000);
+  const t = cli.theme;
 
   const subagentCost = subagentStats.totalCost || 0;
   const teamCost = autoGenStats.totalTeamCost || 0;
   const mainCost = clientStats.totalCost || 0;
   const totalCost = mainCost + subagentCost + teamCost;
-  const field = (name) => label(cli, name.padEnd(10));
-  const money = (value) => `$${Number(value || 0).toFixed(6)}`;
+  const field = (name) => label(cli, name.padEnd(12));
   const budgetLimit = clientStats.budgetLimit ?? 0;
   const budgetRemaining = clientStats.budgetRemaining ?? (budgetLimit - (clientStats.budgetUsed || 0));
   console.log('');
   console.log(divider(cli, 'cost'));
   console.log(`  ${field('Duration')}${sessionMinutes} minutes`);
-  console.log(`  ${field('Main')}${money(mainCost)} ${muted(cli, ' · ')}${label(cli, 'Subagents')}  ${money(subagentCost)} ${muted(cli, ' · ')}${label(cli, 'Team')}  ${money(teamCost)}`);
-  console.log(`  ${field('Total')}${chalk.hex(cli.theme.warning)(money(totalCost))}`);
-  console.log(`  ${field('Budget')}${money(clientStats.budgetUsed)} / $${budgetLimit} ${muted(cli, ' · ')}${label(cli, 'Remaining')}  ${money(budgetRemaining)}`);
-  console.log(`  ${field('Requests')}${clientStats.requestCount} ${muted(cli, ' · ')}${label(cli, 'Avg')}  ${clientStats.avgDuration} ${muted(cli, ' · ')}${label(cli, 'Cache')}  ${clientStats.cacheSize}`);
+  console.log(`  ${field('Main')}${formatSmartMoney(mainCost)} ${muted(cli, ' · ')}${label(cli, 'Subagents')} ${formatSmartMoney(subagentCost)} ${muted(cli, ' · ')}${label(cli, 'Team')} ${formatSmartMoney(teamCost)}`);
+  console.log(`  ${field('Total')}${chalk.hex(t.warning)(formatSmartMoney(totalCost))}`);
+  console.log(`  ${field('Budget')}${formatSmartMoney(clientStats.budgetUsed)} / ${formatSmartMoney(budgetLimit)} ${muted(cli, ' · ')}${label(cli, 'Remaining')} ${formatSmartMoney(budgetRemaining)}`);
+  console.log(`  ${field('Requests')}${clientStats.requestCount} ${muted(cli, ' · ')}${label(cli, 'Avg Duration')} ${clientStats.avgDuration} ${muted(cli, ' · ')}${label(cli, 'Cache')} ${clientStats.cacheSize}`);
+
+  // Token summary
+  const totalTokens = clientStats.totalTokens || (clientStats.totalInputTokens + clientStats.totalOutputTokens);
+  if (totalTokens > 0) {
+    console.log(`  ${field('Tokens')}${formatCompactNumber(clientStats.totalInputTokens)} in ${muted(cli, '·')} ${formatCompactNumber(clientStats.totalOutputTokens)} out ${muted(cli, '·')} ${formatCompactNumber(totalTokens)} total`);
+    const cpt = clientStats.costPerThousandTokens || 0;
+    if (cpt > 0) {
+      console.log(`  ${field('Cost/1K tok')}${formatSmartMoney(cpt)}`);
+    }
+  }
+
+  // Cache hit rate
+  if (clientStats.totalCachedTokens > 0) {
+    console.log(`  ${field('Cached')}${formatCompactNumber(clientStats.totalCachedTokens)} tokens ${muted(cli, '·')} ${label(cli, 'Hit rate')} ${clientStats.cacheHitRate}%`);
+  }
+
+  // Data source note
+  if (clientStats.hasActualCost) {
+    console.log(`  ${muted(cli, '  (costs from OpenRouter API)')}`);
+  } else {
+    console.log(`  ${chalk.hex(t.warning)('  (using estimated costs — actual API cost unavailable)')}`);
+  }
+
+  // Per-model breakdown
+  const modelEntries = Object.entries(clientStats.costByModel || {});
+  if (modelEntries.length > 1) {
+    console.log('');
+    console.log(chalk.hex(t.muted)(`  ── per-model ${'─'.repeat(Math.max(1, termWidth() - 13))}`));
+    for (const [model, stats] of modelEntries) {
+      const modelLabel = shortenModelLabel(model);
+      const pct = mainCost > 0 ? Math.round((stats.cost / mainCost) * 100) : 0;
+      console.log(`  ${chalk.hex(t.tool)(modelLabel.padEnd(30))} ${formatSmartMoney(stats.cost)} ${muted(cli, '·')} ${stats.requests} req ${muted(cli, '·')} ${formatCompactNumber(stats.inputTokens + stats.outputTokens)} tok ${muted(cli, '·')} ${pct}%`);
+    }
+  }
+
+  // Upstream cost (provider's actual charge vs OpenRouter markup)
+  if (clientStats.totalUpstreamCost > 0) {
+    console.log(`  ${field('Upstream')}${formatSmartMoney(clientStats.totalUpstreamCost)} ${muted(cli, '(provider cost)')}`);
+  }
+
   console.log(divider(cli));
   return;
 }

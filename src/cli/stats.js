@@ -6,11 +6,34 @@ import chalk from '../utils/chalk-compat.js';
 import { formatCompactNumber, miniBar } from './ui.js';
 
 function printPanel(label, lines) {
-  const width = Math.min(process.stdout.columns || 80, 65);
+  const width = Math.min(process.stdout.columns || 80, 72);
   console.log('');
   console.log(chalk.dim(`  ── ${label} ${'─'.repeat(Math.max(1, width - label.length - 4))}`));
   for (const line of lines) console.log(`  ${line}`);
   console.log(chalk.dim(`  ${'─'.repeat(width)}`));
+}
+
+/**
+ * Smart money formatting: more decimal places for small costs, fewer for large.
+ */
+function formatSmartMoney(value) {
+  const v = Number(value || 0);
+  if (v === 0) return '$0.00';
+  if (v < 0.01) return '$' + v.toFixed(6);
+  if (v < 1) return '$' + v.toFixed(4);
+  return '$' + v.toFixed(2);
+}
+
+/**
+ * Format compact cost (single-line, minimal)
+ */
+function formatCompactCost(value) {
+  const v = Number(value || 0);
+  if (v === 0) return '$0.00';
+  if (v < 0.001) return '$' + v.toFixed(6);
+  if (v < 0.01) return '$' + v.toFixed(4);
+  if (v < 1) return '$' + v.toFixed(3);
+  return '$' + v.toFixed(2);
 }
 
 /**
@@ -22,6 +45,7 @@ export function showStats(session) {
   const contextStats = session.agent.getContextStats();
   const toolStats = session.toolRegistry.getStats();
   const subagentStats = session.subagentManager?.getStats() || {};
+  const clientStats = session.agent.client?.getStats?.() || {};
 
   const lines = [
     `${chalk.bold('Session')}`,
@@ -32,6 +56,7 @@ export function showStats(session) {
     `${chalk.cyan('Compactions:')} ${contextStats.compactions}`,
     `${chalk.cyan('Tool Calls:')} ${stats.toolExecutions}`,
     `${chalk.cyan('Tools Used:')} ${stats.toolsUsed.join(', ') || 'None'}`,
+    `${chalk.cyan('Total Cost:')} ${formatSmartMoney(clientStats.totalCost || 0)}${clientStats.hasActualCost ? '' : chalk.yellow(' (est)')}`,
     '',
     `${chalk.bold('Registry')}`,
     `${chalk.cyan('Executions:')} ${toolStats.totalExecutions}`,
@@ -69,26 +94,66 @@ export function showCost(session, sessionStartTime, taskCount) {
 
   const subagentCost = subagentStats.totalCost || 0;
   const totalCost = clientStats.totalCost + subagentCost;
+  const totalTokens = clientStats.totalTokens || (clientStats.totalInputTokens + clientStats.totalOutputTokens);
 
   const lines = [
     `${chalk.bold('Session Cost')}`,
     `${chalk.cyan('Session Duration:')} ${sessionMinutes} minutes`,
-    `${chalk.cyan('Main Agent Cost:')} $${clientStats.totalCost.toFixed(6)}`,
+    `${chalk.cyan('Main Agent Cost:')} ${formatSmartMoney(clientStats.totalCost)}`,
   ];
 
   if (subagentCost > 0) {
-    lines.push(`${chalk.cyan('Subagent Cost:')} $${subagentCost.toFixed(6)}`);
+    lines.push(`${chalk.cyan('Subagent Cost:')} ${formatSmartMoney(subagentCost)}`);
   }
 
   lines.push(
-    `${chalk.bold('Total Cost:')} $${totalCost.toFixed(6)}`,
-    `${chalk.cyan('Budget Used:')} $${clientStats.budgetUsed.toFixed(6)} / $${clientStats.budgetLimit}`,
-    `${chalk.cyan('Budget Remaining:')} ${clientStats.budgetRemaining.toFixed(6)}`,
+    `${chalk.bold('Total Cost:')} ${formatSmartMoney(totalCost)}`,
+    `${chalk.cyan('Budget Used:')} ${formatSmartMoney(clientStats.budgetUsed)} / ${formatSmartMoney(clientStats.budgetLimit)}`,
+    `${chalk.cyan('Budget Remaining:')} ${formatSmartMoney(clientStats.budgetRemaining)}`,
     `${chalk.cyan('Total Requests:')} ${clientStats.requestCount}`,
     `${chalk.cyan('Avg Duration:')} ${clientStats.avgDuration}`,
     `${chalk.cyan('Cache Size:')} ${clientStats.cacheSize} entries`,
     `${chalk.cyan('Tasks Completed:')} ${taskCount}`,
   );
+
+  // Token breakdown and cost-per-token
+  if (totalTokens > 0) {
+    lines.push(
+      `${chalk.cyan('Tokens:')} ${clientStats.totalInputTokens.toLocaleString()} in / ${clientStats.totalOutputTokens.toLocaleString()} out / ${totalTokens.toLocaleString()} total`,
+      `${chalk.cyan('Cost/1K tok:')} ${formatSmartMoney(clientStats.costPerThousandTokens || 0)}`,
+    );
+  }
+
+  // Cache hit rate
+  if (clientStats.totalCachedTokens > 0) {
+    lines.push(
+      `${chalk.cyan('Cached Tokens:')} ${clientStats.totalCachedTokens.toLocaleString()} (${clientStats.cacheHitRate}% hit rate)`,
+    );
+  }
+
+  // Cost source note
+  lines.push(
+    clientStats.hasActualCost
+      ? `${chalk.dim('Costs from OpenRouter API')}`
+      : `${chalk.yellow('Using estimated costs — actual API cost unavailable')}`,
+  );
+
+  // Per-model breakdown
+  const modelEntries = Object.entries(clientStats.costByModel || {});
+  if (modelEntries.length > 1) {
+    lines.push('');
+    lines.push(`${chalk.bold('Per-Model Breakdown')}`);
+    for (const [model, stats] of modelEntries) {
+      const modelTokens = stats.inputTokens + stats.outputTokens;
+      const pct = clientStats.totalCost > 0 ? Math.round((stats.cost / clientStats.totalCost) * 100) : 0;
+      lines.push(`${chalk.cyan(model + ':')} ${formatSmartMoney(stats.cost)} · ${stats.requests} req · ${modelTokens.toLocaleString()} tok · ${pct}%`);
+    }
+  }
+
+  // Upstream cost if available
+  if (clientStats.totalUpstreamCost > 0) {
+    lines.push(`${chalk.cyan('Upstream Cost:')} ${formatSmartMoney(clientStats.totalUpstreamCost)} (provider)`);
+  }
 
   printPanel('cost', lines);
 }
@@ -116,7 +181,7 @@ export function showAgents(session) {
     `\n  Tasks: ${chalk.white(stats.totalTasks)} total ${chalk.dim('│')} ${chalk.green(stats.completedTasks)} done ${chalk.dim('│')} ${chalk.red(stats.failedTasks)} failed ${chalk.dim('│')} ${chalk.cyan(stats.runningTasks)} running` +
     `\n  Rate:  ${successBar}  ${chalk.white(stats.successRate)}` +
     `\n  Speed: ${chalk.white(stats.avgDuration)} avg ${stats.totalRetries > 0 ? chalk.dim(`│ ${stats.totalRetries} retries`) : ''}` +
-    (stats.totalCost > 0 ? `\n  Cost:  ${chalk.white('$' + stats.totalCost.toFixed(6))} total` : '');
+    (stats.totalCost > 0 ? `\n  Cost:  ${chalk.white(formatSmartMoney(stats.totalCost))} total` : '');
 
   // Per-specialization breakdown if we have data
   if (stats.bySpecialization && Object.keys(stats.bySpecialization).length > 0) {

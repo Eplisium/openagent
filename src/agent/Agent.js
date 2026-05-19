@@ -3487,6 +3487,9 @@ Task: ${userInput}`;
         requestCount: clientStats.requestCount || 0,
         totalInputTokens: clientStats.totalInputTokens || 0,
         totalOutputTokens: clientStats.totalOutputTokens || 0,
+        totalCachedTokens: clientStats.totalCachedTokens || 0,
+        totalUpstreamCost: clientStats.totalUpstreamCost || 0,
+        hasActualCost: clientStats.hasActualCost || false,
       },
     };
   }
@@ -3515,6 +3518,9 @@ Task: ${userInput}`;
       this.client.requestCount = data.cost.requestCount || 0;
       this.client.totalInputTokens = data.cost.totalInputTokens || 0;
       this.client.totalOutputTokens = data.cost.totalOutputTokens || 0;
+      this.client.totalCachedTokens = data.cost.totalCachedTokens || 0;
+      this.client.totalUpstreamCost = data.cost.totalUpstreamCost || 0;
+      this.client._hasActualCost = data.cost.hasActualCost || false;
     }
 
     return this;
