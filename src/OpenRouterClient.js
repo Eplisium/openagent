@@ -478,15 +478,27 @@ export class OpenRouterClient {
    * tool execution without waiting for the entire response.
    */
   async *chatStream(messages, options = {}) {
-    const { onToolCallReady, ...streamOptions } = options;
+    const { onToolCallReady, signal, ...streamOptions } = options;
     const requestId = this.generateRequestId();
     const startTime = Date.now();
     const payload = this.buildPayload(messages, { ...streamOptions, stream: true });
     
     const { controller, cleanup } = this.createController();
+    let abortForwarder = null;
+    if (signal) {
+      abortForwarder = () => controller.abort();
+      if (signal.aborted) {
+        controller.abort();
+      } else {
+        signal.addEventListener('abort', abortForwarder, { once: true });
+      }
+    }
     
     try {
       await this.waitForRateLimit();
+      if (controller.signal.aborted) {
+        throw new AbortError('Stream cancelled');
+      }
       this.lastRequestTime = Date.now();
       
       const response = await fetch(`${this.baseURL}/chat/completions`, {
@@ -660,6 +672,9 @@ export class OpenRouterClient {
       }
       throw error;
     } finally {
+      if (signal && abortForwarder) {
+        signal.removeEventListener('abort', abortForwarder);
+      }
       cleanup();
     }
   }

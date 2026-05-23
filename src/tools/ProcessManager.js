@@ -1,11 +1,22 @@
+import { execSync } from 'child_process';
+
 /**
  * ProcessManager - Manages background processes without global state
  */
 export class ProcessManager {
+  static instances = new Set();
+
+  static killAll() {
+    for (const manager of ProcessManager.instances) {
+      manager.killAll();
+    }
+  }
+
   constructor(options = {}) {
     this.processes = {};
     this.cleanupOnExit = options.cleanupOnExit !== false;
     this._exitHandlerRegistered = false;
+    ProcessManager.instances.add(this);
   }
 
   /**
@@ -64,13 +75,17 @@ export class ProcessManager {
     for (const [_label, procData] of Object.entries(this.processes)) {
       if (procData.proc && !procData.proc.killed) {
         try {
-          procData.proc.kill('SIGTERM');
-          // Force kill after 5 seconds if still running
-          setTimeout(() => {
-            if (procData.proc && !procData.proc.killed) {
-              procData.proc.kill('SIGKILL');
-            }
-          }, 5000);
+          if (process.platform === 'win32' && procData.pid) {
+            execSync(`taskkill /PID ${Number(procData.pid)} /T /F`, { stdio: 'ignore', timeout: 5000 });
+          } else {
+            procData.proc.kill('SIGTERM');
+            // Force kill after 5 seconds if still running
+            setTimeout(() => {
+              if (procData.proc && !procData.proc.killed) {
+                procData.proc.kill('SIGKILL');
+              }
+            }, 5000).unref?.();
+          }
         } catch (_err) {
           // Ignore errors during cleanup
         }

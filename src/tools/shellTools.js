@@ -6,7 +6,6 @@
 
 import { exec as execCb, execSync } from 'child_process';
 import crossSpawn from 'cross-spawn';
-import { promisify } from 'util';
 import path from 'path';
 import os from 'os';
 import { buildOpenAgentEnv, createPathContext } from '../paths.js';
@@ -16,7 +15,6 @@ import { Platform } from '../utils/platform.js';
 
 const defaultProcessManager = new ProcessManager();
 
-const execAsync = promisify(execCb);
 const PATH_PREFIX_NOTE = 'Supports project:, workdir:, and workspace: prefixes.';
 
 /**
@@ -176,6 +174,57 @@ function killProcessTreeWindows(pid) {
   }
 }
 
+function execTracked(command, options, processManager, label, abortSignal) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let abortListener = null;
+    const proc = execCb(command, options, (error, stdout, stderr) => {
+      if (settled) return;
+      settled = true;
+      processManager.remove(label);
+      if (abortSignal && abortListener) {
+        abortSignal.removeEventListener('abort', abortListener);
+      }
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+
+    processManager.add(label, {
+      pid: proc.pid,
+      proc,
+      command,
+      cwd: options.cwd,
+      startTime: Date.now(),
+      label,
+    });
+
+    abortListener = () => {
+      try {
+        if (Platform.isWindows && proc.pid) {
+          killProcessTreeWindows(proc.pid);
+        } else if (!proc.killed) {
+          proc.kill('SIGTERM');
+        }
+      } catch {
+        // Process may have already exited.
+      }
+    };
+
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        abortListener();
+      } else {
+        abortSignal.addEventListener('abort', abortListener, { once: true });
+      }
+    }
+  });
+}
+
 export function createShellTools(options = {}) {
   const processManager = options.processManager || defaultProcessManager;
   const pathContext = createPathContext(options);
@@ -215,7 +264,7 @@ export function createShellTools(options = {}) {
       },
       required: ['command'],
     },
-    async execute({ command, cwd = '.', timeout = CONFIG.EXEC_DEFAULT_TIMEOUT_MS, env = {} }) {
+    async execute({ command, cwd = '.', timeout = CONFIG.EXEC_DEFAULT_TIMEOUT_MS, env = {}, _abortSignal = null }) {
       try {
         // Validate and sanitize command
         const sanitizedCommand = sanitizeCommand(command);
@@ -227,21 +276,31 @@ export function createShellTools(options = {}) {
         
         // Create abort controller for timeout
         const abortController = new AbortController();
+        const externalAbort = () => abortController.abort();
+        if (_abortSignal) {
+          if (_abortSignal.aborted) {
+            abortController.abort();
+          } else {
+            _abortSignal.addEventListener('abort', externalAbort, { once: true });
+          }
+        }
         const timeoutId = setTimeout(() => {
           abortController.abort();
         }, timeout);
         
         try {
-          const result = await execAsync(sanitizedCommand, {
+          const foregroundLabel = `exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          const result = await execTracked(sanitizedCommand, {
             cwd: resolvedCwd,
             timeout,
             env: buildToolEnv(env),
             maxBuffer: CONFIG.EXEC_MAX_BUFFER_BYTES,
             encoding: 'utf-8',
             shell,
-          });
+          }, processManager, foregroundLabel, abortController.signal);
           
           clearTimeout(timeoutId);
+          if (_abortSignal) _abortSignal.removeEventListener('abort', externalAbort);
 
           return {
             success: true,
@@ -254,9 +313,10 @@ export function createShellTools(options = {}) {
           };
         } catch (error) {
           clearTimeout(timeoutId);
+          if (_abortSignal) _abortSignal.removeEventListener('abort', externalAbort);
           
           // Check if it was a timeout
-          if (error.killed || error.code === 'ETIMEDOUT') {
+          if (error.killed || error.code === 'ETIMEDOUT' || abortController.signal.aborted) {
             return {
               success: false,
               stdout: Platform.normalizeLineEndings(error.stdout || ''),

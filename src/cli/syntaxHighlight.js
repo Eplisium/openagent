@@ -1,15 +1,15 @@
 import chalk from '../utils/chalk-compat.js';
 
 const FALLBACK_TOKEN_COLORS = {
-  keyword: chalk.magenta,      // const, let, function, if, return, import, export, class, async, await
-  string: chalk.green,         // '...', "...", `...`
-  number: chalk.cyan,          // 123, 0xff, 1e10
-  comment: chalk.gray,         // // ..., /* ... */
-  function: chalk.yellow,      // function calls: foo()
-  operator: chalk.white,       // +, -, =, =>, ===
-  type: chalk.blue,            // TypeScript types, class names
-  property: chalk.blue,        // object.property
-  punctuation: chalk.dim.white,// {, }, (, ), [, ]
+  keyword: chalk.hex('#cba6f7'),      // const, let, function, if, return, import, export, class, async, await
+  string: chalk.hex('#a6e3a1'),       // '...', "...", `...`
+  number: chalk.hex('#fab387'),       // 123, 0xff, 1e10
+  comment: chalk.hex('#6c7086'),      // // ..., /* ... */
+  function: chalk.hex('#f9e2af'),     // function calls: foo()
+  operator: chalk.hex('#cdd6f4'),     // +, -, =, =>, ===
+  type: chalk.hex('#89b4fa'),         // TypeScript types, class names
+  property: chalk.hex('#89b4fa'),     // object.property
+  punctuation: chalk.hex('#9399b2'),  // {, }, (, ), [, ]
 };
 
 function themeColor(theme, role, fallback) {

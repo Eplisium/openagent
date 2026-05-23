@@ -1892,6 +1892,7 @@ Task: ${userInput}`;
         model: this.model,
         temperature: 0.3,
         max_tokens: this.maxOutputTokens,
+        signal: this.abortController?.signal,
         // Send tool definitions so the model can use native tool calling via streaming.
         // If a model rejects streaming+tools, we catch the error and fall back to non-streaming.
         tools: this.getRelevantToolDefinitions(),
@@ -1927,6 +1928,7 @@ Task: ${userInput}`;
 
       try {
         for await (const chunk of stream) {
+          this.checkAborted();
           if (chunk.type === 'error') {
             const err = chunk.error;
             const errMsg = typeof err === 'string' ? err : (err?.message || JSON.stringify(err));
@@ -1951,6 +1953,10 @@ Task: ${userInput}`;
           }
         }
       } catch (streamError) {
+        if (streamError instanceof AgentAbortError || streamError instanceof AbortError || this.aborted) {
+          this.checkAborted();
+          throw streamError;
+        }
         // Streaming failed — fall back to non-streaming for this iteration
         if (this.shouldEmitVerboseLogs()) {
           logger.warn('Streaming failed, falling back to non-streaming', { error: streamError.message });
@@ -2789,6 +2795,7 @@ Task: ${userInput}`;
     const toolName = toolCall.name;
     const args = toolCall.arguments;
     this.performanceMetrics.totalToolCalls++;
+    this.checkAborted();
     
     if (this.shouldEmitVerboseLogs()) {
       // Compact tool output - avoid clashing with subagent UI
@@ -2805,7 +2812,12 @@ Task: ${userInput}`;
     // Retry logic for tool execution
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
-        const result = await this.tools.execute(toolName, args);
+        this.checkAborted();
+        const executionArgs = this.abortController?.signal && args && typeof args === 'object' && !Array.isArray(args)
+          ? { ...args, _abortSignal: this.abortController.signal }
+          : args;
+        const result = await this.tools.execute(toolName, executionArgs);
+        this.checkAborted();
         const shouldRetry = result.success === false &&
           attempt < this.maxRetries &&
           this.isRetryableToolFailure(toolName, result);
@@ -2852,6 +2864,7 @@ Task: ${userInput}`;
         };
         
       } catch (error) {
+        this.checkAborted();
         lastError = error;
         this.performanceMetrics.totalRetries++;
         
@@ -3115,6 +3128,7 @@ Task: ${userInput}`;
       const stream = this.client.chatStream(messagesForLLM, {
         model: this.model,
         temperature: 0.3,
+        signal: this.abortController?.signal,
       });
       
       let fullContent = '';

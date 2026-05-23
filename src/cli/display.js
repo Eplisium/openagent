@@ -305,10 +305,11 @@ export function createStreamingRenderer(cli) {
   const cursor = '▌';
   let active = false;
   let content = '';
-  let rowCount = 0;
-  let lastFrame = [];
+  let renderedLines = [];
+  let renderedLineCount = 0;
   let scheduled = null;
   let fallback = false;
+  let rendered = false;
 
   const begin = () => {
     if (active) return;
@@ -318,39 +319,62 @@ export function createStreamingRenderer(cli) {
       toolCount: cli._toolLineStates?.length || 0,
     });
   };
-  const clearRegion = () => {
-    if (rowCount <= 0) return;
-    if (rowCount > 1) process.stdout.write(`\x1b[${rowCount - 1}A`);
+
+  const clearFromLine = (lineIndex = 0) => {
+    if (renderedLineCount <= 0) return;
+    const bounded = Math.max(0, Math.min(lineIndex, renderedLineCount - 1));
+    const up = renderedLineCount - 1 - bounded;
+    if (up > 0) process.stdout.write(`\x1b[${up}A`);
     process.stdout.write('\r\x1b[J');
-    rowCount = 0;
   };
-  const sourceWithCursor = (final = false) => {
-    if (final) return content;
-    const fenceCount = (content.match(/^```/gm) || []).length;
-    if (fenceCount % 2 === 1) return `${content}${content.endsWith('\n') ? '' : '\n'}${cursor}\n\`\`\``;
-    return `${content}${cursor}`;
+
+  const addCursor = (lines) => {
+    if (lines.length === 0) return [chalk.hex(cli.theme?.accent || DEFAULT_THEME.accent)(cursor)];
+    const next = [...lines];
+    const cursorColor = chalk.hex(cli.theme?.accent || DEFAULT_THEME.accent);
+    next[next.length - 1] = `${next[next.length - 1]}${cursorColor(cursor)}`;
+    return next;
   };
+
   const renderFrame = (final = false) => {
     if (!active && !final) return;
     const started = performance.now?.() || Date.now();
     try {
-      const source = sourceWithCursor(final);
-      const rendered = cli.isMarkdownEnabled() ? renderMarkdown(source, cli.theme) : source;
-      const frame = renderWithLeftBar(cli, rendered || '').split('\n');
-      if (!final && frame.length === lastFrame.length && frame.every((line, i) => line === lastFrame[i])) return;
-      clearRegion();
-      process.stdout.write(`${frame.join('\n')}`);
-      rowCount = frame.length;
-      lastFrame = frame;
+      const source = content;
+      const renderedOutput = cli.isMarkdownEnabled() ? renderMarkdown(source, cli.theme) : source;
+      let frame = renderWithLeftBar(cli, renderedOutput || '').split('\n');
+      if (!final) frame = addCursor(frame);
+
+      const commonLength = Math.min(renderedLineCount, frame.length);
+      let firstDiff = commonLength;
+      for (let i = 0; i < commonLength; i++) {
+        if (frame[i] !== renderedLines[i]) {
+          firstDiff = i;
+          break;
+        }
+      }
+      if (frame.length < renderedLineCount && firstDiff === frame.length) {
+        firstDiff = Math.max(0, frame.length - 1);
+      }
+
+      if (firstDiff === renderedLineCount && firstDiff === frame.length) return;
+
+      if (renderedLineCount > 0) clearFromLine(firstDiff);
+      process.stdout.write(frame.slice(firstDiff).join('\n'));
+      renderedLines = frame;
+      renderedLineCount = frame.length;
       cli._lastStreamRenderMs = (performance.now?.() || Date.now()) - started;
       if (cli._lastStreamRenderMs > 5) {
         cli._streamRenderSlowFrames = (cli._streamRenderSlowFrames || 0) + 1;
       }
     } catch {
       fallback = true;
-      clearRegion();
-      process.stdout.write(renderWithLeftBar(cli, content));
-      rowCount = Math.max(1, content.split('\n').length);
+      const plain = renderWithLeftBar(cli, content).split('\n');
+      const frame = addCursor(plain);
+      if (renderedLineCount > 0) clearFromLine(0);
+      process.stdout.write(frame.join('\n'));
+      renderedLines = frame;
+      renderedLineCount = frame.length;
     }
   };
   const scheduleRender = () => {
@@ -358,20 +382,23 @@ export function createStreamingRenderer(cli) {
     scheduled = setTimeout(() => {
       scheduled = null;
       renderFrame(false);
-    }, 24);
+    }, content.length > 5000 ? 48 : 24);
     scheduled.unref?.();
   };
 
   return {
     get active() { return active; },
+    get _rendered() { return rendered; },
     write(delta) {
       if (!delta) return;
       begin();
       content += delta;
       if (fallback) {
-        clearRegion();
-        process.stdout.write(renderWithLeftBar(cli, content + cursor));
-        rowCount = Math.max(1, content.split('\n').length);
+        const frame = addCursor(renderWithLeftBar(cli, content).split('\n'));
+        if (renderedLineCount > 0) clearFromLine(0);
+        process.stdout.write(frame.join('\n'));
+        renderedLines = frame;
+        renderedLineCount = frame.length;
         return;
       }
       scheduleRender();
@@ -382,21 +409,23 @@ export function createStreamingRenderer(cli) {
       scheduled = null;
       renderFrame(true);
       process.stdout.write('\n');
+      rendered = true;
       active = false;
       content = '';
-      rowCount = 0;
-      lastFrame = [];
+      renderedLineCount = 0;
+      renderedLines = [];
     },
     finish(finalContent = content, usage = null) {
       if (scheduled) clearTimeout(scheduled);
       scheduled = null;
       if (!active) {
-        if (finalContent && finalContent.trim()) printAIResponse(cli, finalContent, usage);
+        if (finalContent && finalContent.trim()) rendered = printAIResponse(cli, finalContent, usage) || rendered;
         return;
       }
       content = finalContent;
       renderFrame(true);
       active = false;
+      rendered = true;
       process.stdout.write('\n');
       // Show compact inline usage summary after stream completes
       if (usage) {

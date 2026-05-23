@@ -48,7 +48,7 @@ export function thinkingSpinner(message = 'Thinking', theme = null) {
   let currentMessage = message;
   let elapsed = 0;
   const startTime = Date.now();
-  const color = theme?.muted ? chalk.hex(theme.muted) : chalk.gray;
+  const color = chalk.hex(theme?.muted || '#6c7086');
 
   const interval = setInterval(() => {
     elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -76,9 +76,9 @@ export function contextualSpinner(message = 'Working...', theme = null) {
   const startTime = Date.now();
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let frame = 0;
-  const toolColor = theme?.tool ? chalk.hex(theme.tool) : chalk.yellow;
-  const mutedColor = theme?.muted ? chalk.hex(theme.muted) : chalk.gray;
-  const textColor = theme?.text ? chalk.hex(theme.text) : chalk.white;
+  const toolColor = chalk.hex(theme?.tool || '#cba6f7');
+  const mutedColor = chalk.hex(theme?.muted || '#6c7086');
+  const textColor = chalk.hex(theme?.text || '#cdd6f4');
 
   const interval = setInterval(() => {
     elapsed = ((Date.now() - startTime) / 1000).toFixed(1);

@@ -125,6 +125,7 @@ export const PROMPT_SUGGESTIONS = {
 export const COMMAND_ENTRIES = [
   ['/agent <task>', 'Run agentic task (with tools)'],
   ['/chat <msg>', 'Simple chat (no tools)'],
+  ['/stop', 'Stop the current task'],
   ['/templates', 'Browse workflow templates'],
   ['/doctor', 'Environment health check'],
   ['/model', 'Change AI model'],

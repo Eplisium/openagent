@@ -77,6 +77,7 @@ import {
 
 import {
   formatCompactNumber,
+  formatDuration,
   shortenModelLabel,
   deduplicateResponse,
 } from './cli/formatting.js';
@@ -116,6 +117,7 @@ import {
 
 import { loadState, saveState } from './cli/stateOps.js';
 import { handleSkillsCommand, handleShellSkillsCommand } from './cli/skills-handler.js';
+import { ProcessManager } from './tools/ProcessManager.js';
 
 import {
   showSmartError,
@@ -162,6 +164,9 @@ export class CLI {
     this.state = null;
     this.currentTask = null;
     this.taskStartTime = null;
+    this._abortRequested = false;
+    this._abortSummaryPrinted = false;
+    this._taskInputBuffer = '';
     this.promptCount = 0;
     this.promptActive = false;
 
@@ -545,8 +550,10 @@ export class CLI {
     this._toolLineStates = [];
     this._taskCostStart = this.session?.agent?.client?.getStats?.()?.totalCost || 0;
     this._assistantHeaderPrintedForTask = null;
+    this._abortRequested = false;
+    this._abortSummaryPrinted = false;
+    this._taskInputBuffer = '';
     let toolCallCount = 0;
-    let responsePrinted = false;
     const previousCallbacks = {
       onToolStart: this.session.agent.onToolStart,
       onToolEnd: this.session.agent.onToolEnd,
@@ -560,7 +567,7 @@ export class CLI {
 
     printUserMessage(this, task);
     console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(22)}`));
-    console.log(chalk.hex(this.theme.muted)('  Ctrl+C stops this task'));
+    console.log(chalk.hex(this.theme.muted)('  Ctrl+C or /stop to cancel'));
 
     this.session.agent.onIterationStart = (_iteration) => {
       const iterationLabel = this.session.agent.formatIterationLabel();
@@ -576,12 +583,7 @@ export class CLI {
       printEnhancedToolCallEnd(this, toolName, result, startTime, toolCallCount);
     };
 
-    this.session.agent.onResponse = (content) => {
-      if (!responsePrinted) {
-        const rendered = printAIResponse(this, deduplicateResponse(content));
-        if (rendered) responsePrinted = true;
-      }
-    };
+    this.session.agent.onResponse = null;
 
     this._streamRenderer = createStreamingRenderer(this);
     this.session.agent.onContentDelta = (delta) => {
@@ -597,62 +599,51 @@ export class CLI {
     };
 
     this.session.agent.onStatus = ({ type, message }) => {
-      const formatter = type === 'compaction' ? chalk.cyan : type === 'retry' ? chalk.yellow : chalk.dim;
+      const formatter = type === 'compaction'
+        ? chalk.hex(this.theme.accent)
+        : type === 'retry'
+          ? chalk.hex(this.theme.warning)
+          : chalk.hex(this.theme.muted);
       console.log(formatter(`   ${message}`));
     };
 
-            // Progress indicator for long-running tasks
-        let progressInterval = null;
-        let progressMessage = 'Working...';
-        this._progressMessage = (msg) => { progressMessage = msg; };
-        const startProgressIndicator = () => {
-          let elapsed = 0;
-          progressInterval = setInterval(() => {
-            elapsed += 1;
-            process.stdout.write(`\r  ${chalk.hex(this.theme.tool)('⠋')} ${chalk.hex(this.theme.muted)(progressMessage)} ${chalk.hex(this.theme.text)(elapsed.toFixed(1) + 's')}  `);
-          }, 1000);
-        };
-        const stopProgressIndicator = () => {
-          if (progressInterval) {
-            clearInterval(progressInterval);
-            progressInterval = null;
-            process.stdout.write('\r' + ' '.repeat(50) + '\r');
-          }
-        };
-        const progressTimeout = setTimeout(startProgressIndicator, 5000); // ── Ctrl+C abort handler ──
-    // During task execution, intercept Ctrl+C to abort the agent
-    // instead of killing the whole process.
-    let abortHandler = null;
-    const wasRaw = process.stdin.isRaw;
-    if (process.stdin.isTTY && !process.stdin.isRaw) {
-      process.stdin.setRawMode(true);
-    }
-    process.stdin.resume();
-    abortHandler = (data) => {
-      // Ctrl+C = 0x03
-      if (data[0] === 0x03) {
-        this.session.agent.abort();
-        // Also abort any running subagents so they stop immediately
-        if (this.session.subagentManager) {
-          this.session.subagentManager.abort();
-        }
+    // Progress indicator for long-running tasks
+    let progressInterval = null;
+    let progressMessage = 'Working...';
+    this._progressMessage = (msg) => { progressMessage = msg; };
+    const startProgressIndicator = () => {
+      let elapsed = 0;
+      progressInterval = setInterval(() => {
+        elapsed += 1;
+        process.stdout.write(`\r  ${chalk.hex(this.theme.tool)('⠋')} ${chalk.hex(this.theme.muted)(progressMessage)} ${chalk.hex(this.theme.text)(elapsed.toFixed(1) + 's')}  `);
+      }, 1000);
+    };
+    const stopProgressIndicator = () => {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
+        process.stdout.write('\r' + ' '.repeat(50) + '\r');
       }
     };
-    process.stdin.on('data', abortHandler);
+    const progressTimeout = setTimeout(startProgressIndicator, 5000);
+    const abortHandlerState = this._setupTaskAbortHandler();
 
     try {
       const result = await this.session.run(task);
       const duration = Date.now() - startTime;
 
-      if (result.response && result.response.trim() && !responsePrinted) {
-        const rendered = printAIResponse(this, deduplicateResponse(result.response));
-        if (rendered) responsePrinted = true;
+      if (this._streamRenderer?.active) {
+        this._streamRenderer.finish(result.response);
       }
-      if (!responsePrinted) {
+      let renderedResponse = this._streamRenderer?._rendered === true;
+      if (!renderedResponse && result.response?.trim()) {
+        renderedResponse = printAIResponse(this, result.response);
+      }
+      if (!renderedResponse) {
         // Safety net: agent completed but produced no visible response.
         // This can happen when the model returns empty content as its final answer.
-        console.log(chalk.yellow('\n  Agent completed but produced no text response. The model may have returned empty content.'));
-        console.log(chalk.dim('  Try rephrasing your request or using a different model.'));
+        console.log(chalk.hex(this.theme.warning)('\n  Agent completed but produced no text response. The model may have returned empty content.'));
+        console.log(chalk.hex(this.theme.muted)('  Try rephrasing your request or using a different model.'));
       }
 
       await printEnhancedTaskSummary(this, result, duration);
@@ -676,8 +667,8 @@ export class CLI {
       await this.saveState();
 
     } catch (error) {
-      if (error.name === 'AgentAbortError') {
-        console.log(chalk.yellow('\n  stopped by user. Ready for your next message.'));
+      if (error.name === 'AgentAbortError' || error.name === 'AbortError' || this._abortRequested) {
+        this._printAbortSummary();
       } else {
         showSmartError('task_execution', {
           message: error.message,
@@ -687,13 +678,7 @@ export class CLI {
         });
       }
     } finally {
-      // Clean up Ctrl+C handler
-      if (abortHandler) {
-        process.stdin.removeListener('data', abortHandler);
-      }
-      if (process.stdin.isTTY && !wasRaw) {
-        try { process.stdin.setRawMode(false); } catch { /* may fail if stream closed */ }
-      }
+      this._teardownTaskAbortHandler(abortHandlerState);
       clearTimeout(progressTimeout);
       stopProgressIndicator();
       Object.assign(this.session.agent, previousCallbacks);
@@ -710,8 +695,10 @@ export class CLI {
     this._toolLineStates = [];
     this._taskCostStart = this.session?.agent?.client?.getStats?.()?.totalCost || 0;
     this._assistantHeaderPrintedForTask = null;
+    this._abortRequested = false;
+    this._abortSummaryPrinted = false;
+    this._taskInputBuffer = '';
     let toolCallCount = 0;
-    let responsePrinted = false;
     const previousCallbacks = {
       onToolStart: this.session.agent.onToolStart,
       onToolEnd: this.session.agent.onToolEnd,
@@ -725,7 +712,7 @@ export class CLI {
 
     printUserMessage(this, this.currentTask);
     console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(22)}`));
-    console.log(chalk.hex(this.theme.muted)('  Ctrl+C stops this task'));
+    console.log(chalk.hex(this.theme.muted)('  Ctrl+C or /stop to cancel'));
 
     this.session.agent.onIterationStart = () => {
       console.log(chalk.dim(`\n── ${this.session.agent.formatIterationLabel()} ──`));
@@ -737,12 +724,7 @@ export class CLI {
     this.session.agent.onToolEnd = (toolName, result) => {
       printEnhancedToolCallEnd(this, toolName, result, startTime, toolCallCount);
     };
-    this.session.agent.onResponse = (content) => {
-      if (!responsePrinted) {
-        const rendered = printAIResponse(this, deduplicateResponse(content));
-        if (rendered) responsePrinted = true;
-      }
-    };
+    this.session.agent.onResponse = null;
     this._streamRenderer = createStreamingRenderer(this);
     this.session.agent.onContentDelta = (delta) => {
       this._streamRenderer?.write(delta);
@@ -755,39 +737,31 @@ export class CLI {
       printIntermediateContent(this, content);
     };
     this.session.agent.onStatus = ({ type, message }) => {
-      const f = type === 'compaction' ? chalk.cyan : type === 'retry' ? chalk.yellow : chalk.dim;
+      const f = type === 'compaction'
+        ? chalk.hex(this.theme.accent)
+        : type === 'retry'
+          ? chalk.hex(this.theme.warning)
+          : chalk.hex(this.theme.muted);
       console.log(f(`   ${message}`));
     };
 
-    // ── Ctrl+C abort handler ──
-    let abortHandler = null;
-    const wasRaw = process.stdin.isRaw;
-    if (process.stdin.isTTY && !process.stdin.isRaw) {
-      process.stdin.setRawMode(true);
-    }
-    process.stdin.resume();
-    abortHandler = (data) => {
-      if (data[0] === 0x03) {
-        this.session.agent.abort();
-        if (this.session.subagentManager) {
-          this.session.subagentManager.abort();
-        }
-      }
-    };
-    process.stdin.on('data', abortHandler);
+    const abortHandlerState = this._setupTaskAbortHandler();
 
     try {
       this.session.agent.pushMessage(multimodalMsg);
       const result = await this.session.agent.run();
       const duration = Date.now() - startTime;
 
-      if (result.response && result.response.trim() && !responsePrinted) {
-        const rendered = printAIResponse(this, deduplicateResponse(result.response));
-        if (rendered) responsePrinted = true;
+      if (this._streamRenderer?.active) {
+        this._streamRenderer.finish(result.response);
       }
-      if (!responsePrinted) {
-        console.log(chalk.yellow('\n  Agent completed but produced no text response. The model may have returned empty content.'));
-        console.log(chalk.dim('  Try rephrasing your request or using a different model.'));
+      let renderedResponse = this._streamRenderer?._rendered === true;
+      if (!renderedResponse && result.response?.trim()) {
+        renderedResponse = printAIResponse(this, result.response);
+      }
+      if (!renderedResponse) {
+        console.log(chalk.hex(this.theme.warning)('\n  Agent completed but produced no text response. The model may have returned empty content.'));
+        console.log(chalk.hex(this.theme.muted)('  Try rephrasing your request or using a different model.'));
       }
       await printEnhancedTaskSummary(this, result, duration);
 
@@ -812,8 +786,8 @@ export class CLI {
       }
       await this.saveState();
     } catch (error) {
-      if (error.name === 'AgentAbortError') {
-        console.log(chalk.yellow('\n  stopped by user. Ready for your next message.'));
+      if (error.name === 'AgentAbortError' || error.name === 'AbortError' || this._abortRequested) {
+        this._printAbortSummary();
       } else {
         showSmartError('task_execution', {
           message: error.message,
@@ -823,13 +797,7 @@ export class CLI {
         });
       }
     } finally {
-      // Clean up Ctrl+C handler
-      if (abortHandler) {
-        process.stdin.removeListener('data', abortHandler);
-      }
-      if (process.stdin.isTTY && !wasRaw) {
-        try { process.stdin.setRawMode(false); } catch { /* may fail if stream closed */ }
-      }
+      this._teardownTaskAbortHandler(abortHandlerState);
       Object.assign(this.session.agent, previousCallbacks);
       this._streamRenderer = null;
       this.currentTask = null;
@@ -910,6 +878,79 @@ export class CLI {
     console.log(chalk.dim(`  └─ ${duration}ms`));
   }
 
+  _abortCurrentTask() {
+    if (!this.currentTask || this._abortRequested) return false;
+    this._abortRequested = true;
+    try { this.session?.agent?.abort?.(); } catch { /* best-effort abort */ }
+    try { this.session?.subagentManager?.abort?.(); } catch { /* best-effort abort */ }
+    try { ProcessManager.killAll(); } catch { /* best-effort process cleanup */ }
+    return true;
+  }
+
+  _setupTaskAbortHandler() {
+    const state = {
+      dataHandler: null,
+      wasRaw: process.stdin.isRaw,
+      changedRawMode: false,
+    };
+
+    if (!process.stdin.isTTY) return state;
+
+    if (process.platform === 'win32' && !process.stdin.isRaw) {
+      try {
+        process.stdin.setRawMode(true);
+        state.changedRawMode = true;
+      } catch {
+        state.changedRawMode = false;
+      }
+    }
+
+    process.stdin.resume();
+    state.dataHandler = (data) => {
+      if (!data || data.length === 0) return;
+      if (data[0] === 0x03) {
+        this._abortCurrentTask();
+        return;
+      }
+
+      this._taskInputBuffer += data.toString('utf8');
+      if (this._taskInputBuffer.length > 128) {
+        this._taskInputBuffer = this._taskInputBuffer.slice(-128);
+      }
+
+      const lines = this._taskInputBuffer.split(/\r?\n/);
+      this._taskInputBuffer = lines.pop() || '';
+      for (const line of lines) {
+        const command = line.trim().toLowerCase();
+        if (command === '/stop' || command === '/abort' || command === '/cancel') {
+          this._abortCurrentTask();
+        }
+      }
+    };
+    process.stdin.on('data', state.dataHandler);
+    return state;
+  }
+
+  _teardownTaskAbortHandler(state = {}) {
+    if (state.dataHandler) {
+      process.stdin.removeListener('data', state.dataHandler);
+    }
+    if (process.stdin.isTTY && state.changedRawMode && !state.wasRaw) {
+      try { process.stdin.setRawMode(false); } catch { /* may fail if stream closed */ }
+    }
+  }
+
+  _printAbortSummary() {
+    if (this._abortSummaryPrinted) return;
+    this._abortSummaryPrinted = true;
+    const elapsed = this.taskStartTime ? Date.now() - this.taskStartTime : 0;
+    const iterations = this.session?.agent?.iterationCount || 0;
+    const tools = this.session?.agent?.performanceMetrics?.totalToolCalls || 0;
+    console.log(chalk.hex(this.theme.warning)(
+      `\n  ⏹ stopped · ${formatDuration(elapsed)} · ${iterations} iterations · ${tools} tools`
+    ));
+  }
+
   // ── Command Handler ──────────────────────────────────────────
 
   async handleCommand(cmd) {
@@ -931,6 +972,16 @@ export class CLI {
       case 'chat':
         if (argStr) { await this.runChat(argStr); }
         else { console.log(chalk.gray('Usage: /chat <message>')); }
+        break;
+
+      case 'stop': case 'abort': case 'cancel':
+        if (this._abortCurrentTask()) {
+          this._printAbortSummary();
+          this.currentTask = null;
+          this.taskStartTime = null;
+        } else {
+          console.log(chalk.hex(this.theme.muted)('  No task is running'));
+        }
         break;
 
       case 'model':
@@ -1162,6 +1213,10 @@ export async function runCLI(options = {}) {
   });
 
   const signalHandler = async (signal) => {
+    if (signal === 'SIGINT' && cli.currentTask) {
+      cli._abortCurrentTask();
+      return;
+    }
     console.log(chalk.yellow(`\n⚠ Received ${signal}. Cleaning up...`));
     process.off('SIGINT', signalHandler);
     process.off('SIGTERM', signalHandler);
