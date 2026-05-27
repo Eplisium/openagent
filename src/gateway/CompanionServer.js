@@ -39,6 +39,7 @@ export class CompanionServer extends EventEmitter {
     this.lastDuration = null;
     this.lastToolCount = 0;
     this._activeToolStarts = new Map();
+    this._restoreAgentEvents = null;
   }
 
   /**
@@ -79,6 +80,8 @@ export class CompanionServer extends EventEmitter {
     }
 
     await this.wsSink.close();
+    this._restoreAgentEvents?.();
+    this._restoreAgentEvents = null;
 
     if (this.wss) {
       this.wss.close();
@@ -96,6 +99,8 @@ export class CompanionServer extends EventEmitter {
    * @param {import('../agent/AgentSession.js').AgentSession} session
    */
   attachSession(session) {
+    this._restoreAgentEvents?.();
+    this._restoreAgentEvents = null;
     this.session = session;
 
     // Wire agent callbacks to companion
@@ -104,6 +109,10 @@ export class CompanionServer extends EventEmitter {
 
       // Override callbacks to also emit to companion
       const origOnToolStart = agent.onToolStart;
+      const origOnToolEnd = agent.onToolEnd;
+      const origOnResponse = agent.onResponse;
+      const origOnContentDelta = agent.onContentDelta;
+
       agent.onToolStart = (tool, args) => {
         if (origOnToolStart) origOnToolStart(tool, args);
         this.lastToolCount++;
@@ -112,7 +121,6 @@ export class CompanionServer extends EventEmitter {
         this.wsSink.writeEvent('tool_progress', { tool, status: 'started', args });
       };
 
-      const origOnToolEnd = agent.onToolEnd;
       agent.onToolEnd = (tool, result) => {
         if (origOnToolEnd) origOnToolEnd(tool, result);
         const startedAt = this._activeToolStarts.get(tool);
@@ -122,15 +130,26 @@ export class CompanionServer extends EventEmitter {
         this.wsSink.writeEvent('tool_progress', { tool, status: result?.error ? 'failed' : 'completed', result });
       };
 
-      const origOnResponse = agent.onResponse;
       agent.onResponse = (response) => {
         if (origOnResponse) origOnResponse(response);
         this.lastModel = agent.model || this.lastModel;
         this.wsSink.write('response', { type: 'response', content: response });
       };
+
+      this._restoreAgentEvents = () => {
+        if (agent.onToolStart === this._restoreAgentEvents?.wrappedOnToolStart) agent.onToolStart = origOnToolStart;
+        if (agent.onToolEnd === this._restoreAgentEvents?.wrappedOnToolEnd) agent.onToolEnd = origOnToolEnd;
+        if (agent.onResponse === this._restoreAgentEvents?.wrappedOnResponse) agent.onResponse = origOnResponse;
+        if (agent.onContentDelta === this._restoreAgentEvents?.wrappedOnContentDelta) agent.onContentDelta = origOnContentDelta;
+      };
+      this._restoreAgentEvents.wrappedOnToolStart = agent.onToolStart;
+      this._restoreAgentEvents.wrappedOnToolEnd = agent.onToolEnd;
+      this._restoreAgentEvents.wrappedOnResponse = agent.onResponse;
+      this._restoreAgentEvents.wrappedOnContentDelta = agent.onContentDelta;
     }
 
     // Start periodic state sync
+    if (this._stateInterval) clearInterval(this._stateInterval);
     this._stateInterval = setInterval(() => {
       this._broadcastState();
     }, 5000);

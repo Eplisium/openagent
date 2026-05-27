@@ -17,6 +17,8 @@ import {
 } from './formatting.js';
 import { thinkingSpinner, respondingIndicator } from '../utils/spinners.js';
 import { VERSION } from './state.js';
+import { CONFIG } from '../config.js';
+import { getActiveSkin, getSkinTheme } from './themes.js';
 
 const TOOL_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const DEFAULT_THEME = {
@@ -29,6 +31,7 @@ const DEFAULT_THEME = {
   tool: '#cba6f7',
   user: '#89b4fa',
   assistant: '#cdd6f4',
+  header: '#cba6f7',
 };
 
 function termWidth(max = 72) {
@@ -130,13 +133,49 @@ function formatContextParts(cli) {
 // ═══════════════════════════════════════════════════════════════════
 
 /**
+ * Get the emoji for a tool from the active skin.
+ */
+export function getToolEmoji(toolName) {
+  const skin = getActiveSkin();
+  const emojis = skin.toolEmojis || {};
+  return emojis[toolName] || '⚡';
+}
+
+/**
  * Print the OpenAgent startup banner
  */
 export function printBanner() {
-  const t = { muted: '#6c7086' };
+  const skin = getActiveSkin();
+  const t = getSkinTheme();
+  const agentName = CONFIG.AGENT_NAME || skin.branding.agentName || 'Luna';
+  const version = VERSION;
+
+  const moonArt = [
+    '  ██╗   ██╗██╗     ██╗   ██╗',
+    '  ██║   ██║██║     ╚██╗ ██╔╝',
+    '  ██║   ██║██║      ╚████╔╝ ',
+    '  ╚██╗ ██╔╝██║       ██╔╝  ',
+    '   ╚████╔╝ ███████╗  ██║   ',
+    '    ╚═══╝  ╚══════╝  ╚═╝   ',
+  ];
+
+  const width = Math.min(process.stdout.columns || 80, 72);
+  const topBorder = chalk.hex(t.accent)(`  ╭${'─'.repeat(width)}╮`);
+  const bottomBorder = chalk.hex(t.accent)(`  ╰${'─'.repeat(width)}╯`);
+
   console.log('');
-  console.log(chalk.hex(t.muted)(`  openagent v${VERSION}`));
-  console.log(chalk.hex(t.muted)(`  ${'─'.repeat(termWidth())}`));
+  console.log(topBorder);
+
+  for (const line of moonArt) {
+    const pad = Math.max(0, width - line.length - 2);
+    console.log(`${chalk.hex(t.accent)('  │')}${chalk.hex(t.header || t.accent)(line)}${' '.repeat(pad)}${chalk.hex(t.accent)('│')}`);
+  }
+
+  const infoLine = `  ${agentName} @ openagent v${version}`;
+  const infoPad = Math.max(0, width - infoLine.length + 2);
+  console.log(`${chalk.hex(t.accent)('  │')}${chalk.hex(t.muted)(infoLine)}${' '.repeat(infoPad)}${chalk.hex(t.accent)('│')}`);
+
+  console.log(bottomBorder);
 }
 
 /**
@@ -175,7 +214,9 @@ export function buildPromptStatusLine(cli) {
 
   // Model name
   const modelShort = shortenModelLabel(cli.session?.agent?.model);
-  parts.push(chalk.hex(t.accent)(modelShort));
+  const skin = getActiveSkin();
+  const agentName = CONFIG.AGENT_NAME || skin.branding.agentName || 'Luna';
+  parts.push(chalk.hex(t.accent)(`${agentName} · ${modelShort}`));
 
   // Context usage
   if (cli.session?.agent) {
@@ -197,9 +238,24 @@ export function buildPromptStatusLine(cli) {
 
 export function printUserMessage(cli, content) {
   if (!content || !String(content).trim()) return false;
+  const skin = getActiveSkin();
+  const promptSym = skin.branding?.promptSymbol || '▸';
   console.log('');
-  console.log(renderWithRoleBar(cli, String(content), { role: 'user', prefix: '▸' }));
+  console.log(renderWithRoleBar(cli, String(content), { role: 'user', prefix: promptSym }));
   return true;
+}
+
+/**
+ * Print an iteration label between agent loops (like Hermes's "── iteration 3 ──")
+ */
+export function printIterationLabel(cli, iterationNum) {
+  const t = cli.theme || DEFAULT_THEME;
+  const label = ` iteration ${iterationNum} `;
+  const width = Math.min(process.stdout.columns || 80, 72);
+  const sideLen = Math.max(2, Math.floor((width - label.length) / 2));
+  const side = '─'.repeat(sideLen);
+  console.log('');
+  console.log(chalk.hex(t.muted)(`  ${side}${chalk.hex(t.accent || DEFAULT_THEME.accent)(label)}${side}`));
 }
 
 export function printSystemMessage(cli, content) {
@@ -236,7 +292,9 @@ export function printAssistantHeader(cli, { durationMs = null, toolCount = 0, us
     }
   }
   const statsStr = stats.join(' · ');
-  const inner = ` ${chalk.hex(t.tool || DEFAULT_THEME.tool)(model)}  ${chalk.hex(t.muted || DEFAULT_THEME.muted)(statsStr)} `;
+  const skin = getActiveSkin();
+  const label = skin.branding?.responseLabel || ` ${model} `;
+  const inner = ` ${chalk.hex(t.header || t.accent || DEFAULT_THEME.accent)(label)} ${chalk.hex(t.muted || DEFAULT_THEME.muted)(statsStr)} `;
   const width = Math.min(Math.max(visibleLen(inner), 24), termWidth(96));
   const pad = Math.max(0, width - visibleLen(inner));
   const top = chalk.hex(t.accent || DEFAULT_THEME.accent)(`  ╭${'─'.repeat(width)}╮`);
@@ -504,8 +562,9 @@ function renderToolState(cli, store, state) {
   const render = () => {
     const elapsedStr = formatDuration(Date.now() - state.startedAt);
     const frame = TOOL_FRAMES[state.frame % TOOL_FRAMES.length];
+    const emoji = getToolEmoji(state.toolName);
     state.frame++;
-    state.text = `  ${chalk.hex(t.tool)(frame)} ${chalk.hex(t.tool)(state.toolName)}${state.argPreview ? ` ${state.argPreview}` : ''}${chalk.hex(t.muted)(` [${elapsedStr}]`)}`;
+    state.text = `  ${chalk.hex(t.tool)(frame)} ${emoji} ${chalk.hex(t.tool)(state.toolName)}${state.argPreview ? ` ${state.argPreview}` : ''}${chalk.hex(t.muted)(` [${elapsedStr}]`)}`;
     clearInline(state.width);
     process.stdout.write(state.text);
   };
@@ -541,7 +600,7 @@ function renderToolBatch(cli, store) {
   }
   const lines = [
     `  ${chalk.hex(t.tool)(frame)} ${active.length} tools running... ${chalk.hex(t.muted)(elapsedStr)}`,
-    ...active.slice(0, 6).map(state => `    ${chalk.hex(t.tool)('▸')} ${chalk.hex(t.tool)(state.toolName)}${state.argPreview ? ` ${state.argPreview}` : ''}`),
+    ...active.slice(0, 6).map(state => `    ${getToolEmoji(state.toolName)} ${chalk.hex(t.tool)(state.toolName)}${state.argPreview ? ` ${state.argPreview}` : ''}`),
   ];
   process.stdout.write(lines.join('\n'));
   store.batchRows = lines.length;
@@ -568,8 +627,9 @@ function buildToolResultLine(cli, state, toolName, result, taskStartTime) {
   const ok = result.success !== false;
   const status = ok ? chalk.hex(t.success)('✓') : chalk.hex(t.error)('✗');
   const summary = ok ? summarizeToolResult(cli, toolName, resultData) : summarizeToolError(result, resultData);
+  const emoji = getToolEmoji(toolName);
   if (state) state.detailLines = buildToolDetailLines(cli, toolName, result, resultData);
-  return `  ${status} ${chalk.hex(t.tool)(toolName)}${argPreview ? ` ${argPreview}` : ''}${summary ? ` ${summary}` : ''}${chalk.hex(t.muted)(` [${elapsedStr}]`)}`;
+  return `  ${status} ${emoji} ${chalk.hex(t.tool)(toolName)}${argPreview ? ` ${argPreview}` : ''}${summary ? ` ${summary}` : ''}${chalk.hex(t.muted)(` [${elapsedStr}]`)}`;
 }
 
 function printPendingToolResults(store) {
@@ -872,22 +932,29 @@ export async function printEnhancedTaskSummary(cli, result, duration) {
 /**
  * Print goodbye message
  */
-export async function printGoodbye(cli) {
+export async function printGoodbye(cli, stats = {}) {
   cli.stopAutoSave();
   if (cli.sessionSaveInFlight) {
     await cli.sessionSaveInFlight.catch(() => {});
   }
 
   const elapsedMs = Date.now() - cli.sessionStartTime;
-  const elapsedStr = formatElapsedTime(elapsedMs);
-  const taskCount = cli.taskCount || 0;
+  const taskCount = stats.taskCount ?? cli.taskCount ?? 0;
   // Reconcile from client for accurate cost
   const clientStats = cli.session?.agent?.client?.getStats?.();
-  const cost = clientStats?.totalCost ?? cli.totalCost ?? 0;
-  const costStr = cost > 0 ? formatCompactCost(cost) : '$0.00';
+  const cost = stats.cost ?? clientStats?.totalCost ?? cli.totalCost ?? 0;
+  const skin = getActiveSkin();
+  const t = cli.theme || DEFAULT_THEME;
+  const goodbye = skin.branding?.goodbye || 'Goodbye!';
+  const elapsed = stats.elapsedMs > 0 ? formatDuration(stats.elapsedMs) : formatElapsedTime(elapsedMs);
+  const costStr = cost > 0 ? formatSmartMoney(cost) : '';
+  const parts = [goodbye];
+  if (taskCount > 0) parts.push(`${taskCount} tasks`);
+  if (elapsed) parts.push(elapsed);
+  if (costStr) parts.push(costStr);
 
   console.log('');
-  console.log(muted(cli, `  session complete · ${taskCount} tasks · ${elapsedStr} · ${costStr}`));
+  console.log(chalk.hex(t.muted)(`  ${parts.join(' · ')}`));
 
   if (cli.state) {
     cli.state.totalSessions = (cli.state.totalSessions || 0) + 1;
@@ -1031,8 +1098,10 @@ export function showHistory(cli) {
  */
 export function showHelp(_cli) {
   const cli = _cli;
+  const skin = getActiveSkin();
+  const helpHeader = skin.branding?.helpHeader || 'help';
   console.log('');
-  console.log(divider(cli, 'help'));
+  console.log(divider(cli, helpHeader));
   console.log(formatCommandList([...COMMAND_ENTRIES.slice(0, -1), ['/reset', 'Alias for /new'], COMMAND_ENTRIES.at(-1)], cli.theme)
     .split('\n')
     .map(line => `  ${line}`)

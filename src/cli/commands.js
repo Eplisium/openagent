@@ -17,6 +17,8 @@ export const COMMAND_ALIASES = {
   'h': 'help',
   't': 'tools',
   'cl': 'clear',
+  'cs': 'clear-screen',
+  'cmp': 'compact',
   'st': 'stream',
   'v': 'verbose',
   'tmp': 'templates',

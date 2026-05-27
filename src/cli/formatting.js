@@ -11,27 +11,37 @@
  * Format large numbers in compact form (1.2M, 500K, etc.)
  */
 export function formatCompactNumber(value) {
-  if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M';
-  if (value >= 1000) return (value / 1000).toFixed(0) + 'K';
-  return value.toString();
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '0';
+  const sign = n < 0 ? '-' : '';
+  const abs = Math.abs(n);
+  if (abs >= 1000000000) return sign + (abs / 1000000000).toFixed(abs >= 10000000000 ? 0 : 1).replace(/\.0$/, '') + 'B';
+  if (abs >= 1000000) return sign + (abs / 1000000).toFixed(abs >= 10000000 ? 0 : 1).replace(/\.0$/, '') + 'M';
+  if (abs >= 1000) return sign + (abs / 1000).toFixed(abs >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'K';
+  return sign + Math.round(abs).toString();
 }
 
 /**
  * Format milliseconds into a human-readable duration string
  */
 export function formatDuration(ms) {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
+  const value = Math.max(0, Number(ms) || 0);
+  if (value < 1000) return `${Math.round(value)}ms`;
+  return `${(value / 1000).toFixed(1)}s`;
 }
 
 /**
  * Format elapsed time in a verbose style (e.g., "2m 30s", "1h 5m")
  */
 export function formatElapsedTime(ms) {
-  const seconds = Math.floor(ms / 1000);
+  const seconds = Math.floor(Math.max(0, Number(ms) || 0) / 1000);
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
 
+  if (days > 0) {
+    return `${days}d ${hours % 24}h`;
+  }
   if (hours > 0) {
     return `${hours}h ${minutes % 60}m`;
   }
@@ -85,6 +95,13 @@ export function getRelativeTime(date) {
   return date.toLocaleDateString();
 }
 
+/**
+ * Format an iteration label for display
+ */
+export function formatIterationLabel(num) {
+  return `iteration ${num}`;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // 🔧 Text Utilities
 // ═══════════════════════════════════════════════════════════════════
@@ -93,8 +110,8 @@ export function getRelativeTime(date) {
  * Simple text similarity check (Jaccard on words)
  */
 export function textSimilarity(a, b) {
-  const wordsA = new Set(a.toLowerCase().split(/\s+/));
-  const wordsB = new Set(b.toLowerCase().split(/\s+/));
+  const wordsA = new Set(String(a || '').toLowerCase().split(/\s+/).filter(Boolean));
+  const wordsB = new Set(String(b || '').toLowerCase().split(/\s+/).filter(Boolean));
   const intersection = new Set([...wordsA].filter(w => wordsB.has(w)));
   const union = new Set([...wordsA, ...wordsB]);
   return union.size > 0 ? intersection.size / union.size : 0;
@@ -130,6 +147,13 @@ export function deduplicateResponse(content) {
     const firstHalf = content.substring(0, half).trim();
     const secondHalf = content.substring(half).trim();
     if (firstHalf.length > 100 && secondHalf.length > 100) {
+      const structuralMarkers = [/```/g, /^\s{0,3}#{1,6}\s/gm, /^\s*[-*+]\s/gm, /^\s*\d+\.\s/gm, /^\|.+\|$/gm];
+      const markerDeltaOk = structuralMarkers.every((regex) => {
+        const left = firstHalf.match(regex)?.length || 0;
+        const right = secondHalf.match(regex)?.length || 0;
+        return Math.abs(left - right) <= Math.max(1, Math.ceil(Math.max(left, right) * 0.1));
+      });
+      if (!markerDeltaOk) return content;
       const similarity = textSimilarity(firstHalf, secondHalf);
       if (similarity > 0.95) {
         return firstHalf;

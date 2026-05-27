@@ -19,9 +19,11 @@ import { createGitTools } from '../tools/gitTools.js';
 import { createSubagentTools } from '../tools/subagentTools.js';
 import { createTaskTools } from '../tools/taskTools.js';
 import { MemoryManager } from '../memory/MemoryManager.js';
+import { SessionHistory } from '../sessionHistory.js';
 import { SkillManager } from '../skills/SkillManager.js';
 import { HookManager } from '../hooks/HookManager.js';
 import { createMemoryTools } from '../tools/memoryTools.js';
+import { createSessionHistoryTools } from '../tools/sessionHistoryTools.js';
 import { createSkillTools } from '../tools/skillTools.js';
 import { createMcpTools, autoConnectServers } from '../tools/mcpTools.js';
 import chalk from '../utils/chalk-compat.js';
@@ -165,6 +167,11 @@ export class AgentSession {
     const memoryTools = createMemoryTools(this.memoryManager);
     this.toolRegistry.registerAll(memoryTools);
 
+    // Register session history search tools
+    this.sessionHistory = new SessionHistory({ sessionId: this.sessionId });
+    const sessionHistoryTools = createSessionHistoryTools(this.sessionHistory);
+    this.toolRegistry.registerAll(sessionHistoryTools);
+
     // Initialize skill manager
     this.skillManager = new SkillManager({
       workingDir: this.workingDir,
@@ -193,6 +200,7 @@ export class AgentSession {
       systemPrompt: options.systemPrompt || this.buildSystemPrompt(),
       workspaceDir: this.activeWorkspace?.workspaceDir || this.workingDir,
     });
+    this.agent.sessionHistory = this.sessionHistory;
     
     // Set parent agent reference for subagents to inherit model
     this.subagentManager.parentAgent = this.agent;
@@ -247,6 +255,9 @@ export class AgentSession {
     } catch { /* best-effort */ }
     try {
       this.agent?.client?.abortAll?.();
+    } catch { /* best-effort */ }
+    try {
+      this.sessionHistory?.flush?.().catch(() => {});
     } catch { /* best-effort */ }
 
     // Clear active graph executions
@@ -1399,6 +1410,9 @@ export class AgentSession {
     // Stop API client cache cleanup timer
     if (this.agent?.client?.stopCacheCleanup) {
       this.agent.client.stopCacheCleanup();
+    }
+    if (this.sessionHistory?.buffer?.length > 0) {
+      this.sessionHistory.flush().catch(() => {});
     }
 
     // Clear workflow graphs

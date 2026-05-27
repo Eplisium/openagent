@@ -75,8 +75,6 @@ export async function loadSession(cli) {
     if (loaded._cliSessionMeta) {
       const meta = loaded._cliSessionMeta;
       if (meta.sessionStartTime) cli.sessionStartTime = meta.sessionStartTime;
-      if (meta.totalCost != null) cli.totalCost = meta.totalCost;
-      if (meta.totalTokens != null) cli.totalTokens = meta.totalTokens;
       if (meta.taskCount != null) cli.taskCount = meta.taskCount;
     }
 
@@ -400,10 +398,8 @@ export async function resetSession(cli) {
     cli.taskCount = 0;
     cli.history = [];
     cli.sessionStartTime = Date.now();
-    cli.totalCost = 0;
-    cli.totalTokens = 0;
-    cli.currentTask = null;
-    cli.taskStartTime = null;
+    cli.session?.agent?.client?.clearHistory?.();
+    cli.endTaskState?.(null, 0);
     console.log(chalk.green(`✓ Started new session ${chalk.cyan(cli.session.sessionId)}`));
   }
 }

@@ -13,6 +13,7 @@ export { extractContent, htmlToMarkdown, extractMetadata, extractPdfContent, ext
 export { createGitTools, gitTools, gitStatusTool, gitLogTool, gitDiffTool, gitAddTool, gitCommitTool, gitPushTool, gitPullTool, gitBranchTool, gitInfoTool } from './gitTools.js';
 export { createSubagentTools } from './subagentTools.js';
 export { createTaskTools } from './taskTools.js';
+export { createSessionHistoryTools } from './sessionHistoryTools.js';
 export { createMcpTools } from './mcpTools.js';
 export { createA2ATools } from './a2aTools.js';
 export { createAGUITools } from './aguiTools.js';

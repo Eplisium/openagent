@@ -29,6 +29,7 @@ export const DEFAULT_STATE = {
     renderMarkdown: true,
     streaming: true,
     showTokenUsage: true,
+    theme: 'luna',
     defaultModel: null,
   },
   stats: {

@@ -3,7 +3,8 @@
  */
 
 import chalk from '../utils/chalk-compat.js';
-import { formatCompactNumber, miniBar } from './ui.js';
+import { formatCompactNumber } from './formatting.js';
+import { miniBar } from './display.js';
 
 function printPanel(label, lines) {
   const width = Math.min(process.stdout.columns || 80, 72);

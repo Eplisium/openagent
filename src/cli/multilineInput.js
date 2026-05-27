@@ -63,6 +63,8 @@ export class MultilineInput {
     // Rendering
     this._rendered = 0; // number of lines last rendered
     this._cursorRenderLine = 0; // cursor line within the rendered block
+    this._renderedRows = 0;
+    this._cursorRenderRow = 0;
     this._active = false;
     this._resolve = null;
     this._handler = null;
@@ -337,7 +339,8 @@ export class MultilineInput {
       curIdx = d;
     }
 
-    const curCol = promptW + (this.col % contentW);
+    const cursorSegment = disp[curIdx] || { w: 0 };
+    const curCol = promptW + Math.max(0, Math.min(contentW, this.col - cursorSegment.w));
 
     // Build output lines
     const out = [];
@@ -364,7 +367,7 @@ export class MultilineInput {
 
     // Status bar at bottom
     const status = chalk.hex(this.theme.muted)(`Ln ${this.row + 1}, Col ${this.col + 1} │ ↵ send · Ctrl+O newline · Ctrl+K exit`);
-    out.push(' '.repeat(promptW) + status);
+    out.push(this._fitLine(' '.repeat(promptW) + status, cols));
 
     // Clear previous render
     this._clearRenderedBlock();
@@ -376,8 +379,10 @@ export class MultilineInput {
     // offset = how many lines before the content starts
     const contentOffset = (this.statusLine ? 2 : 0) + (isEmpty && this.placeholder ? 1 : 0);
     const cursorLine = contentOffset + curIdx;
-    const totalOut = out.length;
-    const linesUp = totalOut - 1 - cursorLine;
+    const rowCounts = out.map(line => this._wrapRows(line, cols));
+    const totalOutRows = rowCounts.reduce((sum, rows) => sum + rows, 0);
+    const cursorVisualRow = rowCounts.slice(0, cursorLine).reduce((sum, rows) => sum + rows, 0);
+    const linesUp = totalOutRows - 1 - cursorVisualRow;
     if (linesUp > 0) {
       this.stdout.write(`\x1b[${linesUp}A`);
     }
@@ -388,29 +393,35 @@ export class MultilineInput {
 
     this._rendered = out.length;
     this._cursorRenderLine = cursorLine;
+    this._renderedRows = totalOutRows;
+    this._cursorRenderRow = cursorVisualRow;
   }
 
   _clearRenderedBlock() {
-    if (this._rendered <= 0) return;
+    const renderedRows = this._renderedRows || this._rendered;
+    const cursorRow = this._cursorRenderRow || this._cursorRenderLine;
+    if (renderedRows <= 0) return;
 
-    if (this._cursorRenderLine > 0) {
-      this.stdout.write(`\x1b[${this._cursorRenderLine}A`);
+    if (cursorRow > 0) {
+      this.stdout.write(`\x1b[${cursorRow}A`);
     }
 
-    for (let i = 0; i < this._rendered; i++) {
+    for (let i = 0; i < renderedRows; i++) {
       this.stdout.write('\r\x1b[2K');
-      if (i < this._rendered - 1) {
+      if (i < renderedRows - 1) {
         this.stdout.write('\x1b[1B');
       }
     }
 
-    if (this._rendered > 1) {
-      this.stdout.write(`\x1b[${this._rendered - 1}A`);
+    if (renderedRows > 1) {
+      this.stdout.write(`\x1b[${renderedRows - 1}A`);
     }
 
     this.stdout.write('\r');
     this._rendered = 0;
     this._cursorRenderLine = 0;
+    this._renderedRows = 0;
+    this._cursorRenderRow = 0;
   }
 
   _renderSel(li, text, colOff) {
@@ -429,6 +440,19 @@ export class MultilineInput {
 
   _sw(s) {
     return s.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').length;
+  }
+
+  _wrapRows(line, cols) {
+    const width = Math.max(1, cols || 80);
+    return Math.max(1, Math.ceil(this._sw(String(line || '')) / width));
+  }
+
+  _fitLine(line, cols) {
+    const width = Math.max(1, cols || 80);
+    const text = String(line || '');
+    if (this._sw(text) <= width) return text;
+    const plain = text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '');
+    return plain.slice(0, Math.max(1, width - 1));
   }
 
   // ═══════════════════════════════════════════════════════════

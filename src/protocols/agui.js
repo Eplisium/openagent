@@ -8,6 +8,13 @@
 import chalk from '../utils/chalk-compat.js';
 import http from 'http';
 
+const AGUI_COLORS = {
+  success: '#a6e3a1',
+  warning: '#f9e2af',
+  muted: '#6c7086',
+  accent: '#89b4fa',
+};
+
 /** @typedef {import('http').Server} Server */
 /** @typedef {import('http').IncomingMessage} IncomingMessage */
 /** @typedef {import('http').ServerResponse} ServerResponse */
@@ -88,7 +95,7 @@ export class AGUIServer {
       this.server = http.createServer(this.handleRequest.bind(this));
       
       this.server.listen(port, () => {
-        console.log(chalk.green(`[AG-UI] Server started on port ${port}`));
+        console.log(chalk.hex(AGUI_COLORS.success)(`[AG-UI] Server started on port ${port}`));
         resolve({ success: true, port });
       });
 
@@ -118,7 +125,7 @@ export class AGUIServer {
 
       if (this.server) {
         this.server.close(() => {
-          console.log(chalk.yellow('[AG-UI] Server stopped'));
+          console.log(chalk.hex(AGUI_COLORS.warning)('[AG-UI] Server stopped'));
           resolve();
         });
       } else {
@@ -223,10 +230,10 @@ export class AGUIServer {
           this.subscribersByChannel.delete(channel);
         }
       }
-      console.log(chalk.gray(`[AG-UI] Subscriber ${id} disconnected`));
+      console.log(chalk.hex(AGUI_COLORS.muted)(`[AG-UI] Subscriber ${id} disconnected`));
     });
 
-    console.log(chalk.cyan(`[AG-UI] New subscriber ${id} on channel "${channel}"`));
+    console.log(chalk.hex(AGUI_COLORS.accent)(`[AG-UI] New subscriber ${id} on channel "${channel}"`));
   }
 
   /**
@@ -279,7 +286,7 @@ export class AGUIServer {
           res.write(sseData);
         } catch (error) {
           // Subscriber might be disconnected
-          console.log(chalk.yellow(`[AG-UI] Failed to write to subscriber: ${error.message}`));
+          console.log(chalk.hex(AGUI_COLORS.warning)(`[AG-UI] Failed to write to subscriber: ${error.message}`));
         }
       }
     }

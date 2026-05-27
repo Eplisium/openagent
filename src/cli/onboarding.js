@@ -8,7 +8,7 @@ import * as prompts from '../utils/prompts.js';
 import { CONFIG } from '../config.js';
 import { themes } from './themes.js';
 
-const theme = themes.catppuccin;
+const theme = themes.luna || themes.catppuccin;
 const accent = chalk.hex(theme.accent);
 const success = chalk.hex(theme.success);
 const errorColor = chalk.hex(theme.error);
@@ -40,11 +40,11 @@ export async function runOnboarding(state, saveState, modelBrowser = null) {
   const line = '─'.repeat(width);
   console.log('');
   console.log(muted(`  ${line}`));
-  console.log(`  ${accent.bold('OpenAgent')}`);
+  console.log(`  ${accent.bold('Luna')} ${muted('@')} ${accent('OpenAgent')}`);
   console.log(muted(`  ${line}`));
   console.log('');
 
-  prompts.intro(muted("Let's get you set up. This takes 30 seconds."));
+  prompts.intro(muted("Hey there! I'm Luna. Let's get you set up — this takes 30 seconds."));
 
   // Step 1: API Key
   const hasApiKey = CONFIG.API_KEY && CONFIG.API_KEY.length > 0;
@@ -148,7 +148,7 @@ export async function runOnboarding(state, saveState, modelBrowser = null) {
   const closeRule = muted(`  ${'─'.repeat(panelWidth)}`);
   console.log('');
   console.log(readyRule);
-  console.log(`  ${success('✓')} ${chalk.bold("You're all set!")}`);
+  console.log(`  ${success('✓')} ${chalk.bold("You're all set! I'll be here whenever you need me.")}`);
   console.log('');
   console.log(`  ${chalk.bold('Quick Start:')}`);
   console.log(`  ${success('•')} Type any message to run as an agentic task`);
@@ -156,7 +156,7 @@ export async function runOnboarding(state, saveState, modelBrowser = null) {
   console.log(`  ${success('•')} Use /templates for common workflows`);
   console.log(`  ${success('•')} Type /help for all commands`);
   console.log('');
-  console.log(`  ${muted('This message will only show once.')}`);
+  console.log(`  ${muted('See you around! This welcome only shows once.')}`);
   console.log(closeRule);
 
   prompts.outro(muted('Press Enter to continue...'));

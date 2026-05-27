@@ -40,16 +40,29 @@ export function categorizeError(errorType, message, errorData) {
     '/hlp': '/help',
     '/hep': '/help',
     '/hel p': '/help',
+    '/hlep': '/help',
     '/exi': '/exit',
     '/exot': '/exit',
+    '/exti': '/exit',
     '/qui': '/quit',
     '/qit': '/quit',
     '/stat': '/stats',
     '/satats': '/stats',
+    '/statsu': '/stats',
     '/modle': '/model',
+    '/modl': '/model',
+    '/mdoel': '/model',
     '/histroy': '/history',
     '/histoy': '/history',
     '/histry': '/history',
+    '/stram': '/stream',
+    '/verboes': '/verbose',
+    '/contxt': '/context',
+    '/cotext': '/context',
+    '/templats': '/templates',
+    '/temlates': '/templates',
+    '/docotr': '/doctor',
+    '/docter': '/doctor',
   };
 
   for (const [typo, correct] of Object.entries(commandTypos)) {
@@ -89,7 +102,11 @@ export function categorizeError(errorType, message, errorData) {
 
   // Network errors
   if (combinedMsg.includes('network') || combinedMsg.includes('fetch') ||
-      combinedMsg.includes('econnrefused') || combinedMsg.includes('timeout') || combinedMsg.includes('enotfound')) {
+      combinedMsg.includes('econnrefused') || combinedMsg.includes('econnreset') ||
+      combinedMsg.includes('etimedout') || combinedMsg.includes('timeout') ||
+      combinedMsg.includes('enotfound') || combinedMsg.includes('eai_again') ||
+      combinedMsg.includes('socket hang up') || combinedMsg.includes('failed to fetch') ||
+      combinedMsg.includes('tls') || combinedMsg.includes('dns')) {
     return {
       statusCode: null,
       suggestions: [
@@ -221,9 +238,9 @@ export function showSmartError(errorType, details = {}) {
   const fixSuggestions = suggestions.length > 0 ? suggestions : errorCategory.suggestions;
 
   if (httpStatus) {
-    title += ` ${c.warning('⚠')} ${c.text(httpStatus)}`;
+    title += ` ${c.warning('!')} ${c.text(httpStatus)}`;
   } else if (errorCategory.statusCode) {
-    title += ` ${c.warning('⚠')} ${c.text(errorCategory.statusCode)}`;
+    title += ` ${c.warning('!')} ${c.text(errorCategory.statusCode)}`;
   }
 
   console.log('');

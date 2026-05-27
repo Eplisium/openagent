@@ -40,55 +40,38 @@ export class WsSink extends OutputAdapter {
 
   write(content, metadata = {}) {
     const type = metadata.type || 'text';
-    let wsType;
-
-    switch (type) {
-      case 'text':
-      case 'response':
-        wsType = 'response';
-        break;
-      case 'tool_start':
-        wsType = 'tool_start';
-        break;
-      case 'tool_end':
-        wsType = 'tool_end';
-        break;
-      case 'error':
-        wsType = 'error';
-        break;
-      case 'status':
-        wsType = 'state';
-        break;
-      case 'file_change':
-        wsType = 'file_change';
-        break;
-      case 'tool_progress':
-        wsType = 'tool_progress';
-        break;
-      default:
-        wsType = 'event';
-    }
-
-    this._broadcast({
-      type: wsType,
-      data: { content, ...metadata },
-      timestamp: new Date().toISOString(),
-    });
-
+    const wsType = this._mapType(type);
     const renderContent = metadata.content || content;
-    if ((wsType === 'response' || type === 'text') && renderContent) {
-      this.writeRender(renderContent, metadata);
-    }
+    this.writeEvent(wsType, { content, ...metadata }, { renderContent });
   }
 
-  writeEvent(eventType, data = {}) {
+  writeEvent(eventType, data = {}, options = {}) {
     this._broadcast({
       type: eventType,
       data,
       timestamp: new Date().toISOString(),
     });
-    if ((eventType === 'content_delta' || eventType === 'response') && (data.content || data.delta)) {
-      this.writeRender(data.content || data.delta, data);
+    const renderContent = options.renderContent ?? data.content ?? data.delta;
+    if ((eventType === 'content_delta' || eventType === 'response') && renderContent) {
+      this.writeRender(renderContent, data);
+    }
+  }
+
+  _mapType(type) {
+    switch (type) {
+      case 'text':
+      case 'response':
+        return 'response';
+      case 'tool_start':
+      case 'tool_end':
+      case 'error':
+      case 'file_change':
+      case 'tool_progress':
+        return type;
+      case 'status':
+        return 'state';
+      default:
+        return 'event';
     }
   }
 

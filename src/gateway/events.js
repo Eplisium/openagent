@@ -19,6 +19,7 @@ export const GATEWAY_EVENT_TYPES = Object.freeze({
 });
 
 export function createGatewayEvent(type, data = {}) {
+  data = data || {};
   const sessionId = data.sessionId || data.targetId || null;
   const iteration = Number.isFinite(data.iteration) ? data.iteration : null;
   const enriched = enrichEvent(type, data);
@@ -34,6 +35,7 @@ export function createGatewayEvent(type, data = {}) {
 }
 
 function enrichEvent(type, data) {
+  data = data || {};
   switch (type) {
     case GATEWAY_EVENT_TYPES.CONTENT_DELTA:
       return {
@@ -101,6 +103,7 @@ function detectMarkdownBlock(content) {
 
 function categorizeTool(toolName = '') {
   const name = String(toolName).toLowerCase();
+  if (/(research|scholar|paper|arxiv|pubmed|semantic|citation)/.test(name)) return 'research';
   if (/(read|write|edit|file|directory|ls|glob)/.test(name)) return 'file_ops';
   if (/(exec|shell|terminal|command)/.test(name)) return 'shell';
   if (/(search|grep|rg|find)/.test(name)) return 'search';
@@ -136,9 +139,17 @@ function inferResultType(data) {
 }
 
 function computeLineDiff(data) {
+  data = data || {};
   const result = data.result || {};
   if (Number.isFinite(result.additions) || Number.isFinite(result.deletions)) {
     return { additions: result.additions || 0, deletions: result.deletions || 0 };
+  }
+  if (Number.isFinite(result.linesAdded) || Number.isFinite(result.linesRemoved) ||
+      Number.isFinite(data.linesAdded) || Number.isFinite(data.linesRemoved)) {
+    return {
+      additions: result.linesAdded ?? data.linesAdded ?? 0,
+      deletions: result.linesRemoved ?? data.linesRemoved ?? 0,
+    };
   }
   if (Number.isFinite(result.linesWritten) || Number.isFinite(result.linesDeleted) || Number.isFinite(result.linesModified)) {
     return {

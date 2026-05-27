@@ -83,6 +83,10 @@ export class Agent {
     this.maxRetries = options.maxRetries || 3;
     this.retryDelay = options.retryDelay || 1000;
     this.retryBackoff = options.retryBackoff || 2;
+    this.fallbackModels = options.fallbackModels || CONFIG.FALLBACK_MODELS || [];
+    if (this.fallbackModels.length === 0 && CONFIG.FALLBACK_MODEL) {
+      this.fallbackModels = [CONFIG.FALLBACK_MODEL];
+    }
     
     // Performance tracking
     this.performanceMetrics = {
@@ -317,6 +321,17 @@ For complex multi-step tasks, use subagents:
 ## Skills
 If available skills match this task, use the use_skill tool to load specialized instructions.
 Skills provide domain-specific workflows for: code-review, debug, refactor, testing.
+
+## Memory & Learning
+
+You have persistent memory via save_memory/get_memory tools. USE THEM PROACTIVELY:
+
+- When you learn something about the user's preferences or environment → save_memory
+- When you discover a project convention, gotcha, or pattern → save_memory
+- When the user corrects you → save_memory the correction
+- When you complete a significant task and learned something useful → save_memory
+
+Good memory entries are specific and actionable. Bad entries are vague.
 
 ## Completion
 When done, provide a clear summary: what changed, why, what was verified, and any remaining work.`;
@@ -1975,7 +1990,7 @@ Task: ${userInput}`;
         // Use non-streaming fallback for this iteration
         let response;
         try {
-          response = await this.getLLMResponseWithRetry(0, messagesForLLM);
+          response = await this.getLLMResponseWithRetry(0, messagesForLLM, this.fallbackModels);
         } catch (apiError) {
           this.consecutiveApiErrors++;
           if (this.consecutiveApiErrors >= 3) {
@@ -2222,6 +2237,19 @@ Task: ${userInput}`;
    */
   async run(userInput, options = {}) {
     const startTime = Date.now();
+    let sessionHistoryTurn = null;
+    const updateSessionHistoryTurn = (response, history, metadata = {}) => {
+      if (!sessionHistoryTurn) return;
+      sessionHistoryTurn.assistantResponse = typeof response === 'string' ? response : '';
+      sessionHistoryTurn.model = this.model;
+      sessionHistoryTurn.toolCalls = (history || []).flatMap(entry =>
+        (entry.toolCalls || []).map(name => ({ name }))
+      );
+      sessionHistoryTurn.metadata = {
+        ...sessionHistoryTurn.metadata,
+        ...metadata,
+      };
+    };
     this.state = 'running';
     this.iterationCount = 0;
     this.lastError = null;
@@ -2241,6 +2269,17 @@ Task: ${userInput}`;
     if (userInput !== undefined && userInput !== null) {
       this.maybeResetWorkingSet(userInput);
       this.pushMessage({ role: 'user', content: userInput });
+      if (this.sessionHistory) {
+        try {
+          sessionHistoryTurn = this.sessionHistory.recordTurn({
+            userMessage: userInput,
+            model: this.model,
+            metadata: { status: 'started' },
+          });
+        } catch {
+          sessionHistoryTurn = null;
+        }
+      }
     }
 
     // Project structure discovery: inject codebase context on first run
@@ -2257,6 +2296,13 @@ Task: ${userInput}`;
     if (this.streaming) {
       try {
         const result = await this.runWithStreaming(userInput, options);
+        updateSessionHistoryTurn(result?.response, result?.history, {
+          status: result?.completed ? 'completed' : 'stopped',
+          stopReason: result?.stopReason,
+        });
+        if (this.sessionHistory && this.sessionHistory.buffer.length > 0) {
+          this.sessionHistory.flush().catch(() => {});
+        }
         this.state = 'completed';
         this.performanceMetrics.totalExecutionTime = Date.now() - startTime;
         return result;
@@ -2374,7 +2420,7 @@ Task: ${userInput}`;
         // Get LLM response with tools (with retry logic)
         let response;
         try {
-          response = await this.getLLMResponseWithRetry(0, messagesForLLM);
+          response = await this.getLLMResponseWithRetry(0, messagesForLLM, this.fallbackModels);
         } catch (apiError) {
           this.consecutiveApiErrors++;
           if (this.consecutiveApiErrors >= 3) {
@@ -2488,6 +2534,10 @@ Task: ${userInput}`;
       
       this.state = 'completed';
       this.performanceMetrics.totalExecutionTime = Date.now() - startTime;
+      updateSessionHistoryTurn(finalResponse, runHistory, {
+        status: this.stopReason === 'completed' ? 'completed' : 'stopped',
+        stopReason: this.stopReason,
+      });
       
       return {
         response: finalResponse,
@@ -2513,9 +2563,16 @@ Task: ${userInput}`;
       if (this.onError) {
         this.onError(error);
       }
+      updateSessionHistoryTurn('', runHistory, {
+        status: 'error',
+        error: error.message,
+      });
       
       throw error;
     } finally {
+      if (this.sessionHistory && this.sessionHistory.buffer.length > 0) {
+        this.sessionHistory.flush().catch(() => {});
+      }
       this.abortController = null;
     }
   }
@@ -2523,9 +2580,10 @@ Task: ${userInput}`;
   /**
    * Get LLM response with tool calling and retry logic
    */
-  async getLLMResponseWithRetry(retryCount = 0, messages = null) {
+  async getLLMResponseWithRetry(retryCount = 0, messages = null, fallbackCandidates = null, originalError = null) {
     const maxRetries = this.maxRetries;
     const messagesToSend = messages || this.messages;
+    const fallbackModels = fallbackCandidates || this.fallbackModels;
     
     // Use model's actual max output — reducing it makes truncation WORSE, not better
     const maxTokens = this.maxOutputTokens;
@@ -2582,7 +2640,35 @@ Task: ${userInput}`;
         await this.sleep(this.retryDelay * Math.pow(this.retryBackoff, retryCount));
         
         // Retry — context was already compacted above
-        return this.getLLMResponseWithRetry(retryCount + 1, messagesToSend);
+        return this.getLLMResponseWithRetry(retryCount + 1, messagesToSend, fallbackModels, originalError);
+      }
+
+      const statusCode = error.statusCode || error.details?.statusCode;
+      const errorCode = error.code || '';
+      const errorMessage = error.message || '';
+      const shouldFallback =
+        errorCode === 'RATE_LIMIT_ERROR' ||
+        errorCode === 'AUTH_ERROR' ||
+        errorCode === 'AUTHENTICATION_ERROR' ||
+        errorCode === 'SERVICE_ERROR' ||
+        /^HTTP_5\d\d$/.test(errorCode) ||
+        errorCode === 'HTTP_401' ||
+        errorCode === 'HTTP_403' ||
+        statusCode === 429 ||
+        statusCode === 401 ||
+        statusCode === 403 ||
+        (statusCode && statusCode >= 500) ||
+        /\b429\b/.test(errorMessage) ||
+        /\b(?:401|403)\b/.test(errorMessage) ||
+        /\b5\d\d\b/.test(errorMessage) ||
+        errorMessage.toLowerCase().includes('rate limit');
+
+      if (shouldFallback && fallbackModels && fallbackModels.length > 0 && retryCount < fallbackModels.length) {
+        const fallbackModel = fallbackModels[retryCount];
+        const failedModel = this.model;
+        logger.warn(`Model ${failedModel} failed (${error.code || error.message}), falling back to ${fallbackModel}`);
+        this.model = fallbackModel;
+        return this.getLLMResponseWithRetry(retryCount + 1, messagesToSend, fallbackModels, originalError || error);
       }
       
       if (error.code === 'TIMEOUT') {
@@ -2593,7 +2679,7 @@ Task: ${userInput}`;
       } else {
         logger.error(`LLM Error: ${error.message}`, { code: error.code });
       }
-      throw error;
+      throw originalError || error;
     }
   }
   

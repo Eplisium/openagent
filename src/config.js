@@ -32,6 +32,10 @@ export const CONFIG = {
   // API Settings
   BASE_URL: 'https://openrouter.ai/api/v1',
   API_KEY: process.env.OPENROUTER_API_KEY || '',
+
+  // Agent Identity
+  AGENT_NAME: process.env.AGENT_NAME || 'Luna',
+  AGENT_TAGLINE: 'your AI companion',
   
   // App Attribution Headers
   HEADERS: {

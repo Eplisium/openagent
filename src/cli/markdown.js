@@ -35,11 +35,11 @@ function renderInline(tokens) {
         if (token.tokens && token.tokens.length > 0) {
           return renderInline(token.tokens);
         }
-        return token.escaped ? token.text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') : token.text;
+        return token.text || '';
       case 'strong':
-        return chalk.bold(token.text || '');
+        return chalk.bold(token.tokens ? renderInline(token.tokens) : (token.text || ''));
       case 'em':
-        return chalk.italic(token.text || '');
+        return chalk.italic(token.tokens ? renderInline(token.tokens) : (token.text || ''));
       case 'del':
         return chalk.dim.strikethrough(token.text || '');
       case 'codespan':
@@ -85,13 +85,17 @@ renderer.heading = function(token) {
 // Code blocks with reduced chrome and no line numbers by default.
 renderer.code = function(token) {
   const code = token?.text || '';
-  const language = token?.lang || 'text';
+  const rawLanguage = String(token?.lang || '').trim();
+  const language = rawLanguage || 'text';
   const highlighted = highlightCode(code, language, activeTheme);
   const lines = highlighted.split('\n');
   const codeLines = code.replace(/\r/g, '').replace(/\n$/, '').split('\n');
   if (codeLines.length <= 2) {
-    const prefix = chalk.hex(activeTheme.muted)(`${language} │ `);
-    const pad = chalk.hex(activeTheme.muted)(`${' '.repeat(language.length)} │ `);
+    const label = rawLanguage && rawLanguage !== 'text' ? rawLanguage : '';
+    const prefixText = label ? `${label} │ ` : '│ ';
+    const padText = label ? `${' '.repeat(label.length)} │ ` : '│ ';
+    const prefix = chalk.hex(activeTheme.muted)(prefixText);
+    const pad = chalk.hex(activeTheme.muted)(padText);
     const compact = lines.map((line, index) => `${index === 0 ? prefix : pad}${line}`).join('\n');
     return `\n${compact}\n`;
   }
@@ -114,7 +118,12 @@ renderer.link = function(token) {
 // Blockquotes with left-bar accent
 renderer.blockquote = function(token) {
   const inner = token.tokens ? marked.parser(token.tokens) : (token.text || '');
-  const clean = inner.replace(/<\/?p>/g, '').trim();
+  const clean = inner
+    .replace(/<\/?p>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim();
   const bar = chalk.hex(activeTheme.accent)('│');
   return clean.split('\n').map(line => `${bar} ${chalk.italic(line)}`).join('\n') + '\n';
 };
@@ -237,10 +246,13 @@ marked.use({ renderer });
 export function renderMarkdown(text, theme = activeTheme) {
   if (!text || typeof text !== 'string') return text || '';
   activeTheme = { ...activeTheme, ...(theme || {}) };
+  listDepth = 0;
   try {
     const result = marked.parse(text);
+    listDepth = 0;
     return typeof result === 'string' ? result.trimEnd() : text;
   } catch {
+    listDepth = 0;
     return text;
   }
 }
