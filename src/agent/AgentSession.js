@@ -20,8 +20,7 @@ import { createSubagentTools } from '../tools/subagentTools.js';
 import { createTaskTools } from '../tools/taskTools.js';
 import { MemoryManager } from '../memory/MemoryManager.js';
 import { SessionHistory } from '../sessionHistory.js';
-import { ToolsetGating, PROFILES } from '../../enhanced/toolset-gating/index.js';
-import { CronScheduler } from '../../enhanced/cron-scheduler/index.js';
+
 import { SkillManager } from '../skills/SkillManager.js';
 import { HookManager } from '../hooks/HookManager.js';
 import { createMemoryTools } from '../tools/memoryTools.js';
@@ -174,18 +173,7 @@ export class AgentSession {
     const sessionHistoryTools = createSessionHistoryTools(this.sessionHistory);
     this.toolRegistry.registerAll(sessionHistoryTools);
     
-    // ── Enhanced modules ──
-    // Toolset gating (profile-based tool filtering)
-    this.toolsetGating = new ToolsetGating({
-      profile: options.toolsetProfile || 'full',
-      enabledToolsets: options.enabledToolsets,
-      disabledToolsets: options.disabledToolsets,
-    });
-    
-    // Cron scheduler
-    this.cronScheduler = new CronScheduler({
-      verbose: options.verbose !== false,
-    });
+
 
     // Initialize skill manager
     this.skillManager = new SkillManager({

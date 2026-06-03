@@ -7,7 +7,7 @@ import { parseXmlToolCalls, hasXmlToolCalls } from '../tools/xmlToolParser.js';
 import { CONFIG } from '../config.js';
 import { logger } from '../logger.js';
 import { ContextAllocator } from './contextAllocator.js';
-import { TrajectoryCompressor } from '../../enhanced/trajectory-compressor/index.js';
+
 import { StallDetector } from './StallDetector.js';
 import { RetryHandler } from './RetryHandler.js';
 import { ContextManager } from './ContextManager.js';
@@ -71,13 +71,7 @@ export class Agent {
     // Hierarchical context allocation
     this.contextAllocator = new ContextAllocator(this.maxContextTokens);
     
-    // Enhanced trajectory compressor (protects first/last turns, extracts knowledge)
-    this.trajectoryCompressor = new TrajectoryCompressor({
-      maxContextTokens: this.maxContextTokens,
-      compactThreshold: this.compactThreshold,
-      protectFirstN: 2,
-      protectLastN: 6,
-    });
+
 
     // Working set: tracks files being actively edited for priority context allocation
     this.workingSet = new Set();
