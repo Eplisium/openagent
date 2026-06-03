@@ -13,7 +13,12 @@ import {
   formatElapsedTime,
   truncateInline,
   shortenModelLabel,
-  getRelativeTime
+  getRelativeTime,
+  deduplicateResponse,
+  responsesAreSimilar,
+  normalizeResponseText,
+  formatTokens,
+  formatCost
 } from './formatting.js';
 import { thinkingSpinner, respondingIndicator } from '../utils/spinners.js';
 import { VERSION } from './state.js';
@@ -88,6 +93,124 @@ function clearInline(width = 120) {
 
 function visibleLen(str) {
   return String(str || '').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').length;
+}
+
+function markContentRendered(cli, content, { intermediate = false } = {}) {
+  const text = String(content || '').trim();
+  if (!text) return;
+  const key = normalizeResponseText(text);
+  cli._lastRenderedContent = text;
+  cli._lastRenderedContentKey = key;
+  cli._renderedContentHistory ||= [];
+  if (!cli._renderedContentHistory.some(entry => entry.key === key)) {
+    cli._renderedContentHistory.push({
+      content: text,
+      key,
+      intermediate,
+      at: Date.now(),
+    });
+    cli._renderedContentHistory = cli._renderedContentHistory.slice(-12);
+  }
+  if (intermediate) {
+    cli._lastIntermediateContent = text;
+    cli._lastIntermediateContentKey = key;
+  }
+}
+
+function getRenderedContentCandidates(cli) {
+  const candidates = [];
+  const seen = new Set();
+  const add = (content) => {
+    const text = String(content || '').trim();
+    if (!text) return;
+    const key = normalizeResponseText(text);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    candidates.push(text);
+  };
+
+  add(cli._lastRenderedContent);
+  add(cli._lastIntermediateContent);
+  for (const entry of [...(cli._renderedContentHistory || [])].reverse()) {
+    add(entry?.content);
+  }
+
+  return candidates;
+}
+
+export function contentWasAlreadyRendered(cli, content) {
+  const text = String(content || '').trim();
+  if (!text) return false;
+  for (const candidate of getRenderedContentCandidates(cli)) {
+    if (responsesAreSimilar(candidate, text)) return true;
+  }
+  return false;
+}
+
+function normalizeForMatchWithMap(value) {
+  const source = String(value || '');
+  let text = '';
+  const map = [];
+  let pendingSpace = false;
+
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index];
+    if (/\s/.test(char)) {
+      if (text.length > 0) pendingSpace = true;
+      continue;
+    }
+    if (pendingSpace) {
+      text += ' ';
+      map.push(index);
+      pendingSpace = false;
+    }
+    text += char.toLowerCase();
+    map.push(index);
+  }
+
+  return { text, map };
+}
+
+function stripRenderedCandidate(content, renderedContent) {
+  const source = String(content || '').trim();
+  const rendered = String(renderedContent || '').trim();
+  if (!source || !rendered) return source;
+
+  if (source.startsWith(rendered)) {
+    return source.slice(rendered.length).trimStart();
+  }
+
+  const exactIndex = source.indexOf(rendered);
+  if (exactIndex >= 0) {
+    return source.slice(exactIndex + rendered.length).trimStart();
+  }
+
+  const normalizedSource = normalizeForMatchWithMap(source);
+  const normalizedRendered = normalizeResponseText(rendered);
+  if (normalizedRendered.length < 30) return source;
+
+  const normalizedIndex = normalizedSource.text.indexOf(normalizedRendered);
+  if (normalizedIndex < 0) return source;
+
+  const normalizedEnd = normalizedIndex + normalizedRendered.length - 1;
+  const originalEnd = normalizedSource.map[normalizedEnd];
+  if (originalEnd == null) return source;
+  return source.slice(originalEnd + 1).trimStart();
+}
+
+export function stripAlreadyRenderedPrefix(cli, content) {
+  const text = String(content || '').trim();
+  if (!text) return '';
+
+  for (const candidate of getRenderedContentCandidates(cli)) {
+    const stripped = stripRenderedCandidate(text, candidate);
+    if (stripped !== text) {
+      return stripped;
+    }
+  }
+
+  if (contentWasAlreadyRendered(cli, text)) return '';
+  return text;
 }
 
 /**
@@ -171,9 +294,21 @@ export function printBanner() {
     console.log(`${chalk.hex(t.accent)('  │')}${chalk.hex(t.header || t.accent)(line)}${' '.repeat(pad)}${chalk.hex(t.accent)('│')}`);
   }
 
-  const infoLine = `  ${agentName} @ openagent v${version}`;
-  const infoPad = Math.max(0, width - infoLine.length + 2);
-  console.log(`${chalk.hex(t.accent)('  │')}${chalk.hex(t.muted)(infoLine)}${' '.repeat(infoPad)}${chalk.hex(t.accent)('│')}`);
+  // Separator line
+  const sepLine = chalk.hex(t.muted)('─'.repeat(width - 2));
+  console.log(`${chalk.hex(t.accent)('  ├')}${sepLine}${chalk.hex(t.accent)('┤')}`);
+
+  // Agent name + version + model
+  const infoLine = `  ${agentName} v${version}`;
+  const modelLabel = chalk.hex(t.muted)(`  │`) + chalk.hex(t.text)(infoLine) +
+    chalk.hex(t.muted)(' '.repeat(Math.max(0, width - infoLine.length - 2))) +
+    chalk.hex(t.accent)('│');
+  console.log(modelLabel);
+
+  // Tips line
+  const tip = `Type ${chalk.hex(t.accent)('/help')} for commands`;
+  const tipPad = Math.max(0, width - visibleLen(`  ${tip}`) - 2);
+  console.log(`${chalk.hex(t.accent)('  │')}${chalk.hex(t.muted)('  ')}${tip}${' '.repeat(tipPad)}${chalk.hex(t.accent)('│')}`);
 
   console.log(bottomBorder);
 }
@@ -250,12 +385,14 @@ export function printUserMessage(cli, content) {
  */
 export function printIterationLabel(cli, iterationNum) {
   const t = cli.theme || DEFAULT_THEME;
-  const label = ` iteration ${iterationNum} `;
-  const width = Math.min(process.stdout.columns || 80, 72);
-  const sideLen = Math.max(2, Math.floor((width - label.length) / 2));
-  const side = '─'.repeat(sideLen);
+  const raw = String(iterationNum || '').trim();
+  const label = raw.startsWith('iteration') ? raw : `iteration ${raw}`;
   console.log('');
-  console.log(chalk.hex(t.muted)(`  ${side}${chalk.hex(t.accent || DEFAULT_THEME.accent)(label)}${side}`));
+  console.log(
+    chalk.hex(t.muted)('  ── ') +
+    chalk.hex(t.accent || DEFAULT_THEME.accent)(label) +
+    chalk.hex(t.muted)(' ──')
+  );
 }
 
 export function printSystemMessage(cli, content) {
@@ -311,20 +448,24 @@ export function printAssistantHeader(cli, { durationMs = null, toolCount = 0, us
  * Print AI response with a subtle left accent bar.
  */
 export function printAIResponse(cli, content, usage = null) {
-  if (!content || !content.trim()) return false;
+  const displayContent = deduplicateResponse(String(content || ''));
+  if (!displayContent || !displayContent.trim()) return false;
   if (cli._streamRenderer?.active) {
-    cli._streamRenderer.finish(content, usage);
+    const result = cli._streamRenderer.finish(displayContent, usage);
     cli._streamRenderer = null;
-    return true;
+    return result === true || result === 'rendered' || result === 'already-rendered';
   }
+  const unrenderedContent = stripAlreadyRenderedPrefix(cli, displayContent);
+  if (!unrenderedContent.trim()) return true;
   printAssistantHeader(cli, {
     durationMs: cli.taskStartTime ? Date.now() - cli.taskStartTime : null,
     toolCount: cli._toolLineStates?.length || 0,
     usage,
   });
-  const rendered = cli.isMarkdownEnabled() ? renderMarkdown(content, cli.theme) : content;
+  const rendered = cli.isMarkdownEnabled() ? renderMarkdown(unrenderedContent, cli.theme) : unrenderedContent;
   console.log('');
   console.log(renderWithLeftBar(cli, rendered));
+  markContentRendered(cli, displayContent);
   return true;
 }
 
@@ -335,12 +476,16 @@ export function printAIResponse(cli, content, usage = null) {
  * without treating it as the final answer.
  */
 export function printIntermediateContent(cli, content) {
-  if (!content || !content.trim()) return false;
+  const displayContent = deduplicateResponse(String(content || ''));
+  if (!displayContent || !displayContent.trim()) return false;
+  const unrenderedContent = stripAlreadyRenderedPrefix(cli, displayContent);
+  if (!unrenderedContent.trim()) return true;
+  markContentRendered(cli, displayContent, { intermediate: true });
   // Truncate long intermediate content to keep the display clean
   const maxLen = 500;
-  const truncated = content.length > maxLen
-  ? content.substring(0, maxLen) + chalk.dim(' [...]')
-  : content;
+  const truncated = unrenderedContent.length > maxLen
+  ? unrenderedContent.substring(0, maxLen) + chalk.dim(' [...]')
+  : unrenderedContent;
   console.log(muted(cli, `  │ ${truncated.trim()}`));
   return true;
 }
@@ -368,6 +513,7 @@ export function createStreamingRenderer(cli) {
   let scheduled = null;
   let fallback = false;
   let rendered = false;
+  let lastWidth = process.stdout.columns || 80;
 
   const begin = () => {
     if (active) return;
@@ -399,9 +545,20 @@ export function createStreamingRenderer(cli) {
     const started = performance.now?.() || Date.now();
     try {
       const source = content;
+      const currentWidth = process.stdout.columns || 80;
+      const widthChanged = currentWidth !== lastWidth;
       const renderedOutput = cli.isMarkdownEnabled() ? renderMarkdown(source, cli.theme) : source;
       let frame = renderWithLeftBar(cli, renderedOutput || '').split('\n');
-      if (!final) frame = addCursor(frame);
+      if (!final) {
+        // Add progress indicator showing character count and line count
+        const charCount = content.length;
+        const lineCount = (content.match(/\n/g) || []).length + 1;
+        const progressText = chalk.hex(cli.theme?.muted || DEFAULT_THEME.muted)(
+          `  ╌╌ ${formatTokens(charCount)} chars · ${lineCount} lines ╌╌`
+        );
+        frame.push(progressText);
+        frame = addCursor(frame);
+      }
 
       const commonLength = Math.min(renderedLineCount, frame.length);
       let firstDiff = commonLength;
@@ -414,6 +571,7 @@ export function createStreamingRenderer(cli) {
       if (frame.length < renderedLineCount && firstDiff === frame.length) {
         firstDiff = Math.max(0, frame.length - 1);
       }
+      if (widthChanged) firstDiff = 0;
 
       if (firstDiff === renderedLineCount && firstDiff === frame.length) return;
 
@@ -421,6 +579,7 @@ export function createStreamingRenderer(cli) {
       process.stdout.write(frame.slice(firstDiff).join('\n'));
       renderedLines = frame;
       renderedLineCount = frame.length;
+      lastWidth = currentWidth;
       cli._lastStreamRenderMs = (performance.now?.() || Date.now()) - started;
       if (cli._lastStreamRenderMs > 5) {
         cli._streamRenderSlowFrames = (cli._streamRenderSlowFrames || 0) + 1;
@@ -457,33 +616,50 @@ export function createStreamingRenderer(cli) {
         process.stdout.write(frame.join('\n'));
         renderedLines = frame;
         renderedLineCount = frame.length;
+        lastWidth = process.stdout.columns || 80;
         return;
       }
       scheduleRender();
     },
-    commitIntermediate() {
-      if (!active) return;
+    commitIntermediate(intermediateContent = content) {
+      if (!active) return false;
       if (scheduled) clearTimeout(scheduled);
       scheduled = null;
-      renderFrame(true);
-      process.stdout.write('\n');
-      rendered = true;
+      if (renderedLineCount > 0) clearFromLine(0);
+      if (intermediateContent && String(intermediateContent).trim()) {
+        content = deduplicateResponse(String(intermediateContent));
+      }
+      const didRender = printIntermediateContent(cli, content);
+      rendered = didRender || rendered;
       active = false;
       content = '';
       renderedLineCount = 0;
       renderedLines = [];
+      fallback = false;
+      lastWidth = process.stdout.columns || 80;
+      return didRender;
     },
     finish(finalContent = content, usage = null) {
       if (scheduled) clearTimeout(scheduled);
       scheduled = null;
+      const displayContent = deduplicateResponse(String(finalContent || content || ''));
       if (!active) {
-        if (finalContent && finalContent.trim()) rendered = printAIResponse(cli, finalContent, usage) || rendered;
-        return;
+        if (!displayContent || !displayContent.trim()) {
+          return rendered ? 'already-rendered' : 'empty';
+        }
+        const unrenderedContent = stripAlreadyRenderedPrefix(cli, displayContent);
+        if (!unrenderedContent.trim()) {
+          rendered = true;
+          return 'already-rendered';
+        }
+        rendered = printAIResponse(cli, displayContent, usage) || rendered;
+        return rendered ? 'rendered' : 'empty';
       }
-      content = finalContent;
+      content = displayContent;
       renderFrame(true);
       active = false;
       rendered = true;
+      markContentRendered(cli, content);
       process.stdout.write('\n');
       // Show compact inline usage summary after stream completes
       if (usage) {
@@ -500,6 +676,7 @@ export function createStreamingRenderer(cli) {
           console.log(chalk.hex(t.muted)(`  └─ ${parts.join(' · ')}`));
         }
       }
+      return 'rendered';
     },
   };
 }
@@ -885,7 +1062,6 @@ export function printTaskSummary(cli, result, duration) {
  * Enhanced task summary with visual card style
  */
 export async function printEnhancedTaskSummary(cli, result, duration) {
-  const seconds = (duration / 1000).toFixed(1);
   const modelId = cli.session.agent.model;
   const modelShort = shortenModelLabel(modelId);
   cli.syncSessionModelState(modelId);
@@ -902,31 +1078,39 @@ export async function printEnhancedTaskSummary(cli, result, duration) {
   const currentTotal = clientStats?.totalCost || 0;
   const taskCost = currentTotal - costAtStart;
 
-  const summaryParts = [
-    chalk.hex(t.tool)(modelShort),
-    chalk.hex(t.text)(`${seconds}s`),
-    chalk.hex(t.text)(`${result.iterations} iter`),
-    chalk.hex(t.text)(`${result.stats.toolExecutions} tools`),
-    ...(taskCost > 0 ? [chalk.hex(t.text)(formatCompactCost(taskCost))] : []),
-    `${contextBar(contextPct, 8, t)} ${contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} ctx (${contextPct}%)`)}`,
-  ];
-  let line = `  ${chalk.hex(t.success)('✓')} ${summaryParts.join(chalk.hex(t.muted)(' · '))}`;
-  if (result.performance && result.performance.totalRetries > 0) {
-    line += chalk.hex(t.warning)(` · ↻ ${result.performance.totalRetries} retries`);
-  }
-  console.log('');
   const failed = result.success === false || result.error;
-  if (failed) {
-    console.log(line);
-    return;
-  }
-  for (let i = 0; i < line.length; i += 15) {
-    process.stdout.write(line.slice(i, i + 15));
-    await new Promise(resolve => {
-      setTimeout(resolve, 10);
-    });
-  }
+  const statusIcon = failed ? chalk.hex(t.error)('✗') : chalk.hex(t.success)('✓');
+  const statusLabel = failed ? 'Task failed' : 'Task complete';
+
+  const width = Math.min(process.stdout.columns || 80, 60);
+  const innerWidth = width - 4;
+
+  const row = (label, value) => {
+    const l = chalk.hex(t.muted)(label.padEnd(14));
+    const line = `  ${l}${value}`;
+    const pad = Math.max(0, innerWidth - visibleLen(line) + 2);
+    return `${chalk.hex(t.accent)('  │')}${line}${' '.repeat(pad)}${chalk.hex(t.accent)('│')}`;
+  };
+
   console.log('');
+  console.log(chalk.hex(t.accent)(`  ╭${'─'.repeat(width)}╮`));
+  console.log(chalk.hex(t.accent)('  │') + `  ${statusIcon} ${chalk.bold(statusLabel)}`.padEnd(width + visibleLen(`  ${statusIcon} ${statusLabel}`) - 1) + chalk.hex(t.accent)('│'));
+  console.log(chalk.hex(t.accent)(`  ├${'─'.repeat(width)}┤`));
+  console.log(row('Model', chalk.hex(t.tool)(modelShort)));
+  console.log(row('Duration', chalk.hex(t.text)(formatDuration(duration))));
+  console.log(row('Iterations', chalk.hex(t.text)(`${result.iterations || 0}`)));
+  console.log(row('Tools called', chalk.hex(t.text)(`${result.stats?.toolExecutions || 0}`)));
+  if (taskCost > 0) {
+    console.log(row('Cost', chalk.hex(t.warning)(formatCost(taskCost))));
+  }
+  if (formatTokens(contextUsed) !== '0') {
+    console.log(row('Tokens used', chalk.hex(t.text)(formatTokens(contextUsed))));
+  }
+  console.log(row('Context', contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} (${contextPct}%)`)));
+  if (result.performance && result.performance.totalRetries > 0) {
+    console.log(row('Retries', chalk.hex(t.warning)(`${result.performance.totalRetries}`)));
+  }
+  console.log(chalk.hex(t.accent)(`  ╰${'─'.repeat(width)}╯`));
 }
 
 /**

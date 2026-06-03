@@ -7,6 +7,10 @@ import { parseXmlToolCalls, hasXmlToolCalls } from '../tools/xmlToolParser.js';
 import { CONFIG } from '../config.js';
 import { logger } from '../logger.js';
 import { ContextAllocator } from './contextAllocator.js';
+import { TrajectoryCompressor } from '../../enhanced/trajectory-compressor/index.js';
+import { StallDetector } from './StallDetector.js';
+import { RetryHandler } from './RetryHandler.js';
+import { ContextManager } from './ContextManager.js';
 import { normalizeOptionalLimit, normalizePositiveInt, estimateTokens } from '../utils.js';
 // chalk removed — not used in this file
 import fs from '../utils/fs-compat.js';
@@ -66,6 +70,14 @@ export class Agent {
 
     // Hierarchical context allocation
     this.contextAllocator = new ContextAllocator(this.maxContextTokens);
+    
+    // Enhanced trajectory compressor (protects first/last turns, extracts knowledge)
+    this.trajectoryCompressor = new TrajectoryCompressor({
+      maxContextTokens: this.maxContextTokens,
+      compactThreshold: this.compactThreshold,
+      protectFirstN: 2,
+      protectLastN: 6,
+    });
 
     // Working set: tracks files being actively edited for priority context allocation
     this.workingSet = new Set();
@@ -160,6 +172,11 @@ export class Agent {
 
     // Tool failure tracking for self-reflection (used in reflectOnToolResults)
     this.toolFailureCounts = {};
+
+    // Extracted helper modules (delegate complex logic to focused classes)
+    this.stallDetector = new StallDetector(this);
+    this.retryHandler = new RetryHandler(this);
+    this.contextManager = new ContextManager(this);
 
     // Initialize with system prompt
     if (this.systemPrompt) {
@@ -383,257 +400,67 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     return limit !== null && this.performanceMetrics.totalToolCalls >= limit;
   }
 
+  /**
+   * Check if the agent has stalled — delegated to StallDetector.
+   */
   hasStalled() {
-    const limit = this._resolveBudgetValue('maxStallIterations', this.maxStallIterations);
-    return this.repeatedToolRoundCount >= limit;
+    return this.stallDetector.hasStalled();
   }
 
   /**
-   * Detect file-level stall: the agent is cycling read → edit → read → edit
-   * on the same file(s) without making meaningful progress. This catches the
-   * common pattern where the model keeps re-reading a file it just edited
-   * with slightly different line ranges, so the exact-argument stall detector
-   * never fires.
+   * Detect file-level stall — delegated to StallDetector.
    */
   hasFileStalled() {
-    if (this.fileOperationHistory.length < 4) return false;
-
-    // Look at the last N operations and check if we're in a read/edit cycle
-    // on the same file(s)
-    const recentOps = this.fileOperationHistory.slice(-this.maxFileStall * 2);
-    const fileEditCounts = {};
-    const fileReadCounts = {};
-
-    for (const op of recentOps) {
-      if (!op.filePath) continue;
-      const file = op.filePath.toLowerCase();
-      if (op.toolName === 'edit_file' || op.toolName === 'write_file') {
-        fileEditCounts[file] = (fileEditCounts[file] || 0) + 1;
-      } else if (op.toolName === 'read_file') {
-        fileReadCounts[file] = (fileReadCounts[file] || 0) + 1;
-      }
-    }
-
-    // If any single file has been both read and edited multiple times in recent ops,
-    // we're in a file stall
-    for (const file of Object.keys(fileEditCounts)) {
-      const edits = fileEditCounts[file] || 0;
-      const reads = fileReadCounts[file] || 0;
-      if (edits >= this.maxFileStall / 2 && reads >= this.maxFileStall / 2) {
-        return file;
-      }
-    }
-    return false;
+    return this.stallDetector.hasFileStalled();
   }
 
   /**
-   * Record a file operation for stall tracking.
-   * Called from postToolIteration after tool calls are processed.
+   * Record file operations for stall tracking — delegated to StallDetector.
    */
   recordFileOperations(toolCalls) {
-    for (const tc of toolCalls) {
-      const name = tc.name;
-      if (name !== 'read_file' && name !== 'edit_file' && name !== 'write_file') continue;
-      const args = tc.arguments || {};
-      const filePath = args.path || args.filePath || args.file || null;
-      if (filePath) {
-        this.fileOperationHistory.push({
-          toolName: name,
-          filePath: String(filePath).replace(/\\/g, '/'),
-          iteration: this.iterationCount,
-        });
-        // Keep only the last 100 operations to avoid unbounded growth
-        if (this.fileOperationHistory.length > 100) {
-          this.fileOperationHistory = this.fileOperationHistory.slice(-50);
-        }
-      }
-    }
+    return this.stallDetector.recordFileOperations(toolCalls);
   }
 
   /**
-   * Detect tool-name pattern stall: the agent is repeating the same
-   * sequence of tool names (e.g., read_file → edit_file) across rounds,
-   * even though the exact arguments differ. This catches alternating
-   * patterns that the exact-signature stall detector misses.
+   * Detect tool-name pattern stall — delegated to StallDetector.
    */
   hasPatternStalled() {
-    const history = this.roundToolNameHistory;
-    if (history.length < 4) return false;
-
-    // Check for repeating 2-round patterns in the recent history
-    // A 2-round pattern like ["read_file", "edit_file"] repeating means
-    // the history looks like: [r, e, r, e, r, e, ...]
-    const recent = history.slice(-this.maxPatternStall);
-    if (recent.length < 4) return false;
-
-    // Try pattern lengths 1 and 2
-    for (const patternLen of [1, 2]) {
-      if (recent.length < patternLen * 3) continue; // Need at least 3 repetitions
-      const pattern = recent.slice(0, patternLen);
-      let repetitions = 0;
-      for (let i = 0; i <= recent.length - patternLen; i += patternLen) {
-        const chunk = recent.slice(i, i + patternLen);
-        const match = pattern.every((name, idx) => chunk[idx] === name);
-        if (match) {
-          repetitions++;
-        } else {
-          break;
-        }
-      }
-      if (repetitions >= 3) {
-        return pattern.join(' → ');
-      }
-    }
-    return false;
+    return this.stallDetector.hasPatternStalled();
   }
 
   /**
-   * Detect when the agent is spinning: consecutive iterations where
-   * every tool call failed. This catches the "try, fail, try, fail" loop
-   * before the generic stall detector fires.
+   * Detect no-progress iterations — delegated to StallDetector.
    */
   hasNoProgress() {
-    return this.iterationsWithoutProgress >= this.maxNoProgressIterations;
+    return this.stallDetector.hasNoProgress();
   }
 
   /**
-   * Detect dead-end: the agent has tried multiple different approaches
-   * but keeps hitting the same error categories. This means changing
-   * arguments isn't helping — the problem is upstream.
-   *
-   * Returns the dominant error category or null.
+   * Detect dead-end error patterns — delegated to StallDetector.
    */
   hasDeadEnded() {
-    if (this.recentErrorCategories.length < 5) return null;
-
-    const window = this.recentErrorCategories.slice(-this.maxDeadEndWindow);
-    const counts = {};
-    for (const cat of window) {
-      counts[cat] = (counts[cat] || 0) + 1;
-    }
-
-    // If one error category dominates (>60% of recent errors), it's a dead end
-    const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-    if (!dominant || dominant[1] < Math.ceil(window.length * 0.6)) {
-      return null;
-    }
-
-    // Guard: if overall success rate is high, don't dead-end — the agent is making progress
-    const totalTools = this.successfulToolCalls + this.failedToolCalls;
-    if (totalTools > 0) {
-      const successRate = this.successfulToolCalls / totalTools;
-      if (successRate > 0.70) {
-        return null; // Agent is mostly succeeding — don't kill it over a few argument mistakes
-      }
-    }
-
-    // Guard: non-dead-end categories — these are fixable, not systemic
-    const nonDeadEndCategories = [
-      'VALIDATION_ERROR',
-      'NOT_GIT_REPO',
-      'NETWORK',       // Network issues are transient — retrying makes sense
-      'RATE_LIMIT',    // Rate limits are temporary
-      // TIMEOUT is intentionally NOT here — consistent timeouts ARE a dead end
-      'PARSE_ERROR',   // Parse errors can often be fixed with different args
-      'AUTH',          // Auth errors can be fixed by finding/providing credentials
-      'SANITIZED',     // Sanitization false positives can be worked around
-    ];
-    if (nonDeadEndCategories.includes(dominant[0])) {
-      return null;
-    }
-
-    return dominant[0];
+    return this.stallDetector.hasDeadEnded();
   }
 
   /**
-   * Detect tool-type monotony: the agent is only reading files (exploration
-   * loop) or only editing files (modification loop) without mixing. A healthy
-   * task usually alternates between reading and writing.
-   *
-   * Returns a description string or null.
+   * Detect tool-type monotony — delegated to StallDetector.
    */
   hasToolTypeMonotony() {
-    if (this.toolTypeHistory.length < 3) return null;
-
-    const recent = this.toolTypeHistory.slice(-this.maxDiversityWindow);
-    const totals = { read: 0, write: 0, exec: 0, other: 0 };
-    for (const entry of recent) {
-      totals.read += entry.readCount;
-      totals.write += entry.writeCount;
-      totals.exec += entry.execCount;
-      totals.other += entry.otherCount;
-    }
-
-    const total = totals.read + totals.write + totals.exec + totals.other;
-    if (total === 0) return null;
-
-    // Pure read loop: 100% reads, 3+ iterations, no writes
-    if (totals.read > 0 && totals.write === 0 && totals.exec === 0 && recent.length >= 4) {
-      return 'read-only loop — agent is only reading files without making changes';
-    }
-
-    // Pure edit loop: 100% writes, 3+ iterations, no reads
-    if (totals.write > 0 && totals.read === 0 && totals.exec === 0 && recent.length >= 4) {
-      return 'write-only loop — agent is only editing files without reading them first';
-    }
-
-    // Pure exec loop: 100% shell commands, 4+ iterations
-    if (totals.exec > 0 && totals.read === 0 && totals.write === 0 && recent.length >= 5) {
-      return 'exec-only loop — agent is only running shell commands without other actions';
-    }
-
-    return null;
+    return this.stallDetector.hasToolTypeMonotony();
   }
 
   /**
-   * Classify a round of tool calls by type for diversity tracking.
-   * Called from postToolIteration.
+   * Classify a round by tool type — delegated to StallDetector.
    */
   recordToolTypeRound(toolCalls) {
-    const counts = { readCount: 0, writeCount: 0, execCount: 0, otherCount: 0 };
-    const readTools = new Set(['read_file', 'read_files', 'list_directory', 'file_tree', 'search_files', 'search_in_files', 'get_file_info']);
-    const writeTools = new Set(['write_file', 'edit_file', 'search_and_replace', 'create_file']);
-    const execTools = new Set(['exec', 'process', 'process_action']);
-
-    for (const tc of toolCalls) {
-      if (readTools.has(tc.name)) counts.readCount++;
-      else if (writeTools.has(tc.name)) counts.writeCount++;
-      else if (execTools.has(tc.name)) counts.execCount++;
-      else counts.otherCount++;
-    }
-
-    this.toolTypeHistory.push({ iteration: this.iterationCount, ...counts });
-    if (this.toolTypeHistory.length > 50) {
-      this.toolTypeHistory = this.toolTypeHistory.slice(-25);
-    }
+    return this.stallDetector.recordToolTypeRound(toolCalls);
   }
 
   /**
-   * Assess overall progress for a richer stop message.
-   * Returns a summary of what happened during this run.
+   * Assess overall progress — delegated to StallDetector.
    */
   assessProgress(runHistory) {
-    const totalTools = this.successfulToolCalls + this.failedToolCalls;
-    const successRate = totalTools > 0 ? Math.round((this.successfulToolCalls / totalTools) * 100) : 0;
-    const uniqueTools = new Set();
-    for (const entry of runHistory) {
-      for (const t of entry.toolCalls || []) uniqueTools.add(t);
-    }
-
-    return {
-      totalIterations: this.iterationCount,
-      totalToolCalls: totalTools,
-      successfulToolCalls: this.successfulToolCalls,
-      failedToolCalls: this.failedToolCalls,
-      successRate,
-      uniqueToolsUsed: [...uniqueTools],
-      stallDetected: this.hasStalled(),
-      fileStall: this.hasFileStalled(),
-      patternStall: this.hasPatternStalled(),
-      noProgress: this.hasNoProgress(),
-      deadEnd: this.hasDeadEnded(),
-      monotony: this.hasToolTypeMonotony(),
-    };
+    return this.stallDetector.assessProgress(runHistory);
   }
 
   /**
@@ -681,45 +508,10 @@ When done, provide a clear summary: what changed, why, what was verified, and an
   }
 
   /**
-   * Prepare messages for LLM: compact if needed, allocate context budget,
-   * emit warnings. Returns the optimized message array.
-   * Shared by both streaming and non-streaming paths to eliminate duplication.
+   * Prepare messages for LLM — delegated to ContextManager.
    */
   async prepareMessagesForLLM() {
-    await this.maybeCompactContext();
-
-    if (this.runLimits?.progressDirective && this.runLimits.progressDirective.trim()) {
-      const directive = this.runLimits.progressDirective.trim();
-      const lastMessage = this.messages[this.messages.length - 1];
-      if (!lastMessage || lastMessage.role !== 'user' || lastMessage.content !== directive) {
-        this.pushMessage({ role: 'user', content: directive });
-      }
-    }
-
-
-    const allocResult = this.contextAllocator.allocate(
-      this.messages,
-      (msg) => this.estimateMessageTokens(msg),
-      this.workingSet
-    );
-    if (allocResult.compressed) {
-      if (this.shouldEmitVerboseLogs()) {
-        logger.debug('Context allocator active', allocResult.stats);
-      }
-      this.emitStatus('context_allocate',
-        `Context optimized: ${allocResult.stats.dropped} messages deferred (budget ${allocResult.stats.usedPercent}%)`);
-    }
-
-    // Proactive context warning at 60% usage
-    const ctxStats = this.getContextStats();
-    if (ctxStats.percent > 60 && ctxStats.percent <= 70) {
-      const warnMsg = `Context usage at ${ctxStats.percent}% (~${this.formatCompactNumber(ctxStats.usedTokens)} tokens). Consider wrapping up soon.`;
-      if (!this.emitStatus('context_warning', warnMsg) && this.shouldEmitVerboseLogs()) {
-        logger.warn(warnMsg);
-      }
-    }
-
-    return allocResult.messages;
+    return this.contextManager.prepareMessagesForLLM();
   }
 
   /**
@@ -801,57 +593,18 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     return true;
   }
 
+  /**
+   * Estimate tokens for a single message — delegated to ContextManager.
+   */
   estimateMessageTokens(message = {}) {
-    // Check cache first — messages are immutable once pushed
-    if (message._tokenEstimate !== undefined) {
-      return message._tokenEstimate;
-    }
-
-    let total = 0;
-
-    if (message.content) {
-      if (typeof message.content === 'string') {
-        // Fast path: use content length as proxy for very short strings (avoids regex)
-        if (message.content.length < 50) {
-          total += Math.ceil(message.content.length / 3.5);
-        } else {
-          total += estimateTokens(message.content);
-        }
-      } else if (Array.isArray(message.content)) {
-        // Multimodal content (text + images)
-        for (const part of message.content) {
-          if (part.type === 'text' && part.text) {
-            total += estimateTokens(part.text);
-          } else if (part.type === 'image_url') {
-            total += CONFIG.IMAGE_TOKEN_COST || 85;
-          }
-        }
-      } else {
-        total += estimateTokens(JSON.stringify(message.content));
-      }
-    }
-
-    if (message.tool_calls) {
-      total += estimateTokens(JSON.stringify(message.tool_calls));
-    }
-
-    // Add overhead per message (~4 tokens for role/metadata)
-    total += CONFIG.MESSAGE_OVERHEAD_TOKENS || 4;
-
-    // Cache on the message object itself
-    message._tokenEstimate = total;
-    return total;
+    return this.contextManager.estimateMessageTokens(message);
   }
 
+  /**
+   * Recalculate estimated token count — delegated to ContextManager.
+   */
   recalculateEstimatedTokens() {
-    // Use for-loop instead of reduce — avoids function call overhead per message
-    let sum = 0;
-    for (let i = 0; i < this.messages.length; i++) {
-      sum += this.estimateMessageTokens(this.messages[i]);
-    }
-    this.cachedEstimatedTokens = sum;
-    this.contextStats.estimatedTokens = sum;
-    return sum;
+    return this.contextManager.recalculateEstimatedTokens();
   }
 
   setMessages(messages = []) {
@@ -944,27 +697,11 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     }
   }
 
+  /**
+   * Get context usage statistics — delegated to ContextManager.
+   */
   getContextStats(maxTokens = this.maxContextTokens) {
-    const usedTokens = this.estimateTokens();
-    const safeMax = Number.isFinite(maxTokens) && maxTokens > 0
-      ? maxTokens
-      : CONFIG.MAX_CONTEXT_TOKENS;
-    const percent = safeMax > 0
-      ? Math.min(100, Math.round((usedTokens / safeMax) * 100))
-      : 0;
-
-    // Reuse a single stats object to reduce GC pressure
-    this._ctxStatsCache = this._ctxStatsCache || {};
-    const stats = this._ctxStatsCache;
-    stats.usedTokens = usedTokens;
-    stats.maxTokens = safeMax;
-    stats.percent = percent;
-    stats.compactThreshold = this.compactThreshold;
-    stats.compactions = this.contextStats.compactions;
-    stats.lastPromptTokens = this.contextStats.lastPromptTokens;
-    stats.lastCompletionTokens = this.contextStats.lastCompletionTokens;
-    stats.lastTotalTokens = this.contextStats.lastTotalTokens;
-    return stats;
+    return this.contextManager.getContextStats(maxTokens);
   }
 
   formatCompactNumber(value) {
@@ -983,16 +720,11 @@ When done, provide a clear summary: what changed, why, what was verified, and an
   }
 
   /**
-   * Extract structured knowledge from conversation messages for context compaction.
-   * Produces a structured summary preserving ~80% of useful information in ~20% of tokens.
-   * Format: TASKS, FILES, DECISIONS, ERRORS, CODE_CHANGES, CURRENT_STATE
+   * Extract structured knowledge from conversation messages — delegated to ContextManager.
    */
-  // Pre-compiled regexes for compaction (avoid recompilation)
-  static _filePathRegex = /(?:^|\s)([A-Za-z]:\\[^\s"]+|\/[^\s"]+|\.\/[^\s"]+|[a-zA-Z_][\w./\\-]*\.[a-zA-Z]{2,})/g;
-  static _decisionRegex = /(?:decided|chose|going with|will use|switching to|changed to|fixed by|resolved by|solution:|approach:)/i;
-  static _decisionSentenceRegex = /(?:decided|chose|going with|will use|switching to|changed to|fixed by|resolved by|solution|approach)/i;
-  static _errorExtractRegex = /"error"\s*:\s*"([^"]{3,100})/;
-  static _writeTools = new Set(['write_file', 'edit_file', 'search_and_replace']);
+  buildCompactionSummary(olderMessages = []) {
+    return this.contextManager.buildCompactionSummary(olderMessages);
+  }
 
   // Pre-compiled regexes for no-action trap detection
   static _actionPatterns = [
@@ -1015,155 +747,11 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     /^i'?ve (already )?(made|completed|finished|done|applied|implemented)/i,
   ];
 
-  buildCompactionSummary(olderMessages = []) {
-    const priorUserMessages = [];
-    const filesMentioned = new Set();
-    const decisions = [];
-    const errors = [];
-    const codeChanges = [];
-    const toolsUsed = {};
-    const recentHistory = this.history.slice(-8);
-
-    // ── Single-pass extraction from messages ──
-    for (let i = 0; i < olderMessages.length; i++) {
-      const msg = olderMessages[i];
-      const content = msg.content || '';
-      const text = typeof content === 'string' ? content : JSON.stringify(content || '');
-
-      // Collect user messages (keep last 5)
-      if (msg.role === 'user' && content) {
-        priorUserMessages.push(msg);
-        if (priorUserMessages.length > 5) priorUserMessages.shift();
-      }
-
-      // Scan for file paths
-      Agent._filePathRegex.lastIndex = 0;
-      let match;
-      while ((match = Agent._filePathRegex.exec(text)) !== null) {
-        const p = match[1];
-        if (p.length > 3 && p.length < 200 && !p.startsWith('http')) {
-          filesMentioned.add(p);
-        }
-      }
-
-      // Scan tool results for errors
-      if (msg.role === 'tool' && content) {
-        if (text.includes('"success":false') || text.includes('"error"')) {
-          const errorMatch = text.match(Agent._errorExtractRegex);
-          if (errorMatch) errors.push(errorMatch[1]);
-        }
-        // Scan for code changes (write_file, edit_file success)
-        if (text.includes('"success":true') && i > 0) {
-          const prevAssistant = olderMessages[i - 1];
-          if (prevAssistant?.role === 'assistant' && prevAssistant.tool_calls) {
-            for (const tc of prevAssistant.tool_calls) {
-              const name = tc.function?.name || '';
-              if (Agent._writeTools.has(name)) {
-                let args = {};
-                try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; logger.warn(`Failed to parse tool call arguments for ${name}`); }
-                codeChanges.push(args.path ? `${name}: ${args.path}` : `${name} (no path in args)`);
-              }
-            }
-          }
-        }
-      }
-
-      // Extract decisions from assistant messages
-      if (msg.role === 'assistant' && typeof content === 'string' && Agent._decisionRegex.test(content)) {
-        const sentences = content.split(/[.!?\n]/).filter(s => s.trim().length > 10 && s.trim().length < 200);
-        for (const s of sentences) {
-          if (Agent._decisionSentenceRegex.test(s)) {
-            decisions.push(s.trim().substring(0, 150));
-          }
-        }
-      }
-    }
-
-    // Track tool usage from history
-    for (const entry of recentHistory) {
-      for (const tool of entry.toolCalls) {
-        toolsUsed[tool] = (toolsUsed[tool] || 0) + 1;
-      }
-    }
-
-    // Determine current state from last assistant message (backward scan — avoids filter+slice)
-    let currentState = 'Conversation in progress.';
-    for (let j = olderMessages.length - 1; j >= 0; j--) {
-      const m = olderMessages[j];
-      if (m.role === 'assistant' && m.content && typeof m.content === 'string') {
-        const lastSentence = m.content.split(/[.!?\n]/).filter(s => s.trim().length > 10).pop();
-        if (lastSentence) {
-          currentState = lastSentence.trim().substring(0, 200);
-        }
-        break;
-      }
-    }
-
-    // Build compact knowledge block using structured format
-    const lines = ['[CONTEXT KNOWLEDGE — structured summary of prior work]'];
-
-    if (priorUserMessages.length > 0) {
-      lines.push('TASKS:');
-      for (const message of priorUserMessages) {
-        const normalized = String(message.content).replace(/\s+/g, ' ').trim();
-        lines.push(`- ${this.truncateText(normalized, 120)}`);
-      }
-    }
-
-    if (filesMentioned.size > 0) {
-      lines.push('FILES:');
-      const fileList = [...filesMentioned].slice(-10);
-      for (const f of fileList) {
-        lines.push(`- ${f}`);
-      }
-    }
-
-    if (decisions.length > 0) {
-      lines.push('DECISIONS:');
-      for (const d of decisions.slice(-5)) {
-        lines.push(`- ${d}`);
-      }
-    }
-
-    if (errors.length > 0) {
-      lines.push('ERRORS:');
-      const uniqueErrors = [...new Set(errors)].slice(-5);
-      for (const e of uniqueErrors) {
-        lines.push(`- ${e}`);
-      }
-    }
-
-    if (codeChanges.length > 0) {
-      lines.push('CODE_CHANGES:');
-      const uniqueChanges = [...new Set(codeChanges)].slice(-8);
-      for (const c of uniqueChanges) {
-        lines.push(`- ${c}`);
-      }
-    }
-
-    lines.push(`CURRENT_STATE: ${currentState}`);
-
-    if (Object.keys(toolsUsed).length > 0) {
-      const toolSummary = Object.entries(toolsUsed).map(([t, c]) => `${t}(${c})`).join(', ');
-      lines.push(`TOOLS USED: ${toolSummary}`);
-    }
-
-    if (recentHistory.length > 0) {
-      lines.push('PROGRESS:');
-      for (const entry of recentHistory.slice(-5)) {
-        const tools = entry.toolCalls.join(', ') || 'no tools';
-        const results = entry.toolResults?.map(r => r.success ? '✓' : '✗').join('') || '';
-        lines.push(`- Iter ${entry.iteration}: ${tools} ${results}`);
-      }
-    }
-
-    return lines.join('\n');
-  }
-
+  /**
+   * Summarize older messages — delegated to ContextManager.
+   */
   summarizeOlderMessages(olderMessages = []) {
-    return this.contextAllocator.summarizeOlderMessages(olderMessages, {
-      droppedCount: olderMessages.length,
-    });
+    return this.contextManager.summarizeOlderMessages(olderMessages);
   }
 
   /**
@@ -2578,109 +2166,10 @@ Task: ${userInput}`;
   }
 
   /**
-   * Get LLM response with tool calling and retry logic
+   * Get LLM response with tool calling and retry logic — delegated to RetryHandler.
    */
   async getLLMResponseWithRetry(retryCount = 0, messages = null, fallbackCandidates = null, originalError = null) {
-    const maxRetries = this.maxRetries;
-    const messagesToSend = messages || this.messages;
-    const fallbackModels = fallbackCandidates || this.fallbackModels;
-    
-    // Use model's actual max output — reducing it makes truncation WORSE, not better
-    const maxTokens = this.maxOutputTokens;
-    
-    try {
-      const result = await this.client.chatWithTools(
-        messagesToSend,
-        this.getRelevantToolDefinitions(),
-        {
-          model: this.model,
-          temperature: 0.3,
-          max_tokens: maxTokens,
-        }
-      );
-      
-      // Validate response has expected structure
-      if (!result || (result.choices && result.choices.length === 0)) {
-        throw new AgentError('Empty or malformed response from model (no choices)', 'EMPTY_RESPONSE', { response: result });
-      }
-      
-      // Track usage
-      this.updateUsageStats(result.usage);
-      
-      // Detect truncation from token limit
-      if (result.finishReason === 'length') {
-        const warnMsg = `⚠️ Response truncated (hit token limit at ${result.usage?.completion_tokens || '?'} tokens). Consider breaking your request into smaller parts.`;
-        this.emitStatus('truncation_warning', warnMsg);
-        if (this.shouldEmitVerboseLogs()) logger.warn(warnMsg);
-      }
-      
-      return result;
-    } catch (error) {
-      // Handle JSON parse errors by retrying with lower max_tokens
-      const isJsonError = error.message.includes('JSON') || 
-                          error.message.includes('Unexpected end') ||
-                          error.message.includes('context length');
-      
-      // Also retry on empty response errors — transient API issue
-      const isEmptyResponse = error.code === 'EMPTY_RESPONSE' ||
-                              error.message.includes('No message in response') ||
-                              error.message.includes('Empty or malformed response');
-      
-      if ((isJsonError || isEmptyResponse) && retryCount < maxRetries) {
-        this.performanceMetrics.totalRetries++;
-        const retryMessage = `Retrying with shorter response (attempt ${retryCount + 1}/${maxRetries})`;
-        if (!this.emitStatus('retry', retryMessage) && this.shouldEmitVerboseLogs()) {
-          logger.warn(retryMessage, { attempt: retryCount + 1, maxRetries });
-        }
-        
-        // Compact context before retry
-        await this.maybeCompactContext();
-        
-        // Exponential backoff
-        await this.sleep(this.retryDelay * Math.pow(this.retryBackoff, retryCount));
-        
-        // Retry — context was already compacted above
-        return this.getLLMResponseWithRetry(retryCount + 1, messagesToSend, fallbackModels, originalError);
-      }
-
-      const statusCode = error.statusCode || error.details?.statusCode;
-      const errorCode = error.code || '';
-      const errorMessage = error.message || '';
-      const shouldFallback =
-        errorCode === 'RATE_LIMIT_ERROR' ||
-        errorCode === 'AUTH_ERROR' ||
-        errorCode === 'AUTHENTICATION_ERROR' ||
-        errorCode === 'SERVICE_ERROR' ||
-        /^HTTP_5\d\d$/.test(errorCode) ||
-        errorCode === 'HTTP_401' ||
-        errorCode === 'HTTP_403' ||
-        statusCode === 429 ||
-        statusCode === 401 ||
-        statusCode === 403 ||
-        (statusCode && statusCode >= 500) ||
-        /\b429\b/.test(errorMessage) ||
-        /\b(?:401|403)\b/.test(errorMessage) ||
-        /\b5\d\d\b/.test(errorMessage) ||
-        errorMessage.toLowerCase().includes('rate limit');
-
-      if (shouldFallback && fallbackModels && fallbackModels.length > 0 && retryCount < fallbackModels.length) {
-        const fallbackModel = fallbackModels[retryCount];
-        const failedModel = this.model;
-        logger.warn(`Model ${failedModel} failed (${error.code || error.message}), falling back to ${fallbackModel}`);
-        this.model = fallbackModel;
-        return this.getLLMResponseWithRetry(retryCount + 1, messagesToSend, fallbackModels, originalError || error);
-      }
-      
-      if (error.code === 'TIMEOUT') {
-        logger.error(`Request timed out after ${Math.round(this.client.timeout / 1000)}s`, { 
-          timeout: this.client.timeout,
-          suggestion: 'Increase TIMEOUT_MS or use faster model'
-        });
-      } else {
-        logger.error(`LLM Error: ${error.message}`, { code: error.code });
-      }
-      throw originalError || error;
-    }
+    return this.retryHandler.getLLMResponseWithRetry(retryCount, messages, fallbackCandidates, originalError);
   }
   
   /**
@@ -3037,54 +2526,11 @@ Task: ${userInput}`;
     return 'UNKNOWN';
   }
 
+  /**
+   * Determine whether a tool failure is worth retrying — delegated to RetryHandler.
+   */
   isRetryableToolFailure(toolName, result = {}) {
-    if (!result || result.success !== false) {
-      return false;
-    }
-
-    if (result.errorType === ToolErrorType.VALIDATION_ERROR ||
-        result.errorType === ToolErrorType.PERMISSION_DENIED ||
-        result.errorType === ToolErrorType.NOT_FOUND) {
-      return false;
-    }
-
-    if (result.errorType === ToolErrorType.TIMEOUT) {
-      return true;
-    }
-
-    const message = `${result.error || ''} ${result.status || ''} ${result.statusText || ''}`.toLowerCase();
-    const isNetworkTool = ['web_search', 'read_webpage', 'fetch_url'].includes(toolName);
-
-    if (!isNetworkTool && result.errorType !== ToolErrorType.EXECUTION_ERROR) {
-      return false;
-    }
-
-    if (message.includes('no search results were found') || message.includes('not available in the current environment')) {
-      return false;
-    }
-
-    // Validation/argument errors and not-a-git-repo are never worth retrying
-    if (message.includes('1-indexed') || message.includes('must be greater') ||
-        message.includes('must be ≥') || message.includes('exceeds file length') ||
-        message.includes('not a git repository') || message.includes('not a git repo')) {
-      return false;
-    }
-
-    return [
-      'timeout',
-      'timed out',
-      'network',
-      'fetch failed',
-      'temporarily',
-      'rate limit',
-      'http 429',
-      'http 500',
-      'http 502',
-      'http 503',
-      'http 504',
-      'all searx instances failed',
-      'search failed',
-    ].some((fragment) => message.includes(fragment));
+    return this.retryHandler.isRetryableToolFailure(toolName, result);
   }
 
   /**
@@ -3374,109 +2820,27 @@ Task: ${userInput}`;
   }
 
   /**
-   * Estimate token count (improved estimation)
+   * Estimate token count — delegated to ContextManager.
    */
   estimateTokens() {
-    if (!Number.isFinite(this.cachedEstimatedTokens)) {
-      this.recalculateEstimatedTokens();
-    }
-
-    return Math.ceil(this.cachedEstimatedTokens);
+    return this.contextManager.estimateTokens();
   }
 
   /**
-   * Compact context when approaching limit
+   * Compact context when approaching limit — delegated to ContextManager.
    */
   async maybeCompactContext() {
-    const { usedTokens: estimatedTokens, maxTokens } = this.getContextStats();
-    
-    // Also trigger compaction if message count exceeds hard limit (prevents runaway growth)
-    const MESSAGE_HARD_LIMIT = 150;
-    const shouldCompact = estimatedTokens >= maxTokens * this.compactThreshold ||
-                          this.messages.length > MESSAGE_HARD_LIMIT;
-    
-    if (!shouldCompact) {
-      return; // Still have room
-    }
-    
-    const triggerMessage = `Context compaction triggered (~${estimatedTokens} tokens)`;
-    if (!this.emitStatus('compaction', triggerMessage) && this.shouldEmitVerboseLogs()) {
-      logger.warn(triggerMessage, { estimatedTokens });
-    }
-    
-    // ── Single-pass compaction ──
-    // Collect system msg, first user msg, and exchange boundaries in one forward pass.
-    let systemMsg = null;
-    let firstUserMsg = null;
-    let firstUserMsgIndex = -1;
-    const exchangeStarts = []; // indices into this.messages (non-system numbering)
-    let nonSystemIdx = 0;
-
-    for (let i = 0; i < this.messages.length; i++) {
-      const msg = this.messages[i];
-      if (msg.role === 'system') {
-        if (!systemMsg) systemMsg = msg; // keep first system msg reference
-        continue;
-      }
-      if (!firstUserMsg && msg.role === 'user') {
-        firstUserMsg = msg;
-        firstUserMsgIndex = nonSystemIdx;
-      }
-      if (msg.role === 'user' || (msg.role === 'assistant' && msg.tool_calls)) {
-        exchangeStarts.push(nonSystemIdx);
-      }
-      nonSystemIdx++;
-    }
-
-    // Take the last 4 exchange start indices
-    const last4StartIndices = exchangeStarts.slice(-4);
-    const keepFromIndex = last4StartIndices.length > 0 ? last4StartIndices[0] : nonSystemIdx;
-
-    // Build recent and older message slices in one pass
-    const recentMessages = [];
-    const olderMessages = [];
-    nonSystemIdx = 0;
-    for (let i = 0; i < this.messages.length; i++) {
-      if (this.messages[i].role === 'system') continue;
-      if (nonSystemIdx >= keepFromIndex) {
-        recentMessages.push(this.messages[i]);
-      } else if (nonSystemIdx > (firstUserMsgIndex >= 0 ? firstUserMsgIndex : -1)) {
-        olderMessages.push(this.messages[i]);
-      }
-      nonSystemIdx++;
-    }
-
-    // Rebuild messages
-    const newMessages = [];
-    if (systemMsg) newMessages.push(systemMsg);
-
-    // Always preserve the first user message (the original request)
-    // Only add first user message if it's NOT already in recentMessages
-    if (firstUserMsg && !recentMessages.includes(firstUserMsg)) {
-      newMessages.push(firstUserMsg);
-    }
-
-    if (olderMessages.length > 0) {
-      newMessages.push({
-        role: 'system',
-        content: this.summarizeOlderMessages(olderMessages),
-      });
-    }
-    newMessages.push(...recentMessages);
-
-    this.setMessages(newMessages);
-    this.contextStats.compactions++;
-    
-    const newTokens = this.estimateTokens();
-    const compactedMessage = `Context compacted: ~${estimatedTokens} -> ~${newTokens} tokens`;
-    if (!this.emitStatus('compaction', compactedMessage) && this.shouldEmitVerboseLogs()) {
-      logger.info(compactedMessage, { beforeTokens: estimatedTokens, afterTokens: newTokens });
-    }
+    return this.contextManager.maybeCompactContext();
   }
 
   /**
-   * Chat without tools (simple conversation)
+   * Fallback compaction — delegated to ContextManager.
+   * @private
    */
+  _fallbackCompactContext(estimatedTokens) {
+    return this.contextManager._fallbackCompactContext(estimatedTokens);
+  }
+
   async chat(message, options = {}) {
     this.pushMessage({ role: 'user', content: message });
     

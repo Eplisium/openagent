@@ -20,6 +20,8 @@ import { createSubagentTools } from '../tools/subagentTools.js';
 import { createTaskTools } from '../tools/taskTools.js';
 import { MemoryManager } from '../memory/MemoryManager.js';
 import { SessionHistory } from '../sessionHistory.js';
+import { ToolsetGating, PROFILES } from '../../enhanced/toolset-gating/index.js';
+import { CronScheduler } from '../../enhanced/cron-scheduler/index.js';
 import { SkillManager } from '../skills/SkillManager.js';
 import { HookManager } from '../hooks/HookManager.js';
 import { createMemoryTools } from '../tools/memoryTools.js';
@@ -167,10 +169,23 @@ export class AgentSession {
     const memoryTools = createMemoryTools(this.memoryManager);
     this.toolRegistry.registerAll(memoryTools);
 
-    // Register session history search tools
+    // Register session history search tools (SQLite-backed)
     this.sessionHistory = new SessionHistory({ sessionId: this.sessionId });
     const sessionHistoryTools = createSessionHistoryTools(this.sessionHistory);
     this.toolRegistry.registerAll(sessionHistoryTools);
+    
+    // ── Enhanced modules ──
+    // Toolset gating (profile-based tool filtering)
+    this.toolsetGating = new ToolsetGating({
+      profile: options.toolsetProfile || 'full',
+      enabledToolsets: options.enabledToolsets,
+      disabledToolsets: options.disabledToolsets,
+    });
+    
+    // Cron scheduler
+    this.cronScheduler = new CronScheduler({
+      verbose: options.verbose !== false,
+    });
 
     // Initialize skill manager
     this.skillManager = new SkillManager({
@@ -198,6 +213,22 @@ export class AgentSession {
       verbose: options.verbose !== false,
       streaming: options.streaming !== false,
       systemPrompt: options.systemPrompt || this.buildSystemPrompt(),
+      
+      // Wire up tool execution logging to session history
+      onToolEnd: (info) => {
+        try {
+          this.sessionHistory.logToolExecution({
+            toolName: info.name || info.toolName,
+            args: info.arguments || info.args,
+            result: typeof info.result === 'string' ? info.result.slice(0, 500) : '',
+            success: !info.error,
+            durationMs: info.durationMs,
+            error: info.error?.message || info.error || null,
+          });
+        } catch {} // Don't let logging break the agent
+        // Call user-provided onToolEnd if any
+        if (options.onToolEnd) options.onToolEnd(info);
+      },
       workspaceDir: this.activeWorkspace?.workspaceDir || this.workingDir,
     });
     this.agent.sessionHistory = this.sessionHistory;

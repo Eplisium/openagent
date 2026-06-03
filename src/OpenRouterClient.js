@@ -128,6 +128,7 @@ export class OpenRouterClient {
     // Response time tracking for adaptive timeouts
     this._recentResponseTimes = [];
     this._maxResponseTimeSamples = 20;
+    this._cachedP95 = null;
 
     // Circuit breaker for upstream failure protection
     this.circuitBreaker = {
@@ -208,10 +209,13 @@ export class OpenRouterClient {
     }
     
     // Adaptive timeout: use p95 of recent response times, clamped to [30s, 120s]
-    if (this._recentResponseTimes.length >= 5) {
+    // Cached via _cachedP95 to avoid sorting on every rate-limit check
+    if (this._recentResponseTimes.length >= 5 && !this._cachedP95) {
       const sorted = [...this._recentResponseTimes].sort((a, b) => a - b);
-      const p95 = sorted[Math.floor(sorted.length * 0.95)];
-      this.timeout = Math.max(30000, Math.min(120000, p95 * 2.5));
+      this._cachedP95 = sorted[Math.floor(sorted.length * 0.95)];
+    }
+    if (this._cachedP95) {
+      this.timeout = Math.max(30000, Math.min(120000, this._cachedP95 * 2.5));
     }
   }
   
@@ -1351,6 +1355,7 @@ export class OpenRouterClient {
     if (this._recentResponseTimes.length > this._maxResponseTimeSamples) {
       this._recentResponseTimes.shift();
     }
+    this._cachedP95 = null; // Invalidate cached p95 for next waitForRateLimit call
   }
   
   /**

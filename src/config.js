@@ -169,7 +169,7 @@ export const CONFIG = {
   // ═══════════════════════════════════════════════════════════════
   CLIENT_CACHE_MAX_SIZE: 200, // Reduced from 500 — agent sessions rarely repeat identical requests; saves memory
   CLIENT_REQUEST_HISTORY_MAX: 50, // Reduced from 100 — further memory optimization
-      CLIENT_REQUEST_HISTORY_TRIM: 25, // Reduced from 50
+  CLIENT_REQUEST_HISTORY_TRIM: 25, // Reduced from 50
   CLIENT_RATE_LIMIT_DEFAULT_WAIT_MS: 1000,
   CLIENT_RATE_LIMIT_MAX_WAIT_MS: 10000,
 
@@ -322,3 +322,20 @@ export async function ensureConfigDirs() {
 }
 
 export default { CONFIG, PLUGINS, UI };
+
+/**
+ * Validate critical configuration values at startup.
+ * Returns an array of warning strings (empty if all OK).
+ */
+export function validateConfig(cfg = CONFIG) {
+  const warnings = [];
+  if (!cfg.API_KEY) warnings.push('OPENROUTER_API_KEY is not set');
+  if (cfg.MAX_RETRIES < 0 || cfg.MAX_RETRIES > 10) warnings.push(`MAX_RETRIES (${cfg.MAX_RETRIES}) is outside recommended range 0-10`);
+  if (cfg.TIMEOUT_MS < 5000) warnings.push(`TIMEOUT_MS (${cfg.TIMEOUT_MS}) is very low — requests may fail`);
+  if (cfg.MAX_CONTEXT_TOKENS < 1000) warnings.push(`MAX_CONTEXT_TOKENS (${cfg.MAX_CONTEXT_TOKENS}) seems too low`);
+  if (cfg.COMPACT_THRESHOLD < 0.3 || cfg.COMPACT_THRESHOLD > 0.95) warnings.push(`COMPACT_THRESHOLD (${cfg.COMPACT_THRESHOLD}) is outside recommended range 0.3-0.95`);
+  if (cfg.DAILY_BUDGET_USD < 0) warnings.push(`DAILY_BUDGET_USD (${cfg.DAILY_BUDGET_USD}) cannot be negative`);
+  if (cfg.MAX_COST_PER_REQUEST_USD < 0) warnings.push(`MAX_COST_PER_REQUEST_USD (${cfg.MAX_COST_PER_REQUEST_USD}) cannot be negative`);
+  if (cfg.GATEWAY_PORT < 1 || cfg.GATEWAY_PORT > 65535) warnings.push(`GATEWAY_PORT (${cfg.GATEWAY_PORT}) is not a valid port number`);
+  return warnings;
+}

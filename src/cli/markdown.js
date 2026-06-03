@@ -99,15 +99,24 @@ renderer.code = function(token) {
     const compact = lines.map((line, index) => `${index === 0 ? prefix : pad}${line}`).join('\n');
     return `\n${compact}\n`;
   }
-  const maxLineLen = Math.min(Math.max(...lines.map(l => stripAnsi(l).length), language.length + 2, 32), Math.min(90, process.stdout.columns || 80));
-  const top = chalk.hex(activeTheme.muted)(`┌─ ${language} ${'─'.repeat(Math.max(1, maxLineLen - language.length - 3))}`);
-  const bottom = chalk.hex(activeTheme.muted)(`└${'─'.repeat(Math.max(3, maxLineLen))}`);
-  return `\n${top}\n${lines.join('\n')}\n${bottom}\n`;
+  // Add line numbers
+  const gutterWidth = String(lines.length).length;
+  const numberedLines = lines.map((line, i) => {
+    const num = chalk.hex(activeTheme.muted)(String(i + 1).padStart(gutterWidth));
+    return `${num} ${chalk.hex(activeTheme.muted)('│')} ${line}`;
+  });
+  const numColWidth = gutterWidth + 3; // number + space + │ + space
+  const maxContentLen = Math.max(...lines.map(l => stripAnsi(l).length), language.length + 2, 32);
+  const totalWidth = Math.min(numColWidth + maxContentLen, Math.min(90, process.stdout.columns || 80));
+  const top = chalk.hex(activeTheme.muted)(`╭─ ${language} ${'─'.repeat(Math.max(1, totalWidth - language.length - 3))}╮`);
+  const bottom = chalk.hex(activeTheme.muted)(`╰${'─'.repeat(Math.max(3, totalWidth - 1))}╯`);
+  return `\n${top}\n${numberedLines.join('\n')}\n${bottom}\n`;
 };
 
 // Inline code
 renderer.codespan = function(token) {
-  return chalk.hex(activeTheme.accent)(token?.text || '');
+  const text = token?.text || '';
+  return chalk.bgHex(activeTheme.muted).hex(activeTheme.accent)(` ${text} `);
 };
 
 // Links
@@ -209,18 +218,19 @@ renderer.table = function(token) {
       const padding = Math.max(0, width - visible.length);
       return text + ' '.repeat(padding);
     };
-    const formatRow = (cells, isHeader) => {
+    const formatRow = (cells, isHeader, isAlt = false) => {
       const styled = cells.map((cell) => {
         const text = typeof cell === 'string' ? cell : cell?.text || '';
-        return isHeader ? chalk.bold(text) : text;
+        if (isHeader) return chalk.bold.hex(activeTheme.accent)(text);
+        return isAlt ? chalk.hex(activeTheme.text)(text) : text;
       });
-      return '  ' + styled.map((text, i) => padCell(text, colWidths[i])).join(chalk.dim('  │  '));
+      return '  ' + styled.map((text, i) => padCell(text, colWidths[i])).join(chalk.hex(activeTheme.muted)('  ┆  '));
     };
     const headerRow = formatRow(headerCells, true);
     const separatorLen = stripAnsi(headerRow).length - 2;
-    const separator = '  ' + '─'.repeat(Math.max(8, separatorLen));
-    const bodyRows = rows.map(row => formatRow(row.map(cell => cell?.text || ''), false));
-    return `\n${headerRow}\n${chalk.dim(separator)}\n${bodyRows.join('\n')}\n`;
+    const separator = '  ' + chalk.hex(activeTheme.muted)('━'.repeat(Math.max(8, separatorLen)));
+    const bodyRows = rows.map((row, i) => formatRow(row.map(cell => cell?.text || ''), false, i % 2 === 0));
+    return `\n${headerRow}\n${separator}\n${bodyRows.join('\n')}\n`;
   } catch {
     return '\n' + (token?.text || '') + '\n';
   }

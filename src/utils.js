@@ -291,6 +291,7 @@ export function formatJSON(obj, pretty = true) {
 
 /**
  * ⏱️ Format Duration
+ * @deprecated Use formatDuration from cli/formatting.js instead (handles hours, more precise)
  */
 export function formatDuration(ms) {
   if (ms < 1000) return `${ms}ms`;
@@ -300,6 +301,7 @@ export function formatDuration(ms) {
 
 /**
  * 💰 Format Cost
+ * @deprecated Use formatCost from cli/formatting.js instead (handles more edge cases)
  */
 export function formatCost(cost) {
   if (!Number.isFinite(cost)) return '$0.0000';

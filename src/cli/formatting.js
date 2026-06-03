@@ -27,18 +27,26 @@ export function formatCompactNumber(value) {
 export function formatDuration(ms) {
   const value = Math.max(0, Number(ms) || 0);
   if (value < 1000) return `${Math.round(value)}ms`;
-  return `${(value / 1000).toFixed(1)}s`;
+  const totalSeconds = value / 1000;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.floor(totalSeconds % 60);
+  if (minutes < 60) return `${minutes}m ${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainMinutes = minutes % 60;
+  return `${hours}h ${remainMinutes}m`;
 }
 
 /**
  * Format elapsed time in a verbose style (e.g., "2m 30s", "1h 5m")
  */
 export function formatElapsedTime(ms) {
-  const seconds = Math.floor(Math.max(0, Number(ms) || 0) / 1000);
+  const totalMs = Math.max(0, Number(ms) || 0);
+  const seconds = Math.floor(totalMs / 1000);
+  const tenths = Math.floor((totalMs % 1000) / 100);
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
-
   if (days > 0) {
     return `${days}d ${hours % 24}h`;
   }
@@ -48,8 +56,40 @@ export function formatElapsedTime(ms) {
   if (minutes > 0) {
     return `${minutes}m ${seconds % 60}s`;
   }
-  return `${seconds}s`;
+  if (seconds > 0) return `${seconds}.${tenths}s`;
+  return `${totalMs.toFixed(0)}ms`;
 }
+
+/**
+ * Format token counts in compact form: '1.2K', '80.5K', '1.2M'
+ */
+export function formatTokens(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n === 0) return '0';
+  const abs = Math.abs(n);
+  if (abs >= 1000000) {
+    const v = abs / 1000000;
+    return (v >= 10 ? v.toFixed(0) : v.toFixed(1)).replace(/\.0$/, '') + 'M';
+  }
+  if (abs >= 1000) {
+    const v = abs / 1000;
+    return (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(1)).replace(/\.0$/, '') + 'K';
+  }
+  return Math.round(abs).toString();
+}
+
+/**
+ * Format cost in dollar form: '$0.06', '$1.23', '$0.000123'
+ */
+export function formatCost(value) {
+  const v = Number(value || 0);
+  if (v === 0) return '$0.00';
+  if (v < 0.0001) return '$' + v.toFixed(6);
+  if (v < 0.01) return '$' + v.toFixed(4);
+  if (v < 1) return '$' + v.toFixed(3);
+  return '$' + v.toFixed(2);
+}
+
 
 // ═══════════════════════════════════════════════════════════════════
 // 📝 Text Formatting
@@ -118,15 +158,137 @@ export function textSimilarity(a, b) {
 }
 
 /**
+ * Normalize generated text for render/deduplication comparisons.
+ */
+export function normalizeResponseText(content) {
+  return String(content || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Conservative same-response check for display guards.
+ */
+export function responsesAreSimilar(a, b) {
+  const left = normalizeResponseText(a);
+  const right = normalizeResponseText(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+
+  const shorter = left.length <= right.length ? left : right;
+  const longer = left.length > right.length ? left : right;
+  const lengthRatio = shorter.length / longer.length;
+  if (shorter.length >= 80 && lengthRatio > 0.75 && longer.includes(shorter)) return true;
+
+  if (Math.min(left.length, right.length) < 120) return false;
+  return lengthRatio > 0.88 && textSimilarity(left, right) > 0.96;
+}
+
+function segmentSimilarity(a, b) {
+  const left = normalizeResponseText(a);
+  const right = normalizeResponseText(b);
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  if (Math.min(left.length, right.length) < 40) return textSimilarity(left, right);
+  const lengthRatio = Math.min(left.length, right.length) / Math.max(left.length, right.length);
+  return lengthRatio < 0.9 ? 0 : textSimilarity(left, right);
+}
+
+function dedupeRepeatedUnits(content, splitter, joiner) {
+  const trimmed = String(content || '').trim();
+  const units = trimmed.split(splitter).map(part => part.trim()).filter(Boolean);
+  if (units.length < 2) return null;
+
+  for (let cycleLength = 1; cycleLength <= Math.floor(units.length / 2); cycleLength++) {
+    if (units.length % cycleLength !== 0) continue;
+    const repeats = units.length / cycleLength;
+    if (repeats < 2) continue;
+
+    const firstCycle = units.slice(0, cycleLength);
+    let matches = true;
+    for (let i = cycleLength; i < units.length; i++) {
+      if (segmentSimilarity(units[i], firstCycle[i % cycleLength]) < 0.97) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return firstCycle.join(joiner).trim();
+  }
+
+  return null;
+}
+
+function nearestBoundary(content, approxIndex) {
+  const boundaries = ['\n\n', '\n', '. ', '! ', '? '];
+  let best = -1;
+  let bestDistance = Infinity;
+  for (const boundary of boundaries) {
+    const before = content.lastIndexOf(boundary, approxIndex);
+    const after = content.indexOf(boundary, approxIndex);
+    for (const candidate of [before, after]) {
+      if (candidate < 50) continue;
+      const end = candidate + boundary.length;
+      const distance = Math.abs(end - approxIndex);
+      if (distance < bestDistance && distance < 120) {
+        best = end;
+        bestDistance = distance;
+      }
+    }
+  }
+  return best > 0 ? best : approxIndex;
+}
+
+function dedupeRepeatedChunks(content) {
+  const text = String(content || '').trim();
+  if (text.length < 160) return null;
+
+  for (let repeats = 8; repeats >= 2; repeats--) {
+    const approxLength = Math.floor(text.length / repeats);
+    if (approxLength < 30) continue;
+
+    const chunks = [];
+    let cursor = 0;
+    for (let i = 1; i < repeats; i++) {
+      const boundary = nearestBoundary(text, approxLength * i);
+      chunks.push(text.slice(cursor, boundary).trim());
+      cursor = boundary;
+    }
+    chunks.push(text.slice(cursor).trim());
+
+    const first = chunks[0];
+    if (!first || chunks.some(chunk => !chunk)) continue;
+    const matches = chunks.slice(1).every(chunk => segmentSimilarity(first, chunk) > 0.96);
+    if (matches) return first.trim();
+  }
+
+  return null;
+}
+
+/**
  * Deduplicate response content that may have been repeated by the LLM.
  * Only triggers on near-exact duplication — avoids false positives on
  * long structured content (codebase analyses, etc.) where both halves
  * share vocabulary but are semantically distinct.
  */
-export function deduplicateResponse(content) {
-  if (!content || content.length < 200) return content;
+function deduplicateResponseInner(content) {
+  if (!content || content.length < 80) return content;
 
-  // Check for exact substring duplication first (most reliable)
+  // Check for repeated paragraphs/lines/chunks FIRST — these are more precise
+  // than half-dup and handle N-way repetition cleanly (6x, 3x, etc.)
+  const repeatedParagraphs = dedupeRepeatedUnits(content, /\n{2,}/, '\n\n');
+  if (repeatedParagraphs) return repeatedParagraphs;
+
+  const repeatedLines = dedupeRepeatedUnits(content, /\n+/, '\n');
+  if (repeatedLines) return repeatedLines;
+
+  const repeatedChunks = dedupeRepeatedChunks(content);
+  if (repeatedChunks) return repeatedChunks;
+
+  // Check for exact substring duplication (half-dup)
   const half = Math.floor(content.length / 2);
   for (let offset = -20; offset <= 20; offset++) {
     const splitPoint = half + offset;
@@ -136,6 +298,10 @@ export function deduplicateResponse(content) {
     const part2 = content.substring(splitPoint).trim();
 
     if (part1 === part2) {
+      return part1;
+    }
+
+    if (responsesAreSimilar(part1, part2)) {
       return part1;
     }
   }
@@ -162,4 +328,27 @@ export function deduplicateResponse(content) {
   }
 
   return content;
+}
+
+/**
+ * Deduplicate response content that may have been repeated by the LLM.
+ * Only triggers on near-exact duplication — avoids false positives on
+ * long structured content (codebase analyses, etc.) where both halves
+ * share vocabulary but are semantically distinct.
+ *
+ * Recursively applies deduplication until the result stabilizes,
+ * handling cases like 6x repeated content (6→3→1).
+ */
+export function deduplicateResponse(content) {
+  if (!content || content.length < 80) return content;
+  let result = deduplicateResponseInner(content);
+  // Recursively deduplicate until stable (handles 6x→3x→1x etc.)
+  let iterations = 0;
+  while (result !== content && result.length < content.length && iterations < 5) {
+    const next = deduplicateResponseInner(result);
+    if (next === result || next.length >= result.length) break;
+    result = next;
+    iterations++;
+  }
+  return result;
 }

@@ -22,8 +22,8 @@ import { CONFIG } from './config.js';
 import { getInstallationDir, isInsideInstallationDir } from './paths.js';
 import { resolveCommand, parseCommand } from './cli/commands.js';
 import { multilinePrompt, MultilineInput } from './cli/multilineInput.js';
-import { getTheme, nextTheme } from './cli/themes.js';
-import { VERSION } from './cli/state.js';
+import { getTheme, nextTheme, getActiveSkin, getSkinTheme } from './cli/themes.js';
+import { logger } from './logger.js';
 
 // ── Heavy imports deferred until start() — resolves in parallel for ~400ms startup savings ──
 // These are module-level so all existing code sees them as plain variables after resolveImports().
@@ -90,6 +90,9 @@ import {
   printUserMessage,
   createStreamingRenderer,
   printIntermediateContent,
+  contentWasAlreadyRendered,
+  stripAlreadyRenderedPrefix,
+  printIterationLabel,
   printEnhancedToolCallStart,
   printEnhancedToolCallEnd,
   printEnhancedTaskSummary,
@@ -102,6 +105,7 @@ import {
   showHelp,
   showCost,
   showContext,
+  printBanner as printDisplayBanner,
 } from './cli/display.js';
 
 import {
@@ -123,6 +127,22 @@ import {
   showSmartError,
   generateErrorSuggestions,
 } from './cli/errorUtils.js';
+
+function streamFinishHandled(result) {
+  return result === true || result === 'rendered' || result === 'already-rendered';
+}
+
+function printPendingFinalResponse(cli, finalResponse, streamRenderedSomething = false) {
+  if (!finalResponse?.trim()) return false;
+
+  if (streamRenderedSomething) {
+    const unrenderedContent = stripAlreadyRenderedPrefix(cli, finalResponse);
+    if (!unrenderedContent.trim()) return true;
+    if (unrenderedContent === finalResponse && contentWasAlreadyRendered(cli, finalResponse)) return true;
+  }
+
+  return printAIResponse(cli, finalResponse);
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // 💻 CLI Class
@@ -171,8 +191,8 @@ export class CLI {
     this.promptActive = false;
 
     // Theme system
-    this.currentTheme = 'catppuccin';
-    this.theme = getTheme('catppuccin');
+    this.currentTheme = 'luna';
+    this.theme = getSkinTheme();
 
     // File content cache for inline diffs
     this.fileContentCache = new Map();
@@ -185,6 +205,8 @@ export class CLI {
     console.clear();
     await this.loadState();
     this.printBanner();
+    const skin = getActiveSkin();
+    console.log(chalk.hex(this.theme.text)(`  ${skin.branding.welcome}`));
 
     if (!CONFIG.API_KEY) {
       this.showSmartError('api_key_missing', {
@@ -223,32 +245,33 @@ export class CLI {
     const initSpinner = spinner(chalk.gray('Initializing session...'), { color: 'cyan' });
     try {
       this.createSession({ modelId: selectedModel });
-      initSpinner.success(chalk.green('Session initialized'));
+      initSpinner.success(chalk.hex(this.theme.success)('Session initialized'));
     } catch (error) {
       initSpinner.error(chalk.red(`Failed to initialize session: ${error.message}`));
       process.exit(1);
     }
 
-    // Session info
+    // Session info — Hermes-style summary
     const modelInfo = this.modelBrowser.getModel(selectedModel);
     const contextLength = modelInfo?.contextLength || CONFIG.MAX_CONTEXT_TOKENS;
     const toolCount = this.session.toolRegistry?.list()?.length || 0;
-
     const modelShort = shortenModelLabel(this.session.agent.model);
-    console.log(chalk.dim(`  ${modelShort} · ${formatCompactNumber(contextLength)} ctx · ${toolCount} tools`));
-    console.log(chalk.dim(`  ${this.workingDir}`));
+
     console.log('');
+    console.log(chalk.hex(this.theme.accent)(`  ${modelShort}`) + chalk.hex(this.theme.muted)(` · ${formatCompactNumber(contextLength)} context · ${toolCount} tools`));
+    console.log(chalk.hex(this.theme.muted)(`  ${this.workingDir}`));
 
     // Installation directory warning
     if (isInsideInstallationDir(this.workingDir) && !this.allowFullAccess) {
       const installDir = getInstallationDir();
-      console.log(chalk.hex(this.theme.warning)('  installation protection active'));
+      console.log(chalk.hex(this.theme.warning)('  ⚠ installation protection active'));
       console.log(chalk.hex(this.theme.muted)(`  Installation: ${installDir}`));
       console.log(chalk.hex(this.theme.muted)('  Run OpenAgent from a project directory to allow writes.'));
     }
 
     if (this.autoSave) this.startAutoSave();
 
+    console.log('');
     console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(Math.min(process.stdout.columns || 80, 72))}`));
     console.log(formatCommandList(undefined, this.theme).split('\n').map(line => `  ${line}`).join('\n'));
     console.log(chalk.hex(this.theme.muted)(`  ${getShortcutSummary()} · ${getInputShortcutSummary()}`));
@@ -366,8 +389,7 @@ export class CLI {
         this.taskCount++;
         await this.runAgentTask(trimmed);
       } catch (error) {
-        console.error(chalk.red('\n✗ Unexpected error:'), error.message);
-        if (process.env.DEBUG) console.error(error.stack);
+        logger.error('Unexpected error', { message: error.message, stack: process.env.DEBUG ? error.stack : undefined });
         console.log(chalk.yellow('  The CLI encountered an error but will continue running.'));
       }
     }
@@ -469,9 +491,7 @@ export class CLI {
   // ── Banner & Status ──────────────────────────────────────────
 
   printBanner() {
-    console.log('');
-    console.log(chalk.hex(this.theme.muted)(`  openagent v${VERSION}`));
-    console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(Math.min(process.stdout.columns || 80, 72))}`));
+    printDisplayBanner();
   }
 
   buildPromptStatusLine() {
@@ -553,6 +573,11 @@ export class CLI {
     this._abortRequested = false;
     this._abortSummaryPrinted = false;
     this._taskInputBuffer = '';
+    this._lastIntermediateContent = null;
+    this._lastIntermediateContentKey = null;
+    this._lastRenderedContent = null;
+    this._lastRenderedContentKey = null;
+    this._renderedContentHistory = [];
     let toolCallCount = 0;
     const previousCallbacks = {
       onToolStart: this.session.agent.onToolStart,
@@ -569,9 +594,8 @@ export class CLI {
     console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(22)}`));
     console.log(chalk.hex(this.theme.muted)('  Ctrl+C or /stop to cancel'));
 
-    this.session.agent.onIterationStart = (_iteration) => {
-      const iterationLabel = this.session.agent.formatIterationLabel();
-      console.log(chalk.dim(`\n── ${iterationLabel} ──`));
+    this.session.agent.onIterationStart = (iteration) => {
+      printIterationLabel(this, this.session.agent.formatIterationLabel?.() || iteration);
     };
 
     this.session.agent.onToolStart = (toolName, args) => {
@@ -592,7 +616,7 @@ export class CLI {
 
     this.session.agent.onIntermediateContent = (content) => {
       if (this._streamRenderer?.active) {
-        this._streamRenderer.commitIntermediate();
+        this._streamRenderer.commitIntermediate(content);
         return;
       }
       printIntermediateContent(this, content);
@@ -631,13 +655,16 @@ export class CLI {
     try {
       const result = await this.session.run(task);
       const duration = Date.now() - startTime;
+      const finalResponse = deduplicateResponse(result.response || '');
 
-      if (this._streamRenderer?.active) {
-        this._streamRenderer.finish(result.response);
+      let renderedResponse = false;
+      let streamRenderedSomething = false;
+      if (this._streamRenderer) {
+        streamRenderedSomething = this._streamRenderer._rendered === true;
+        renderedResponse = streamFinishHandled(this._streamRenderer.finish(finalResponse));
       }
-      let renderedResponse = this._streamRenderer?._rendered === true;
-      if (!renderedResponse && result.response?.trim()) {
-        renderedResponse = printAIResponse(this, result.response);
+      if (!renderedResponse && finalResponse?.trim()) {
+        renderedResponse = printPendingFinalResponse(this, finalResponse, streamRenderedSomething);
       }
       if (!renderedResponse) {
         // Safety net: agent completed but produced no visible response.
@@ -698,6 +725,11 @@ export class CLI {
     this._abortRequested = false;
     this._abortSummaryPrinted = false;
     this._taskInputBuffer = '';
+    this._lastIntermediateContent = null;
+    this._lastIntermediateContentKey = null;
+    this._lastRenderedContent = null;
+    this._lastRenderedContentKey = null;
+    this._renderedContentHistory = [];
     let toolCallCount = 0;
     const previousCallbacks = {
       onToolStart: this.session.agent.onToolStart,
@@ -714,8 +746,8 @@ export class CLI {
     console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(22)}`));
     console.log(chalk.hex(this.theme.muted)('  Ctrl+C or /stop to cancel'));
 
-    this.session.agent.onIterationStart = () => {
-      console.log(chalk.dim(`\n── ${this.session.agent.formatIterationLabel()} ──`));
+    this.session.agent.onIterationStart = (iteration) => {
+      printIterationLabel(this, this.session.agent.formatIterationLabel?.() || iteration);
     };
     this.session.agent.onToolStart = (toolName, args) => {
       toolCallCount++;
@@ -731,7 +763,7 @@ export class CLI {
     };
     this.session.agent.onIntermediateContent = (content) => {
       if (this._streamRenderer?.active) {
-        this._streamRenderer.commitIntermediate();
+        this._streamRenderer.commitIntermediate(content);
         return;
       }
       printIntermediateContent(this, content);
@@ -751,13 +783,16 @@ export class CLI {
       this.session.agent.pushMessage(multimodalMsg);
       const result = await this.session.agent.run();
       const duration = Date.now() - startTime;
+      const finalResponse = deduplicateResponse(result.response || '');
 
-      if (this._streamRenderer?.active) {
-        this._streamRenderer.finish(result.response);
+      let renderedResponse = false;
+      let streamRenderedSomething = false;
+      if (this._streamRenderer) {
+        streamRenderedSomething = this._streamRenderer._rendered === true;
+        renderedResponse = streamFinishHandled(this._streamRenderer.finish(finalResponse));
       }
-      let renderedResponse = this._streamRenderer?._rendered === true;
-      if (!renderedResponse && result.response?.trim()) {
-        renderedResponse = printAIResponse(this, result.response);
+      if (!renderedResponse && finalResponse?.trim()) {
+        renderedResponse = printPendingFinalResponse(this, finalResponse, streamRenderedSomething);
       }
       if (!renderedResponse) {
         console.log(chalk.hex(this.theme.warning)('\n  Agent completed but produced no text response. The model may have returned empty content.'));
@@ -1228,14 +1263,12 @@ export async function runCLI(options = {}) {
   process.on('SIGTERM', signalHandler);
 
   process.on('uncaughtException', (error) => {
-    console.error(chalk.red('\n✗ Uncaught Exception:'), error.message);
-    if (process.env.DEBUG) console.error(error.stack);
+    logger.error('Uncaught exception', { message: error.message, stack: process.env.DEBUG ? error.stack : undefined });
     // Don't exit — try to continue
   });
 
   process.on('unhandledRejection', (reason) => {
-    console.error(chalk.red('\n✗ Unhandled Rejection:'), reason?.message || reason);
-    if (process.env.DEBUG) console.error(reason?.stack);
+    logger.error('Unhandled rejection', { message: reason?.message || reason, stack: process.env.DEBUG ? reason?.stack : undefined });
     // Don't exit — try to continue
   });
 
@@ -1313,7 +1346,7 @@ if (resolvedArgv && resolvedFilename === resolvedArgv) {
       });
       return daemon.start();
     }).catch((error) => {
-      console.error('Fatal error:', error.message);
+      logger.error('Fatal error', { message: error.message });
       process.exit(1);
     });
 
@@ -1329,19 +1362,19 @@ if (resolvedArgv && resolvedFilename === resolvedArgv) {
         companion.attachSession(cli.session);
       }
     }).catch((error) => {
-      console.error('Fatal error:', error.message);
+      logger.error('Fatal error', { message: error.message });
       process.exit(1);
     });
 
   // Handle shell subcommands (e.g., openagent skills list)
   } else if (args[0] === 'skills') {
     handleShellSkillsCommand(process.cwd(), args.slice(1)).catch((error) => {
-      console.error('Fatal error:', error.message);
+      logger.error('Fatal error', { message: error.message });
       process.exit(1);
     });
   } else {
     runCLI({ allowFullAccess, perfLogging, permissions }).catch((error) => {
-      console.error('Fatal error:', error.message);
+      logger.error('Fatal error', { message: error.message });
       process.exit(1);
     });
   }

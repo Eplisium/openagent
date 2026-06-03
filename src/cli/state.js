@@ -42,6 +42,20 @@ export const DEFAULT_STATE = {
 
 export { VERSION };
 
+/**
+ * Normalize a partial state object by filling in missing keys from DEFAULT_STATE
+ * @param {Object} partial - Partial state to normalize
+ * @returns {Object} Complete state with defaults applied
+ */
+export function normalizeState(partial = {}) {
+  return {
+    ...DEFAULT_STATE,
+    ...partial,
+    preferences: { ...DEFAULT_STATE.preferences, ...(partial.preferences || {}) },
+    stats: { ...DEFAULT_STATE.stats, ...(partial.stats || {}) },
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // 🔄 State Persistence Functions
 // ═══════════════════════════════════════════════════════════════════
