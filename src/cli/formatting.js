@@ -269,6 +269,48 @@ function dedupeRepeatedChunks(content) {
 }
 
 /**
+ * Deduplicate consecutive lines that are identical or near-identical.
+ * Handles cases where the LLM repeats a paragraph multiple times
+ * separated by single newlines (which marked treats as one paragraph),
+ * or where repeated paragraphs are mixed with non-repeating content
+ * (headings, bullets) that defeats the full-cycle dedup above.
+ *
+ * Only collapses runs of 2+ consecutive similar lines into a single copy.
+ * Preserves non-repeated lines and ordering.
+ */
+function dedupeConsecutiveLines(content) {
+  const text = String(content || '').trim();
+  if (text.length < 80) return null;
+
+  const lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return null;
+
+  let changed = false;
+  const result = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    // Find how many consecutive lines match lines[i]
+    let runEnd = i + 1;
+    while (runEnd < lines.length && segmentSimilarity(lines[i], lines[runEnd]) >= 0.96) {
+      runEnd++;
+    }
+
+    // If 2+ consecutive lines are similar, keep only the first
+    if (runEnd - i >= 2) {
+      result.push(lines[i]);
+      changed = true;
+    } else {
+      result.push(lines[i]);
+    }
+
+    i = runEnd;
+  }
+
+  return changed ? result.join('\n') : null;
+}
+
+/**
  * Deduplicate response content that may have been repeated by the LLM.
  * Only triggers on near-exact duplication — avoids false positives on
  * long structured content (codebase analyses, etc.) where both halves
@@ -287,6 +329,12 @@ function deduplicateResponseInner(content) {
 
   const repeatedChunks = dedupeRepeatedChunks(content);
   if (repeatedChunks) return repeatedChunks;
+
+  // Deduplicate consecutive similar lines — catches cases where the LLM
+  // repeats paragraphs separated by single newlines (one markdown block)
+  // or where repeated content is mixed with non-repeating structural elements.
+  const dedupedConsecutive = dedupeConsecutiveLines(content);
+  if (dedupedConsecutive) return dedupedConsecutive;
 
   // Check for exact substring duplication (half-dup)
   const half = Math.floor(content.length / 2);
