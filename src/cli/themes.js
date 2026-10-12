@@ -95,7 +95,7 @@ const syntaxPalettes = {
     syntaxOperator: '#cb4b16',
     syntaxPunctuation: '#93a1a1',
   },
-  luna: {
+  openagent: {
     syntaxKeyword: '#c4a7e7',
     syntaxString: '#a6e3a1',
     syntaxNumber: '#fab387',
@@ -218,28 +218,28 @@ export const themes = {
     assistant: '#93a1a1',
     header: '#6c71c4',
   }),
-  luna: withSyntax('luna', {
-    name: 'Luna',
+  openagent: withSyntax('openagent', {
+    name: 'OpenAgent',
     text: '#cdd6f4',
-    accent: '#c4a7e7',
+    accent: '#89b4fa',
     success: '#a6e3a1',
     error: '#f38ba8',
     warning: '#f9e2af',
     muted: '#6c7086',
     tool: '#94e2d5',
-    user: '#c4a7e7',
+    user: '#89b4fa',
     assistant: '#cdd6f4',
     header: '#cba6f7',
   }),
 };
 
 /**
- * Get a theme by name, falling back to luna.
+ * Get a theme by name, falling back to the OpenAgent default.
  * @param {string} name - Theme key
  * @returns {object} Theme color map
  */
 export function getTheme(name) {
-  return themes[name] || themes.luna;
+  return themes[name] || themes.openagent;
 }
 
 /**
@@ -253,7 +253,7 @@ export function listThemes() {
 /**
  * Ordered array of theme keys for cycling.
  */
-export const THEME_ORDER = ['luna', 'catppuccin', 'tokyonight', 'nord', 'dracula', 'monokai', 'gruvbox', 'solarized', 'light'];
+export const THEME_ORDER = ['openagent', 'catppuccin', 'tokyonight', 'nord', 'dracula', 'monokai', 'gruvbox', 'solarized', 'light'];
 
 /**
  * Get the next theme in the cycle.
@@ -266,7 +266,7 @@ export function nextTheme(current) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 🌙 Skin Engine
+// Skin Engine
 // ═══════════════════════════════════════════════════════════════════
 
 /**
@@ -275,52 +275,24 @@ export function nextTheme(current) {
  * This is the OpenAgent equivalent of Hermes's skin engine.
  */
 export const SKINS = {
-  luna: {
-    theme: 'luna',
+  openagent: {
+    theme: 'openagent',
     branding: {
-      agentName: 'Luna',
-      welcome: "Hey! I'm Luna. Type your message or /help for commands.",
-      goodbye: 'Goodnight! 🌙',
-      responseLabel: ' 🌙 Luna ',
+      agentName: 'OpenAgent',
+      welcome: 'Type your message, or /help for commands.',
+      goodbye: 'Goodbye!',
+      responseLabel: ' OpenAgent ',
       promptSymbol: '❯',
-      helpHeader: '(◕‿◕)? Commands',
+      helpHeader: 'Commands',
     },
     spinner: {
-      waitingFaces: ['(◕‿◕)', '(⊙‿⊙)', '(◉‿◉)', '(✿‿✿)', '(◠‿◠)', '(◕◡◕)'],
-      thinkingFaces: ['(⌁)', '(<> )', '(•̀ᴗ•́)', '( ◡ )', '(◕‿◕)'],
-      thinkingVerbs: [
-        'pondering', 'musing', 'contemplating', 'mulling it over',
-        'thinking carefully', 'connecting dots', 'crafting a plan',
-      ],
-      wings: [
-        ['⟪☽', '☾⟫'],
-        ['⟪✧', '✧⟫'],
-        ['⟪⋆', '⋆⟫'],
-        ['⟪◉', '◉⟫'],
-      ],
+      waitingFaces: null,
+      thinkingFaces: null,
+      thinkingVerbs: null,
+      wings: null,
     },
-    toolPrefix: '┊',
-    toolEmojis: {
-      read_file: '📄',
-      write_file: '✏️',
-      edit_file: '🔧',
-      search_in_files: '🔍',
-      list_directory: '📁',
-      exec: '⚔',
-      exec_background: '⚡',
-      web_search: '🔮',
-      read_webpage: '🌐',
-      fetch_url: '🔗',
-      git_status: '📊',
-      git_log: '📜',
-      git_diff: '🔀',
-      delegate_task: '🤝',
-      delegate_parallel: '🤝',
-      save_memory: '🧠',
-      use_skill: '📚',
-      browser_navigate: '🌍',
-      browser_click: '👆',
-    },
+    toolPrefix: '│',
+    toolEmojis: {},
     banner: {
       style: 'rich',
       showTools: true,
@@ -350,10 +322,10 @@ export const SKINS = {
   },
 };
 
-let _activeSkin = 'luna';
+let _activeSkin = 'openagent';
 
 export function getActiveSkin() {
-  return SKINS[_activeSkin] || SKINS.luna;
+  return SKINS[_activeSkin] || SKINS.openagent;
 }
 
 export function setActiveSkin(name) {

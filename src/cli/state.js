@@ -29,7 +29,7 @@ export const DEFAULT_STATE = {
     renderMarkdown: true,
     streaming: true,
     showTokenUsage: true,
-    theme: 'luna',
+    theme: 'openagent',
     defaultModel: null,
   },
   stats: {

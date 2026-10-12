@@ -1,7 +1,7 @@
 
 
 import { OpenRouterClient } from '../OpenRouterClient.js';
-import { AgentError, AgentAbortError, AbortError, ToolErrorType } from '../errors.js';
+import { AgentError, AgentAbortError, AbortError } from '../errors.js';
 import { ToolRegistry } from '../tools/ToolRegistry.js';
 import { parseXmlToolCalls, hasXmlToolCalls } from '../tools/xmlToolParser.js';
 import { CONFIG } from '../config.js';
@@ -11,7 +11,7 @@ import { ContextAllocator } from './contextAllocator.js';
 import { StallDetector } from './StallDetector.js';
 import { RetryHandler } from './RetryHandler.js';
 import { ContextManager } from './ContextManager.js';
-import { normalizeOptionalLimit, normalizePositiveInt, estimateTokens } from '../utils.js';
+import { normalizeOptionalLimit, normalizePositiveInt } from '../utils.js';
 // chalk removed — not used in this file
 import fs from '../utils/fs-compat.js';
 import path from 'path';
@@ -48,6 +48,7 @@ export class Agent {
     this.onResponse = options.onResponse || null;
     this.onIntermediateContent = options.onIntermediateContent || null;
     this.onContentDelta = options.onContentDelta || null;
+    this.onStreamProgress = options.onStreamProgress || null;
     this.onIterationStart = options.onIterationStart || null;
     this.onIterationEnd = options.onIterationEnd || null;
     this.onCheckpoint = options.onCheckpoint || null;
@@ -585,6 +586,21 @@ When done, provide a clear summary: what changed, why, what was verified, and an
 
     this.onStatus({ type, message });
     return true;
+  }
+
+  /**
+   * Surface non-content stream chunks (reasoning, tool-argument progress, retries)
+   * so the UI can show that the model is alive.
+   */
+  handleStreamSignal(chunk) {
+    if (chunk.type === 'retry') {
+      this.emitStatus('retry', `Connection stalled — retrying (${chunk.attempt}/${chunk.max})`);
+    } else if (chunk.type === 'done' && chunk.interrupted) {
+      this.emitStatus('stream_interrupted', '⚠ Connection dropped before the response finished — it may be incomplete.');
+    }
+    if (chunk.type === 'reasoning' || chunk.type === 'tool_progress' || chunk.type === 'retry') {
+      try { this.onStreamProgress?.(chunk); } catch { /* UI callback must never break the stream */ }
+    }
   }
 
   /**
@@ -1526,6 +1542,7 @@ Task: ${userInput}`;
       try {
         for await (const chunk of stream) {
           this.checkAborted();
+          this.handleStreamSignal(chunk);
           if (chunk.type === 'error') {
             const err = chunk.error;
             const errMsg = typeof err === 'string' ? err : (err?.message || JSON.stringify(err));
@@ -2662,6 +2679,7 @@ Task: ${userInput}`;
       
       for await (const chunk of stream) {
         this.checkAborted();
+        this.handleStreamSignal(chunk);
         if (chunk.type === 'error') {
           const err = chunk.error;
           const errMsg = typeof err === 'string' ? err : (err?.message || JSON.stringify(err));

@@ -171,13 +171,7 @@ export class ContextManager {
   // ── Context Compaction ────────────────────────────────────────────
 
   /**
-   * Compact context when approaching limit — enhanced with TrajectoryCompressor.
-   *
-   * Uses the enhanced compressor which:
-   * - Protects first N turns (system + original request)
-   * - Protects last N turns (recent working context)
-   * - Extracts structured knowledge (files, commands, decisions, errors)
-   * - Preserves tool call patterns for the model
+   * Compact context when approaching the token or message-count limit.
    */
   async maybeCompactContext() {
     const a = this.agent;
@@ -197,37 +191,12 @@ export class ContextManager {
       logger.warn(triggerMessage, { estimatedTokens, messageCount: a.messages.length });
     }
 
-    // ── Enhanced compression via TrajectoryCompressor ──
-    const estimateFn = (msg) => {
-      if (!msg) return 0;
-      const content = msg.content || '';
-      const toolCalls = msg.tool_calls || [];
-      let tokens = Math.ceil(content.length / 4);
-      for (const tc of toolCalls) {
-        tokens += Math.ceil(JSON.stringify(tc).length / 4);
-      }
-      return tokens;
-    };
-
-    const result = a.trajectoryCompressor.compress(a.messages, estimateFn);
-
-    if (result.compressed) {
-      a.setMessages(result.messages);
-      a.contextStats.compactions++;
-
-      const compactedMessage = `Context compacted: ~${result.stats.beforeTokens} -> ~${result.stats.afterTokens} tokens (${result.stats.messagesCompressed} messages compressed, ${result.stats.tokensSaved} tokens saved)`;
-      if (!a.emitStatus('compaction', compactedMessage) && a.shouldEmitVerboseLogs()) {
-        logger.info(compactedMessage, result.stats);
-      }
-    } else {
-      // Fallback to original logic
-      this._fallbackCompactContext(estimatedTokens);
-    }
+    this._fallbackCompactContext(estimatedTokens);
   }
 
   /**
-   * Fallback compaction (original logic) — used when TrajectoryCompressor
-   * determines the message set is too small or doesn't need compression.
+   * Compact older messages into a summary marker while keeping the system
+   * prompt, the original request, and the most recent exchanges.
    * @private
    */
   _fallbackCompactContext(estimatedTokens) {

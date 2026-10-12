@@ -22,6 +22,7 @@ import { CONFIG } from './config.js';
 import { getInstallationDir, isInsideInstallationDir } from './paths.js';
 import { resolveCommand, parseCommand } from './cli/commands.js';
 import { multilinePrompt, MultilineInput } from './cli/multilineInput.js';
+import { createActivityIndicator, restoreCursor } from './cli/animation.js';
 import { getTheme, nextTheme, getActiveSkin, getSkinTheme } from './cli/themes.js';
 import { logger } from './logger.js';
 
@@ -38,7 +39,7 @@ let runOnboarding, createReadlineInterfaceWithTerminalReset, promptWithTerminalR
  */
 let importsPromise = null;
 
-async function resolveImports() {
+export async function resolveImports() {
   if (AgentSession && ModelBrowser && spinner) return;
 
   importsPromise ||= Promise.all([
@@ -73,6 +74,7 @@ async function resolveImports() {
 import {
   WORKFLOW_TEMPLATES,
   HEALTH_CHECKS,
+  COMMAND_ENTRIES,
 } from './cli/constants.js';
 
 import {
@@ -191,7 +193,7 @@ export class CLI {
     this.promptActive = false;
 
     // Theme system
-    this.currentTheme = 'luna';
+    this.currentTheme = 'openagent';
     this.theme = getSkinTheme();
 
     // File content cache for inline diffs
@@ -285,8 +287,10 @@ export class CLI {
   async mainLoop() {
     while (true) {
       try {
+        restoreCursor();
         const statusLine = this.buildPromptStatusLine();
-        const promptStr = chalk.hex(this.theme.accent)('▸ ');
+        const promptSymbol = getActiveSkin().branding?.promptSymbol || '❯';
+        const promptStr = chalk.hex(this.theme.accent).bold(`${promptSymbol} `);
 
         let input;
         this.promptActive = true;
@@ -295,7 +299,9 @@ export class CLI {
             prompt: promptStr,
             statusLine: statusLine,
             theme: this.theme,
-            placeholder: 'Type your message... (Enter sends, Ctrl+O newline, Ctrl+L clear, Ctrl+T theme)',
+            placeholder: 'Ask anything, or type / for commands',
+            commands: COMMAND_ENTRIES.map(entry => entry[0].split(' ')[0]),
+            echo: false,
           });
         } finally {
           this.promptActive = false;
@@ -374,6 +380,8 @@ export class CLI {
         }
 
         const command = trimmed.startsWith('/') ? resolveCommand(trimmed) : trimmed;
+
+        if (command.startsWith('/') || command.startsWith('!')) printUserMessage(this, trimmed);
 
         if (command.startsWith('/')) {
           const shouldContinue = await this.handleCommand(command);
@@ -588,11 +596,13 @@ export class CLI {
       onIterationStart: this.session.agent.onIterationStart,
       onIterationEnd: this.session.agent.onIterationEnd,
       onStatus: this.session.agent.onStatus,
+      onStreamProgress: this.session.agent.onStreamProgress,
     };
 
     printUserMessage(this, task);
-    console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(22)}`));
-    console.log(chalk.hex(this.theme.muted)('  Ctrl+C or /stop to cancel'));
+    console.log(chalk.hex(this.theme.muted)('  Ctrl+C to cancel'));
+    this._activity = createActivityIndicator(this);
+    this._activity.resume('Thinking');
 
     this.session.agent.onIterationStart = (iteration) => {
       printIterationLabel(this, this.session.agent.formatIterationLabel?.() || iteration);
@@ -608,6 +618,7 @@ export class CLI {
     };
 
     this.session.agent.onResponse = null;
+    this.session.agent.onStreamProgress = this._createStreamProgressHandler();
 
     this._streamRenderer = createStreamingRenderer(this);
     this.session.agent.onContentDelta = (delta) => {
@@ -628,32 +639,17 @@ export class CLI {
         : type === 'retry'
           ? chalk.hex(this.theme.warning)
           : chalk.hex(this.theme.muted);
-      console.log(formatter(`   ${message}`));
+      this._streamRenderer?.clearLive?.();
+      const print = () => console.log(formatter(`  ${message}`));
+      if (this._activity) this._activity.around(print); else print();
     };
 
-    // Progress indicator for long-running tasks
-    let progressInterval = null;
-    let progressMessage = 'Working...';
-    this._progressMessage = (msg) => { progressMessage = msg; };
-    const startProgressIndicator = () => {
-      let elapsed = 0;
-      progressInterval = setInterval(() => {
-        elapsed += 1;
-        process.stdout.write(`\r  ${chalk.hex(this.theme.tool)('⠋')} ${chalk.hex(this.theme.muted)(progressMessage)} ${chalk.hex(this.theme.text)(elapsed.toFixed(1) + 's')}  `);
-      }, 1000);
-    };
-    const stopProgressIndicator = () => {
-      if (progressInterval) {
-        clearInterval(progressInterval);
-        progressInterval = null;
-        process.stdout.write('\r' + ' '.repeat(50) + '\r');
-      }
-    };
-    const progressTimeout = setTimeout(startProgressIndicator, 5000);
     const abortHandlerState = this._setupTaskAbortHandler();
 
     try {
       const result = await this.session.run(task);
+      this._activity?.dispose();
+      this._activity = null;
       const duration = Date.now() - startTime;
       const finalResponse = deduplicateResponse(result.response || '');
 
@@ -694,6 +690,8 @@ export class CLI {
       await this.saveState();
 
     } catch (error) {
+      this._activity?.dispose();
+      this._activity = null;
       if (error.name === 'AgentAbortError' || error.name === 'AbortError' || this._abortRequested) {
         this._printAbortSummary();
       } else {
@@ -706,9 +704,10 @@ export class CLI {
       }
     } finally {
       this._teardownTaskAbortHandler(abortHandlerState);
-      clearTimeout(progressTimeout);
-      stopProgressIndicator();
+      this._activity?.dispose();
+      this._activity = null;
       Object.assign(this.session.agent, previousCallbacks);
+      this._streamRenderer?.dispose?.();
       this._streamRenderer = null;
       this.currentTask = null;
       this.taskStartTime = null;
@@ -740,11 +739,13 @@ export class CLI {
       onIterationStart: this.session.agent.onIterationStart,
       onIterationEnd: this.session.agent.onIterationEnd,
       onStatus: this.session.agent.onStatus,
+      onStreamProgress: this.session.agent.onStreamProgress,
     };
 
     printUserMessage(this, this.currentTask);
-    console.log(chalk.hex(this.theme.muted)(`  ${'─'.repeat(22)}`));
-    console.log(chalk.hex(this.theme.muted)('  Ctrl+C or /stop to cancel'));
+    console.log(chalk.hex(this.theme.muted)('  Ctrl+C to cancel'));
+    this._activity = createActivityIndicator(this);
+    this._activity.resume('Thinking');
 
     this.session.agent.onIterationStart = (iteration) => {
       printIterationLabel(this, this.session.agent.formatIterationLabel?.() || iteration);
@@ -757,6 +758,7 @@ export class CLI {
       printEnhancedToolCallEnd(this, toolName, result, startTime, toolCallCount);
     };
     this.session.agent.onResponse = null;
+    this.session.agent.onStreamProgress = this._createStreamProgressHandler();
     this._streamRenderer = createStreamingRenderer(this);
     this.session.agent.onContentDelta = (delta) => {
       this._streamRenderer?.write(delta);
@@ -774,7 +776,9 @@ export class CLI {
         : type === 'retry'
           ? chalk.hex(this.theme.warning)
           : chalk.hex(this.theme.muted);
-      console.log(f(`   ${message}`));
+      this._streamRenderer?.clearLive?.();
+      const print = () => console.log(f(`  ${message}`));
+      if (this._activity) this._activity.around(print); else print();
     };
 
     const abortHandlerState = this._setupTaskAbortHandler();
@@ -782,6 +786,8 @@ export class CLI {
     try {
       this.session.agent.pushMessage(multimodalMsg);
       const result = await this.session.agent.run();
+      this._activity?.dispose();
+      this._activity = null;
       const duration = Date.now() - startTime;
       const finalResponse = deduplicateResponse(result.response || '');
 
@@ -821,6 +827,8 @@ export class CLI {
       }
       await this.saveState();
     } catch (error) {
+      this._activity?.dispose();
+      this._activity = null;
       if (error.name === 'AgentAbortError' || error.name === 'AbortError' || this._abortRequested) {
         this._printAbortSummary();
       } else {
@@ -833,7 +841,10 @@ export class CLI {
       }
     } finally {
       this._teardownTaskAbortHandler(abortHandlerState);
+      this._activity?.dispose();
+      this._activity = null;
       Object.assign(this.session.agent, previousCallbacks);
+      this._streamRenderer?.dispose?.();
       this._streamRenderer = null;
       this.currentTask = null;
       this.taskStartTime = null;
@@ -846,12 +857,50 @@ export class CLI {
     const startTime = Date.now();
     let succeeded = false;
 
+    this.taskStartTime = startTime;
+    this.currentTask = message;
+    this._abortRequested = false;
+    this._abortSummaryPrinted = false;
+    this._taskInputBuffer = '';
+    this._chatAbortController = new AbortController();
+    const abortHandlerState = this._setupTaskAbortHandler();
+
+    this._activity = createActivityIndicator(this);
+    this._activity.resume('Thinking');
+    const onProgress = this._createStreamProgressHandler();
+
+    try {
+      await this._runChatBody(message, startTime, onProgress, (ok) => { succeeded = ok; });
+    } finally {
+      this._teardownTaskAbortHandler(abortHandlerState);
+      this._chatAbortController = null;
+      this.currentTask = null;
+      this.taskStartTime = null;
+    }
+
+    this._activity?.dispose();
+    this._activity = null;
+
+    const duration = Date.now() - startTime;
+    if (succeeded) {
+      this.history.push({ type: 'chat', task: message, timestamp: new Date().toISOString(), duration });
+      if (this.history.length > this.maxHistorySize) {
+        this.history = this.history.slice(-this.maxHistorySize);
+      }
+      await this.saveState();
+    }
+    console.log(chalk.dim(`  ${duration}ms`));
+  }
+
+  async _runChatBody(message, startTime, onProgress, setSucceeded) {
+    let succeeded = false;
     if (this.streaming) {
       const streamRenderer = createStreamingRenderer(this);
+      this._streamRenderer = streamRenderer;
       try {
         const stream = this.session.agent.client.chatStream(
           this.session.agent.messages.concat([{ role: 'user', content: message }]),
-          { model: this.session.agent.model }
+          { model: this.session.agent.model, signal: this._chatAbortController?.signal }
         );
 
         let fullContent = '';
@@ -863,7 +912,21 @@ export class CLI {
             streamRenderer.write(chunk.content);
           }
           else if (chunk.type === 'tool_calls') { sawToolCalls = true; }
-          else if (chunk.type === 'done') { lastUsage = chunk.usage; this.session.agent.updateUsageStats(chunk.usage); }
+          else if (chunk.type === 'done') {
+            lastUsage = chunk.usage;
+            this.session.agent.updateUsageStats(chunk.usage);
+            if (chunk.interrupted) {
+              this._streamRenderer?.clearLive?.();
+              console.log(chalk.hex(this.theme.warning)('  ⚠ Connection dropped before the response finished — it may be incomplete.'));
+            }
+          } else if (chunk.type === 'retry') {
+            onProgress(chunk);
+            this._streamRenderer?.clearLive?.();
+            const note = () => console.log(chalk.hex(this.theme.warning)(`  Connection stalled — retrying (${chunk.attempt}/${chunk.max})`));
+            if (this._activity) this._activity.around(note); else note();
+          } else if (chunk.type === 'reasoning' || chunk.type === 'tool_progress') {
+            onProgress(chunk);
+          }
         }
 
         let displayContent = fullContent;
@@ -880,42 +943,65 @@ export class CLI {
           displayContent = '[Model returned an empty response.]';
         }
 
+        this._activity?.dispose();
         streamRenderer.finish(displayContent, lastUsage);
         this.session.agent.pushMessage({ role: 'user', content: message });
         this.session.agent.pushMessage({ role: 'assistant', content: displayContent });
         succeeded = true;
       } catch (error) {
-        console.log(chalk.red(`\n✗ ${error.message}`));
+        this._activity?.dispose();
+        streamRenderer.dispose();
+        if (error.name === 'AbortError' || this._abortRequested) {
+          this._printAbortSummary();
+        } else {
+          console.log(chalk.red(`\n✗ ${error.message}`));
+          if (error.suggestion) console.log(chalk.hex(this.theme.muted)(`  ${error.suggestion}`));
+        }
+      } finally {
+        this._streamRenderer = null;
       }
     } else {
-      const thinkSpinner = spinner(chalk.gray('Thinking…'), { color: 'cyan' });
       try {
         const result = await this.session.agent.chat(message);
-        thinkSpinner.stop();
+        this._activity?.dispose();
         const rendered = printAIResponse(this, result.content);
         if (!rendered) {
           console.log(chalk.yellow('\n  ⚠ Model returned an empty response. Try rephrasing or using a different model.'));
         }
         succeeded = true;
       } catch (error) {
-        thinkSpinner.error(chalk.red(`Error: ${error.message}`));
+        this._activity?.dispose();
+        console.log(chalk.red(`  ✗ Error: ${error.message}`));
       }
     }
+    setSucceeded(succeeded);
+  }
 
-    const duration = Date.now() - startTime;
-    if (succeeded) {
-      this.history.push({ type: 'chat', task: message, timestamp: new Date().toISOString(), duration });
-      if (this.history.length > this.maxHistorySize) {
-        this.history = this.history.slice(-this.maxHistorySize);
+  _createStreamProgressHandler() {
+    let lastLabel = '';
+    return (chunk) => {
+      const activity = this._activity;
+      if (!activity) return;
+      let label = null;
+      if (chunk.type === 'reasoning') {
+        label = 'Reasoning';
+      } else if (chunk.type === 'tool_progress') {
+        const size = chunk.chars >= 1000 ? `${(chunk.chars / 1000).toFixed(1)}k chars` : `${chunk.chars} chars`;
+        label = `Preparing ${chunk.name}${chunk.chars > 0 ? ` (${size})` : ''}`;
+      } else if (chunk.type === 'retry') {
+        label = `Reconnecting (${chunk.attempt}/${chunk.max})`;
       }
-      await this.saveState();
-    }
-    console.log(chalk.dim(`  └─ ${duration}ms`));
+      if (label && label !== lastLabel) {
+        lastLabel = label;
+        activity.setLabel(label);
+      }
+    };
   }
 
   _abortCurrentTask() {
     if (!this.currentTask || this._abortRequested) return false;
     this._abortRequested = true;
+    try { this._chatAbortController?.abort(); } catch { /* best-effort abort */ }
     try { this.session?.agent?.abort?.(); } catch { /* best-effort abort */ }
     try { this.session?.subagentManager?.abort?.(); } catch { /* best-effort abort */ }
     try { ProcessManager.killAll(); } catch { /* best-effort process cleanup */ }

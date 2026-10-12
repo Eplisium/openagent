@@ -3,7 +3,7 @@ import fs from '../src/utils/fs-compat.js';
 import os from 'os';
 import path from 'path';
 
-import { CLI } from '../src/cli.js';
+import { CLI, resolveImports } from '../src/cli.js';
 import { ModelBrowser } from '../src/ModelBrowser.js';
 import { MultilineInput, multilinePrompt } from '../src/cli/multilineInput.js';
 import { promptWithTerminalReset, resetTerminalInput } from '../src/cli/terminal.js';
@@ -43,10 +43,11 @@ test('CLI syncs selected model context window', () => {
   assert.equal(cli.session.agent.model, 'demo/fast');
   assert.equal(cli.session.agent.maxContextTokens, 32000);
   assert.equal(synced.contextLength, 32000);
-  assert.match(cli.buildPromptStatusLine(), /demo\/fast.*\d+%/i);
+  assert.match(cli.buildPromptStatusLine(), /fast[\s\S]*\d+%/i);
 });
 
-test('CLI createSession generates a fresh session identity', () => {
+test('CLI createSession generates a fresh session identity', async () => {
+  await resolveImports();
   const cli = new CLI({ autoSave: false });
   cli.modelBrowser = {
     getContextLength: () => 128000,

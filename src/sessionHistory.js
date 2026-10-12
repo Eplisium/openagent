@@ -107,7 +107,7 @@ async function _getDB() {
     
     _sqliteAvailable = true;
     return _db;
-  } catch (e) {
+  } catch {
     _sqliteAvailable = false;
     return null;
   }
@@ -212,7 +212,7 @@ export class SessionHistory {
           try {
             insertFts.run(entry.userMessage, entry.sessionId, 'user', userMsgId);
             insertFts.run(entry.assistantResponse, entry.sessionId, 'assistant', asstMsgId);
-          } catch {}
+          } catch { /* non-fatal */ }
         }
       }
 
@@ -260,7 +260,7 @@ export class SessionHistory {
     if (db) {
       try {
         return this._searchFTS(db, query, maxResults);
-      } catch {}
+      } catch { /* non-fatal */ }
     }
 
     // JSONL fallback
@@ -398,7 +398,7 @@ export class SessionHistory {
             model: s.model || 'unknown',
           })),
         };
-      } catch {}
+      } catch { /* non-fatal */ }
     }
 
     // JSONL fallback
@@ -452,7 +452,7 @@ export class SessionHistory {
         });
         del();
         return { deleted: toDelete };
-      } catch {}
+      } catch { /* non-fatal */ }
     }
 
     // JSONL fallback
@@ -463,7 +463,7 @@ export class SessionHistory {
     let deleted = 0;
     while (files.length > maxSessions) {
       const oldFile = files.shift();
-      try { await fs.unlink(path.join(this.historyDir, oldFile)); deleted++; } catch {}
+      try { await fs.unlink(path.join(this.historyDir, oldFile)); deleted++; } catch { /* non-fatal */ }
     }
     return { deleted };
   }
@@ -487,7 +487,7 @@ export class SessionHistory {
         durationMs || 0,
         error || null
       );
-    } catch {}
+    } catch { /* non-fatal */ }
   }
 }
 

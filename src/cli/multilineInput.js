@@ -20,6 +20,32 @@ import { resetTerminalInput } from './terminal.js';
 import fs from '../utils/fs-compat.js';
 import path from 'path';
 import os from 'os';
+import { displayWidth, clipLine } from './layout.js';
+
+const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const PASTE_START = '\x1b[200~';
+const PASTE_END = '\x1b[201~';
+const PASTE_ON = '\x1b[?2004h';
+const PASTE_OFF = '\x1b[?2004l';
+const PRINTABLE = /^[^\x00-\x1f\x7f]+$/u;
+// One key per match: CSI/SS3/Alt sequences, CRLF, or a single code point.
+const KEY_PATTERN = /\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1bO[\s\S]|\x1b[\s\S]?|\r\n|[\s\S]/gu;
+
+function prevBoundary(line, col) {
+  let prev = 0;
+  for (const { index } of segmenter.segment(line)) {
+    if (index >= col) break;
+    prev = index;
+  }
+  return prev;
+}
+
+function nextBoundary(line, col) {
+  for (const { index, segment } of segmenter.segment(line)) {
+    if (index >= col) return index + segment.length;
+  }
+  return line.length;
+}
 
 // History file path
 const HISTORY_FILE = path.join(os.homedir(), '.openagent', 'history.json');
@@ -36,9 +62,14 @@ let _clip = '';
 
 export class MultilineInput {
   constructor(opts = {}) {
-    this.prompt = opts.prompt || '▸ ';
+    this.prompt = opts.prompt || '❯ ';
     this.placeholder = opts.placeholder || '';
     this.statusLine = opts.statusLine || '';
+    this.echo = opts.echo !== false;
+    this._acBase = null;
+    this._exitArmedAt = 0;
+    this._pasting = false;
+    this._pasteBuf = '';
     this.theme = opts.theme || { muted: '#6c7086' };
     this.stdin = opts.stdin || process.stdin;
     this.stdout = opts.stdout || process.stdout;
@@ -131,6 +162,9 @@ export class MultilineInput {
       this.stdin.setEncoding('utf8');
       this._handler = (d) => this._onData(d);
       this.stdin.on('data', this._handler);
+      this._onResize = () => this._render();
+      this.stdout.on?.('resize', this._onResize);
+      try { this.stdout.write(PASTE_ON); } catch { /* non-tty stdout */ }
       this._active = true;
       this._render();
     });
@@ -140,6 +174,8 @@ export class MultilineInput {
     if (!this._active) return;
     this._active = false;
     this.stdin.removeListener('data', this._handler);
+    if (this._onResize) this.stdout.removeListener?.('resize', this._onResize);
+    try { this.stdout.write(PASTE_OFF); } catch { /* non-tty stdout */ }
     if (!this._wasRaw) {
       try { this.stdin.setRawMode(false); } catch { /* setRawMode may fail if stream closed */ }
     }
@@ -151,90 +187,129 @@ export class MultilineInput {
 
   _onData(data) {
     if (!this._active) return;
+    data = String(data);
 
-    // Search mode intercepts most keys
+    if (this._pasting || data.includes(PASTE_START)) {
+      this._onBracketedPaste(data);
+      return;
+    }
+
+    const keys = data.match(KEY_PATTERN) || [];
+    if (keys.length <= 1) {
+      if (keys.length === 1) this._onKey(keys[0]);
+      return;
+    }
+
+    if (!data.includes('\x1b') && !this._searchMode) {
+      if (PRINTABLE.test(data)) {
+        this._insertText(data);
+        return;
+      }
+      const newlines = (data.match(/\r\n|\r|\n/g) || []).length;
+      if (newlines > 0) {
+        const trailing = /(\r\n|\r|\n)$/.test(data);
+        const body = data.replace(/\r\n|\r/g, '\n').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').replace(/\t/g, '  ');
+        if (trailing && newlines === 1) {
+          this._insertText(body.replace(/\n$/, ''));
+          this._submit();
+        } else if (body) {
+          this._insertText(body);
+        }
+        return;
+      }
+    }
+
+    for (const key of keys) {
+      if (!this._active) break;
+      this._onKey(key);
+    }
+  }
+
+  _onBracketedPaste(data) {
+    let rest = data;
+    while (rest.length && this._active) {
+      if (!this._pasting) {
+        const start = rest.indexOf(PASTE_START);
+        if (start === -1) { this._onData(rest); return; }
+        if (start > 0) this._onData(rest.slice(0, start));
+        this._pasting = true;
+        this._pasteBuf = '';
+        rest = rest.slice(start + PASTE_START.length);
+      } else {
+        const end = rest.indexOf(PASTE_END);
+        if (end === -1) { this._pasteBuf += rest; return; }
+        this._pasteBuf += rest.slice(0, end);
+        this._pasting = false;
+        const cleaned = this._pasteBuf
+          .replace(/\r\n|\r/g, '\n')
+          .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+          .replace(/\t/g, '  ');
+        this._pasteBuf = '';
+        if (cleaned && !this._searchMode) this._insertText(cleaned);
+        rest = rest.slice(end + PASTE_END.length);
+      }
+    }
+  }
+
+  _onKey(data) {
+    if (!this._active) return;
+
     if (this._searchMode) {
       this._handleSearchKey(data);
       return;
     }
 
-    // Some Windows terminals deliver Enter as CRLF in raw mode.
-    if (data === '\r\n') {
+    if (data !== '\t') this._acBase = null;
+    if (data !== '\x03') this._exitArmedAt = 0;
+
+    // Enter variants: CR, LF and CRLF all submit (Windows terminals vary).
+    if (data === '\r\n' || data === '\r' || data === '\n') {
       this._submit();
       return;
     }
-    if (!this._active) return;
 
-    // Enhanced keyboard protocols may surface modified Enter directly.
+    // Portable newline shortcuts (Ctrl+O, Alt+Enter, kitty/xterm modified Enter).
     if (data === '\x0f' || data === '\x1b\r' || data === '\x1b\n' || data === '\x1b[13;2u' || data === '\x1b[27;13;2~') {
       this._newline();
       return;
     }
 
-    // Paste: multi-char non-escape
-    if (data.length > 1 && !data.startsWith('\x1b')) {
-      const cleaned = data
-        .replace(/\r\n/g, '\n')
-        .replace(/\r/g, '\n')
-        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
-      if (cleaned) {
-        this._insertText(cleaned);
-      }
-      return;
-    }
-
-    // Ctrl+C — copy selection if any, otherwise ignore (use Ctrl+K or /exit to quit)
+    // Ctrl+C: copy selection, else clear the buffer, else (twice) exit.
     if (data === '\x03') {
       if (this._hasSel()) {
         this._copy();
+      } else if (this.lines.some(l => l.length > 0)) {
+        this.lines = [''];
+        this.row = 0;
+        this.col = 0;
+        this.historyIndex = -1;
+        this._render();
+      } else if (this._exitArmedAt && Date.now() - this._exitArmedAt < 2000) {
+        this._cancel();
+      } else {
+        this._exitArmedAt = Date.now();
+        this._render();
       }
-      // If no selection, do nothing — prevents accidental exit
       return;
     }
 
-    // Treat both CR and LF as send. Shift+Enter is not portable across terminals.
-    if (data === '\r' || data === '\n') {
-      this._submit();
-      return;
-    }
+    if (data === '\x7f' || data === '\b') { this._backspace(); return; }
+    if (data === '\x1b[3~') { this._delete(); return; }
+    if (data === '\x1b\x7f' || data === '\x1b\b') { this._delWordBack(); return; }
 
-    // Backspace
-    if (data === '\x7f' || data === '\b') {
-      this._backspace();
-      return;
-    }
-    // Delete
-    if (data === '\x1b[3~') {
-      this._delete();
-      return;
-    }
+    if (data === '\t') { this._handleAutocomplete(); return; }
 
-    // Tab = autocomplete slash commands (or insert spaces if no match)
-    if (data === '\t') {
-      if (this._searchMode) return; // ignore tab in search mode
-      this._handleAutocomplete();
-      return;
-    }
-
-    // Escape = clear selection
     if (data === '\x1b') {
       if (this.sel) { this.sel = null; this._render(); }
       return;
     }
 
-    // Ctrl+A = select all
     if (data === '\x01') { this._selectAll(); return; }
-    // Ctrl+V = paste
     if (data === '\x16') { this._paste(); return; }
-    // Ctrl+X = cut
     if (data === '\x18') { this._cut(); return; }
-    // Ctrl+Z = undo
     if (data === '\x1a') { this._undo(); return; }
-    // Ctrl+Y = redo
     if (data === '\x19') { this._redo(); return; }
-    // Ctrl+W = delete word back
     if (data === '\x17') { this._delWordBack(); return; }
-    // Ctrl+K = kill to end of line (or cancel if buffer is empty)
     if (data === '\x0b') {
       if (this.lines.length === 1 && this.lines[0] === '' && !this._hasSel()) {
         this._cancel();
@@ -243,36 +318,20 @@ export class MultilineInput {
       }
       return;
     }
-    // Ctrl+U = kill to start of line
     if (data === '\x15') { this._killToStart(); return; }
-    // Ctrl+L = clear screen
     if (data === '\x0c') {
       this._clearRenderedBlock();
       this.cleanup();
       if (this._resolve) this._resolve(MultilineInput.CLEAR_SCREEN);
       return;
     }
-    // Ctrl+T = cycle theme
-    // Ctrl+R = reverse history search
-    if (data === '\x12') {
-      if (this._searchMode) {
-        // Cycle through matches
-        this._searchIndex = (this._searchIndex + 1) % Math.max(1, this._searchMatches.length);
-        this._render();
-        return;
-      }
-      this._enterSearchMode();
-      return;
-    }
-
-    // Ctrl+T = cycle theme
+    if (data === '\x12') { this._enterSearchMode(); return; }
     if (data === '\x14') {
       this._clearRenderedBlock();
       this.cleanup();
       if (this._resolve) this._resolve(MultilineInput.CYCLE_THEME);
       return;
     }
-    // Ctrl+P = show session stats
     if (data === '\x10') {
       this._clearRenderedBlock();
       this.cleanup();
@@ -280,26 +339,26 @@ export class MultilineInput {
       return;
     }
 
-    // Arrow keys & shift variants
-    if (data === '\x1b[D') { this._left(false); return; }
-    if (data === '\x1b[C') { this._right(false); return; }
-    if (data === '\x1b[A') { this._up(); return; }
-    if (data === '\x1b[B') { this._down(); return; }
-    if (data === '\x1b[1;2D') { this._left(true); return; }  // Shift+Left
-    if (data === '\x1b[1;2C') { this._right(true); return; } // Shift+Right
-    if (data === '\x1b[1;2A') { this._up(); return; }        // Shift+Up
-    if (data === '\x1b[1;2B') { this._down(); return; }      // Shift+Down
-    if (data === '\x1b[1;5D') { this._wordLeft(); return; }  // Ctrl+Left
-    if (data === '\x1b[1;5C') { this._wordRight(); return; } // Ctrl+Right
-
-    // Home / End
-    if (data === '\x1b[H' || data === '\x1b[1~') { this.col = 0; this.sel = null; this._render(); return; }
-    if (data === '\x1b[F' || data === '\x1b[4~') { this.col = this.lines[this.row].length; this.sel = null; this._render(); return; }
-
-    // Printable character
-    if (data >= ' ') {
-      this._insert(data);
+    switch (data) {
+      case '\x1b[D': case '\x1bOD': this._left(false); return;
+      case '\x1b[C': case '\x1bOC': this._right(false); return;
+      case '\x1b[A': case '\x1bOA': this._up(); return;
+      case '\x1b[B': case '\x1bOB': this._down(); return;
+      case '\x1b[1;2D': this._left(true); return;
+      case '\x1b[1;2C': this._right(true); return;
+      case '\x1b[1;2A': this._up(); return;
+      case '\x1b[1;2B': this._down(); return;
+      case '\x1b[1;5D': case '\x1b[1;3D': case '\x1bb': this._wordLeft(); return;
+      case '\x1b[1;5C': case '\x1b[1;3C': case '\x1bf': this._wordRight(); return;
+      case '\x1b[H': case '\x1b[1~': case '\x1bOH': this.col = 0; this.sel = null; this._render(); return;
+      case '\x1b[F': case '\x1b[4~': case '\x1bOF': this.col = this.lines[this.row].length; this.sel = null; this._render(); return;
+      default: break;
     }
+
+    // Unknown escape sequences (function keys, mouse reports, ...) are ignored.
+    if (data.startsWith('\x1b')) return;
+
+    if (PRINTABLE.test(data)) this._insert(data);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -312,84 +371,53 @@ export class MultilineInput {
     const cols = this.stdout.columns || 80;
     const promptStr = this.prompt;
     const promptW = this._sw(promptStr);
-    const contentW = Math.max(20, cols - promptW - 1);
+    const contentW = Math.max(10, cols - promptW - 1);
 
-    // Build display lines with wrapping
     const disp = [];
     for (let i = 0; i < this.lines.length; i++) {
-      const line = this.lines[i];
-      if (line.length === 0) {
-        disp.push({ li: i, text: '', w: 0 });
-      } else {
-        for (let j = 0; j < line.length; j += contentW) {
-          disp.push({ li: i, text: line.slice(j, j + contentW), w: j });
-        }
+      for (const chunk of this._chunks(this.lines[i], contentW)) {
+        disp.push({ li: i, text: chunk.text, w: chunk.start });
       }
     }
-    if (disp.length === 0) disp.push({ li: 0, text: '', w: 0 });
 
-    // Find cursor display index
     let curIdx = 0;
     for (let d = 0; d < disp.length; d++) {
-      if (disp[d].li === this.row && disp[d].w <= this.col && (d + 1 >= disp.length || disp[d + 1].li !== this.row || disp[d + 1].w > this.col)) {
-        curIdx = d;
-        break;
-      }
-      if (disp[d].li > this.row) { curIdx = Math.max(0, d - 1); break; }
-      curIdx = d;
+      if (disp[d].li === this.row && disp[d].w <= this.col) curIdx = d;
     }
 
-    const cursorSegment = disp[curIdx] || { w: 0 };
-    const curCol = promptW + Math.max(0, Math.min(contentW, this.col - cursorSegment.w));
+    const cursorSegment = disp[curIdx] || { w: 0, text: '' };
+    const curCol = promptW + Math.min(contentW, this._sw(cursorSegment.text.slice(0, Math.max(0, this.col - cursorSegment.w))));
 
-    // Build output lines
     const out = [];
-
-    // Status line at top (blank line + model info)
     if (this.statusLine) {
       out.push('');
-      out.push(this.statusLine);
+      out.push(this._fitLine(this.statusLine, cols));
     }
 
-    // Placeholder when empty
     const isEmpty = this.lines.length === 1 && this.lines[0] === '';
-    if (isEmpty && this.placeholder) {
-      out.push(chalk.dim(this.placeholder));
-    }
-
-    // Content
     for (let d = 0; d < disp.length; d++) {
       const dl = disp[d];
-      const prefix = dl.w > 0 ? ' '.repeat(promptW) : promptStr;
-      const content = this._renderSel(dl.li, dl.text, dl.w);
-      out.push(prefix + content);
+      const prefix = dl.w > 0 || dl.li > 0 ? ' '.repeat(promptW) : promptStr;
+      if (isEmpty && this.placeholder) {
+        out.push(prefix + clipLine(chalk.dim(this.placeholder), contentW));
+      } else {
+        out.push(prefix + this._renderSel(dl.li, dl.text, dl.w));
+      }
     }
 
-    // Status bar at bottom
-    const status = chalk.hex(this.theme.muted)(`Ln ${this.row + 1}, Col ${this.col + 1} │ ↵ send · Ctrl+O newline · Ctrl+K exit`);
-    out.push(this._fitLine(' '.repeat(promptW) + status, cols));
+    out.push(this._fitLine(' '.repeat(promptW) + this._hint(), cols));
 
-    // Clear previous render
     this._clearRenderedBlock();
-
-    // Write all lines
     this.stdout.write(out.join('\n'));
 
-    // Position cursor within the content area
-    // offset = how many lines before the content starts
-    const contentOffset = (this.statusLine ? 2 : 0) + (isEmpty && this.placeholder ? 1 : 0);
-    const cursorLine = contentOffset + curIdx;
+    const cursorLine = (this.statusLine ? 2 : 0) + curIdx;
     const rowCounts = out.map(line => this._wrapRows(line, cols));
     const totalOutRows = rowCounts.reduce((sum, rows) => sum + rows, 0);
     const cursorVisualRow = rowCounts.slice(0, cursorLine).reduce((sum, rows) => sum + rows, 0);
     const linesUp = totalOutRows - 1 - cursorVisualRow;
-    if (linesUp > 0) {
-      this.stdout.write(`\x1b[${linesUp}A`);
-    }
+    if (linesUp > 0) this.stdout.write(`\x1b[${linesUp}A`);
     this.stdout.write('\r');
-    if (curCol > 0) {
-      this.stdout.write(`\x1b[${curCol}C`);
-    }
+    if (curCol > 0) this.stdout.write(`\x1b[${curCol}C`);
 
     this._rendered = out.length;
     this._cursorRenderLine = cursorLine;
@@ -439,7 +467,7 @@ export class MultilineInput {
   }
 
   _sw(s) {
-    return s.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').length;
+    return displayWidth(s);
   }
 
   _wrapRows(line, cols) {
@@ -448,11 +476,50 @@ export class MultilineInput {
   }
 
   _fitLine(line, cols) {
-    const width = Math.max(1, cols || 80);
-    const text = String(line || '');
-    if (this._sw(text) <= width) return text;
-    const plain = text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '');
-    return plain.slice(0, Math.max(1, width - 1));
+    return clipLine(String(line || ''), Math.max(1, (cols || 80) - 1));
+  }
+
+  _chunks(line, width) {
+    if (!line) return [{ start: 0, text: '' }];
+    const out = [];
+    let start = 0;
+    let text = '';
+    let used = 0;
+    for (const { segment, index } of segmenter.segment(line)) {
+      const w = displayWidth(segment);
+      if (used + w > width && text) {
+        out.push({ start, text });
+        start = index;
+        text = '';
+        used = 0;
+      }
+      text += segment;
+      used += w;
+    }
+    out.push({ start, text });
+    return out;
+  }
+
+  _hint() {
+    const dim = chalk.hex(this.theme.muted);
+    if (this._searchMode) {
+      const match = this._searchMatches[this._searchIndex];
+      const shown = match ? match.split('\n')[0] : 'no match';
+      return dim(`search: ${this._searchQuery}│ → ${shown}   Enter accept · Ctrl+R next · Esc cancel`);
+    }
+    if (this._exitArmedAt && Date.now() - this._exitArmedAt < 2000) {
+      return chalk.hex(this.theme.warning || this.theme.muted)('Press Ctrl+C again to exit');
+    }
+    const before = (this.lines[this.row] || '').slice(0, this.col);
+    const base = this._acBase ?? before;
+    if (this.lines.length === 1 && /^\/\S*$/.test(base) && this.commands.length) {
+      const matches = this.commands.filter(c => c.startsWith(base)).slice(0, 6);
+      if (matches.length) return dim(`${matches.join('  ')}  · Tab completes`);
+    }
+    const parts = ['↵ send', '^O newline'];
+    if (this.lines.length > 1) parts.push(`${this.lines.length} lines`);
+    parts.push('^R search');
+    return dim(parts.join(' · '));
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -508,8 +575,9 @@ export class MultilineInput {
     if (this.col > 0) {
       this._pushUndo();
       const l = this.lines[this.row];
-      this.lines[this.row] = l.slice(0, this.col - 1) + l.slice(this.col);
-      this.col--;
+      const to = prevBoundary(l, this.col);
+      this.lines[this.row] = l.slice(0, to) + l.slice(this.col);
+      this.col = to;
     } else if (this.row > 0) {
       this._pushUndo();
       this.col = this.lines[this.row - 1].length;
@@ -526,7 +594,7 @@ export class MultilineInput {
     const l = this.lines[this.row];
     if (this.col < l.length) {
       this._pushUndo();
-      this.lines[this.row] = l.slice(0, this.col) + l.slice(this.col + 1);
+      this.lines[this.row] = l.slice(0, this.col) + l.slice(nextBoundary(l, this.col));
     } else if (this.row < this.lines.length - 1) {
       this._pushUndo();
       this.lines[this.row] += this.lines[this.row + 1];
@@ -583,7 +651,7 @@ export class MultilineInput {
     } else {
       this.sel = null;
     }
-    if (this.col > 0) this.col--;
+    if (this.col > 0) this.col = prevBoundary(this.lines[this.row], this.col);
     else if (this.row > 0) { this.row--; this.col = this.lines[this.row].length; }
     if (shift) { this._anchor().r = this.row; this._anchor().c = this.col; }
     this._render();
@@ -599,7 +667,7 @@ export class MultilineInput {
     } else {
       this.sel = null;
     }
-    if (this.col < this.lines[this.row].length) this.col++;
+    if (this.col < this.lines[this.row].length) this.col = nextBoundary(this.lines[this.row], this.col);
     else if (this.row < this.lines.length - 1) { this.row++; this.col = 0; }
     if (shift) { this._anchor().r = this.row; this._anchor().c = this.col; }
     this._render();
@@ -612,6 +680,10 @@ export class MultilineInput {
     } else if (this.row > 0) {
       this.row--;
       this.col = Math.min(this.col, this.lines[this.row].length);
+    } else {
+      this.sel = null;
+      this._historyPrev();
+      return;
     }
     this.sel = null;
     this._render();
@@ -624,9 +696,43 @@ export class MultilineInput {
     } else if (this.row < this.lines.length - 1) {
       this.row++;
       this.col = Math.min(this.col, this.lines[this.row].length);
+    } else {
+      this.sel = null;
+      this._historyNext();
+      return;
     }
     this.sel = null;
     this._render();
+  }
+
+  _loadText(text) {
+    this.lines = String(text).split('\n');
+    this.row = this.lines.length - 1;
+    this.col = this.lines[this.row].length;
+    this.sel = null;
+    this._render();
+  }
+
+  _historyPrev() {
+    if (!this.history.length) return;
+    if (this.historyIndex === -1) {
+      this.savedDraft = this.lines.join('\n');
+      this.historyIndex = this.history.length;
+    }
+    if (this.historyIndex === 0) return;
+    this.historyIndex--;
+    this._loadText(this.history[this.historyIndex]);
+  }
+
+  _historyNext() {
+    if (this.historyIndex === -1) return;
+    this.historyIndex++;
+    if (this.historyIndex >= this.history.length) {
+      this.historyIndex = -1;
+      this._loadText(this.savedDraft);
+      return;
+    }
+    this._loadText(this.history[this.historyIndex]);
   }
 
   _wordLeft() {
@@ -763,34 +869,26 @@ export class MultilineInput {
     const line = this.lines[this.row] || '';
     const before = line.slice(0, this.col);
 
-    // Only autocomplete slash commands when the line starts with '/'
-    if (!before.startsWith('/')) {
-      this._insert('  '); // Fall back to inserting spaces
-      return;
+    if (this._acBase == null) {
+      if (!before.startsWith('/') || /\s/.test(before)) {
+        this._insert('  ');
+        return;
+      }
+      this._acBase = before;
+      this._autocompleteIndex = -1;
     }
 
-    const prefix = before.split(/\s/).pop(); // Current word
-    if (!prefix || !prefix.startsWith('/')) {
-      this._insert('  ');
-      return;
-    }
-
-    // Find matching commands
-    const matches = (this.commands || []).filter(c => c.startsWith(prefix));
+    const matches = (this.commands || []).filter(c => c.startsWith(this._acBase));
     if (matches.length === 0) {
+      this._acBase = null;
       this._insert('  ');
       return;
     }
 
-    // Cycle through matches
-    this._autocompleteIndex++;
-    if (this._autocompleteIndex >= matches.length) this._autocompleteIndex = 0;
-
-    const match = matches[this._autocompleteIndex];
-    // Replace the current word with the match
-    const wordStart = before.lastIndexOf(prefix);
-    this.lines[this.row] = line.slice(0, wordStart) + match + line.slice(this.col);
-    this.col = wordStart + match.length;
+    this._autocompleteIndex = (this._autocompleteIndex + 1) % matches.length;
+    const match = matches[this._autocompleteIndex] + (matches.length === 1 ? ' ' : '');
+    this.lines[this.row] = match + line.slice(this.col);
+    this.col = match.length;
     this._render();
   }
 
@@ -846,7 +944,7 @@ export class MultilineInput {
       return;
     }
     // Printable character = append to query
-    if (data.length === 1 && data >= ' ') {
+    if (/^[^\x00-\x1f\x7f]+$/u.test(data)) {
       this._searchQuery += data;
       this._updateSearchMatches();
       this._searchIndex = 0;
@@ -869,28 +967,24 @@ export class MultilineInput {
 
   _submit() {
     const result = this.lines.join('\n').trim();
-
-    // Print the final input with prompt prefix before cleaning up
     const promptW = this._sw(this.prompt);
 
-    // Clear rendered area
     this._clearRenderedBlock();
 
-    // Print submitted text
-    for (let i = 0; i < this.lines.length; i++) {
-      const prefix = i === 0 ? this.prompt : ' '.repeat(promptW);
-      this.stdout.write(prefix + this.lines[i] + '\n');
+    if (this.echo) {
+      for (let i = 0; i < this.lines.length; i++) {
+        const prefix = i === 0 ? this.prompt : ' '.repeat(promptW);
+        this.stdout.write(prefix + this.lines[i] + '\n');
+      }
     }
 
-    // Save to history if non-empty
-    if (result && result.trim()) {
+    if (result && this.history[this.history.length - 1] !== result) {
       this.history.push(result);
       if (this.history.length > 500) this.history.shift();
       this._saveHistory();
     }
 
     this.cleanup();
-    // Return the raw joined text (empty string is valid — means user submitted nothing)
     if (this._resolve) this._resolve(this.lines.join('\n'));
   }
 

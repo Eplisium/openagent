@@ -17,7 +17,7 @@
 
 import { CONFIG } from './config.js';
 import { logger } from './logger.js';
-import { OpenRouterError, RateLimitError, AuthenticationError, AbortError } from './errors.js';
+import { OpenRouterError, RateLimitError, AuthenticationError, AbortError, StreamError } from './errors.js';
 import { parseXmlToolCalls, hasXmlToolCalls } from './tools/xmlToolParser.js';
 import { ToolFormatAdapter } from './tools/ToolFormatAdapter.js';
 import { Agent as UndiciAgent } from 'undici';
@@ -25,7 +25,7 @@ import { Agent as UndiciAgent } from 'undici';
 // Shared HTTP connection pool for keep-alive reuse across all client instances
 export const httpAgent = new UndiciAgent({ keepAliveTimeout: 60000, connections: 6, connectTimeout: 5000 });
 
-export { OpenRouterError, RateLimitError, AuthenticationError, AbortError } from './errors.js';
+export { OpenRouterError, RateLimitError, AuthenticationError, AbortError, StreamError } from './errors.js';
 
 /**
  * Simple content hash for cache keys (djb2 algorithm with added entropy)
@@ -474,37 +474,145 @@ export class OpenRouterClient {
   }
   
   /**
-   * 🌊 Streaming Chat Completion
+   * 🌊 Streaming Chat Completion (with stall detection + safe retry)
    *
    * Accepts an optional `onToolCallReady(toolCall)` callback that fires
    * as soon as a single tool call is fully accumulated from the stream
    * (name set AND arguments JSON complete). This enables dispatching
    * tool execution without waiting for the entire response.
+   *
+   * Transient failures (connect/idle stalls, dropped sockets, 5xx) are retried
+   * with backoff, but only while nothing has been yielded or dispatched yet, so
+   * a retry can never duplicate output or tool side effects. Each retry is
+   * announced with a `{ type: 'retry' }` chunk.
    */
   async *chatStream(messages, options = {}) {
+    const { onToolCallReady, signal, maxStreamRetries, ...rest } = options;
+    const maxRetries = Number.isFinite(maxStreamRetries) ? maxStreamRetries : (CONFIG.STREAM_MAX_RETRIES ?? 2);
+    const ctx = { produced: false };
+    const wrappedReady = onToolCallReady
+      ? (toolCall) => { ctx.produced = true; return onToolCallReady(toolCall); }
+      : undefined;
+
+    for (let attempt = 0; ; attempt++) {
+      try {
+        for await (const chunk of this._chatStreamOnce(messages, { ...rest, signal, onToolCallReady: wrappedReady }, ctx)) {
+          if (chunk.type === 'content' || chunk.type === 'tool_calls') ctx.produced = true;
+          yield chunk;
+        }
+        return;
+      } catch (error) {
+        const canRetry = !ctx.produced
+          && attempt < maxRetries
+          && !signal?.aborted
+          && this.isRetryableStreamError(error);
+        if (!canRetry) throw error;
+
+        const delayMs = Math.round(Math.min(8000, 1000 * 2 ** attempt) * (0.75 + Math.random() * 0.5));
+        logger.warn?.(`Stream failed (${error.code || error.name}), retry ${attempt + 1}/${maxRetries} in ${delayMs}ms`);
+        yield {
+          type: 'retry',
+          attempt: attempt + 1,
+          max: maxRetries,
+          delayMs,
+          reason: error.code || error.name,
+          message: error.message,
+        };
+        await this.abortableSleep(delayMs, signal);
+        if (signal?.aborted) throw new AbortError('Stream cancelled');
+      }
+    }
+  }
+
+  /**
+   * Whether a failed stream attempt is a transient transport problem worth retrying.
+   */
+  isRetryableStreamError(error) {
+    if (!error || error.name === 'AbortError' || error instanceof AbortError) return false;
+    if (error instanceof StreamError) return true;
+    if (error instanceof OpenRouterError) {
+      return ['SERVICE_ERROR', 'HTTP_408', 'HTTP_504', 'HTTP_520', 'HTTP_522', 'HTTP_524', 'HTTP_529'].includes(error.code);
+    }
+    const code = error.cause?.code || error.code;
+    if (typeof code === 'string' && /^(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EAI_AGAIN|ENETUNREACH|UND_ERR_)/.test(code)) {
+      return true;
+    }
+    return /fetch failed|terminated|socket|network|other side closed/i.test(String(error.message || ''));
+  }
+
+  /**
+   * Sleep that wakes immediately when the signal aborts.
+   */
+  abortableSleep(ms, signal) {
+    return new Promise((resolve) => {
+      if (signal?.aborted) { resolve(); return; }
+      const onAbort = () => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  /**
+   * Single streaming attempt. Throws StreamError on connect/idle stalls or truncated streams.
+   */
+  async *_chatStreamOnce(messages, options = {}, ctx = { produced: false }) {
     const { onToolCallReady, signal, ...streamOptions } = options;
     const requestId = this.generateRequestId();
     const startTime = Date.now();
     const payload = this.buildPayload(messages, { ...streamOptions, stream: true });
-    
-    const { controller, cleanup } = this.createController();
+    const connectTimeoutMs = CONFIG.STREAM_CONNECT_TIMEOUT_MS || 45000;
+    const idleTimeoutMs = CONFIG.STREAM_IDLE_TIMEOUT_MS || 60000;
+
+    // No total deadline: a long answer is fine as long as bytes keep arriving.
+    const controller = new AbortController();
+    this.activeControllers.add(controller);
     let abortForwarder = null;
     if (signal) {
       abortForwarder = () => controller.abort();
-      if (signal.aborted) {
-        controller.abort();
-      } else {
-        signal.addEventListener('abort', abortForwarder, { once: true });
-      }
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener('abort', abortForwarder, { once: true });
     }
-    
+
+    let timeoutError = null;
+    let watchdog = null;
+    const disarm = () => {
+      if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+    };
+    // Armed only while waiting on the network, so a slow consumer never looks like a stall.
+    const arm = (ms, code, message) => {
+      disarm();
+      watchdog = setTimeout(() => {
+        timeoutError = new StreamError(message, code, { requestId, timeoutMs: ms });
+        controller.abort();
+      }, ms);
+    };
+
+    let reader = null;
+    let completed = false;
+    let fullContent = '';
+    let usage = null;
+    let lastFinishReason = null;
+    const toolCallAccumulator = new Map();
+    const contentChunks = [];
+
+    const pendingToolCalls = () => {
+      const remaining = new Map();
+      for (const [idx, tc] of toolCallAccumulator) {
+        if (!tc._emitted) remaining.set(idx, tc);
+      }
+      return remaining;
+    };
+    const hasIncompleteToolCalls = () => pendingToolCalls().size > 0;
+
     try {
       await this.waitForRateLimit();
-      if (controller.signal.aborted) {
-        throw new AbortError('Stream cancelled');
-      }
+      if (controller.signal.aborted) throw new AbortError('Stream cancelled');
       this.lastRequestTime = Date.now();
-      
+
+      arm(connectTimeoutMs, 'STREAM_TIMEOUT', `No response from the model within ${Math.round(connectTimeoutMs / 1000)}s`);
       const response = await fetch(`${this.baseURL}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -517,169 +625,200 @@ export class OpenRouterClient {
         signal: controller.signal,
         dispatcher: httpAgent,
       });
-      
-      // Handle non-streaming errors
+
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         throw this.handleHTTPError(response.status, errorData, response);
       }
-      
       if (!response.body) {
         throw new OpenRouterError('No response body for streaming', 'NO_STREAM_BODY');
       }
-      
-      const reader = response.body.getReader();
+      disarm();
+
+      reader = response.body.getReader();
       const decoder = new TextDecoder();
-      
+
       let buffer = '';
-      let fullContent = '';
-      let usage = null;
-      let lastFinishReason = null;
-      const toolCallAccumulator = new Map();
-      // Pre-compiled constants for performance
-      const DATA_PREFIX = 'data: ';
-      const DATA_PREFIX_LEN = 6;
-      const doneMarker = '[DONE]';
-      // Pre-allocate content chunks array to reduce string concatenation
-      const contentChunks = [];
       let contentLength = 0;
       let lastSnapshotLength = 0;
-      
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-          
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed) continue;
-            if (trimmed.startsWith(':')) {
-              yield { type: 'comment', comment: trimmed.slice(1).trim(), requestId };
-              continue;
-            }
-            
-            if (trimmed.startsWith(DATA_PREFIX)) {
-              const data = trimmed.substring(DATA_PREFIX_LEN).trim();
-              
-              if (data === doneMarker) {
-                // Emit only remaining un-emitted tool calls (onToolCallReady already dispatched the rest)
-                if (toolCallAccumulator.size > 0) {
-                  const remaining = new Map();
-                  for (const [idx, tc] of toolCallAccumulator) {
-                    if (!tc._emitted) remaining.set(idx, tc);
-                  }
-                  if (remaining.size > 0) {
-                    yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(remaining), requestId };
-                  }
-                }
-                fullContent = contentChunks.length > 0 ? contentChunks.join('') : fullContent;
-                // Track cost for streaming request
-                const duration = Date.now() - startTime;
-                this.trackRequest(requestId, payload, { usage }, duration);
-                yield { type: 'done', content: fullContent, usage, requestId, finishReason: lastFinishReason };
-                return;
-              }
-              
-              try {
-                const parsed = JSON.parse(data);
-                
-                // Handle mid-stream errors
-                if (parsed.error) {
-                  yield { type: 'error', error: parsed.error, requestId };
-                  return;
-                }
-                
-                // Update usage
-                if (parsed.usage) {
-                  usage = parsed.usage;
-                }
-                
-                // Extract delta
-                const delta = parsed.choices?.[0]?.delta;
-                if (delta) {
-                  if (delta.content) {
-                    contentChunks.push(delta.content);
-                    contentLength += delta.content.length;
-                    let periodicFull = null;
-                    if (this.shouldJoinContentSnapshot(contentChunks, contentLength, lastSnapshotLength)) {
-                      periodicFull = contentChunks.join('');
-                      lastSnapshotLength = contentLength;
-                    }
-                    yield { type: 'content', content: delta.content, fullContent: periodicFull, requestId };
-                  }
-                  
-                  // Accumulate tool call fragments
-                  if (delta.tool_calls) {
-                    const completedIndices = this.accumulateToolCalls(toolCallAccumulator, delta.tool_calls);
-                    // Fire onToolCallReady for each newly-completed tool call
-                    if (onToolCallReady && completedIndices.length > 0) {
-                      for (const idx of completedIndices) {
-                        const tc = toolCallAccumulator.get(idx);
-                        if (tc) {
-                          const parsed = this.parseAccumulatedToolCalls(new Map([[idx, tc]]));
-                          if (parsed.length > 0) {
-                            onToolCallReady(parsed[0]);
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-                
-                // Emit remaining tool calls on finish (only ones not already emitted)
-                const finishReason = parsed.choices?.[0]?.finish_reason;
-                if (finishReason) lastFinishReason = finishReason;
-                if (finishReason === 'tool_calls' && toolCallAccumulator.size > 0) {
-                  const remaining = new Map();
-                  for (const [idx, tc] of toolCallAccumulator) {
-                    if (!tc._emitted) remaining.set(idx, tc);
-                  }
-                  if (remaining.size > 0) {
-                    yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(remaining), requestId };
-                  }
-                  toolCallAccumulator.clear();
-                }
-              } catch {
-                // Ignore malformed chunks
-              }
-            }
-          }
+      let lastToolProgress = 0;
+      let finished = false;
+      let events = [];
+
+      const finishStream = (interrupted = false) => {
+        const remaining = pendingToolCalls();
+        if (remaining.size > 0) {
+          events.push({ type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(remaining), requestId });
         }
-        
-        // Stream ended without [DONE]
         fullContent = contentChunks.length > 0 ? contentChunks.join('') : fullContent;
-        if (fullContent || toolCallAccumulator.size > 0) {
-          if (toolCallAccumulator.size > 0) {
-            const remaining = new Map();
-            for (const [idx, tc] of toolCallAccumulator) {
-              if (!tc._emitted) remaining.set(idx, tc);
+        this.trackRequest(requestId, payload, { usage }, Date.now() - startTime);
+        events.push({ type: 'done', content: fullContent, usage, requestId, finishReason: lastFinishReason, ...(interrupted ? { interrupted: true } : {}) });
+        finished = true;
+      };
+
+      const handleLine = (rawLine) => {
+        const line = rawLine.trim();
+        if (!line) return;
+        if (line.startsWith(':')) {
+          events.push({ type: 'comment', comment: line.slice(1).trim(), requestId });
+          return;
+        }
+        if (!line.startsWith('data:')) return;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') {
+          finishStream();
+          return;
+        }
+
+        let parsed;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return; // malformed chunk
+        }
+
+        if (parsed.error) {
+          const code = Number(parsed.error.code);
+          if (!ctx.produced && contentChunks.length === 0 && toolCallAccumulator.size === 0 && (code >= 500 || code === 408)) {
+            throw new StreamError(parsed.error.message || 'Provider error before any output', 'STREAM_INTERRUPTED', { requestId, providerError: parsed.error });
+          }
+          events.push({ type: 'error', error: parsed.error, requestId });
+          finished = true;
+          return;
+        }
+
+        if (parsed.usage) usage = parsed.usage;
+
+        const delta = parsed.choices?.[0]?.delta;
+        if (delta) {
+          const reasoning = delta.reasoning ?? delta.reasoning_content;
+          if (typeof reasoning === 'string' && reasoning) {
+            events.push({ type: 'reasoning', content: reasoning, requestId });
+          }
+
+          if (delta.content) {
+            contentChunks.push(delta.content);
+            contentLength += delta.content.length;
+            let periodicFull = null;
+            if (this.shouldJoinContentSnapshot(contentChunks, contentLength, lastSnapshotLength)) {
+              periodicFull = contentChunks.join('');
+              lastSnapshotLength = contentLength;
             }
-            if (remaining.size > 0) {
-              yield { type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(remaining), requestId };
+            events.push({ type: 'content', content: delta.content, fullContent: periodicFull, requestId });
+          }
+
+          if (delta.tool_calls) {
+            const known = new Set(toolCallAccumulator.keys());
+            const completedIndices = this.accumulateToolCalls(toolCallAccumulator, delta.tool_calls);
+            if (onToolCallReady) {
+              for (const idx of completedIndices) {
+                const tc = toolCallAccumulator.get(idx);
+                if (!tc) continue;
+                const [ready] = this.parseAccumulatedToolCalls(new Map([[idx, tc]]));
+                if (ready) onToolCallReady(ready);
+              }
+            } else {
+              // No dispatcher: keep completed calls pending so they are emitted as a tool_calls chunk
+              for (const idx of completedIndices) {
+                const tc = toolCallAccumulator.get(idx);
+                if (tc) tc._emitted = false;
+              }
+            }
+            const lastIdx = delta.tool_calls[delta.tool_calls.length - 1]?.index ?? 0;
+            const acc = toolCallAccumulator.get(lastIdx);
+            const now = Date.now();
+            if (acc?.name && !acc._emitted && (!known.has(lastIdx) || !acc._announced || now - lastToolProgress >= 150)) {
+              acc._announced = true;
+              lastToolProgress = now;
+              events.push({ type: 'tool_progress', name: acc.name, chars: acc.arguments.length, index: lastIdx, requestId });
             }
           }
-          // Track cost for streaming request that ended without [DONE]
-          const duration = Date.now() - startTime;
-          this.trackRequest(requestId, payload, { usage }, duration);
-          yield { type: 'done', content: fullContent, usage, requestId, finishReason: lastFinishReason };
         }
-      } finally {
-        reader.releaseLock();
+
+        const finishReason = parsed.choices?.[0]?.finish_reason;
+        if (finishReason) lastFinishReason = finishReason;
+        if (finishReason === 'tool_calls' && toolCallAccumulator.size > 0) {
+          const remaining = pendingToolCalls();
+          if (remaining.size > 0) {
+            events.push({ type: 'tool_calls', toolCalls: this.parseAccumulatedToolCalls(remaining), requestId });
+          }
+          toolCallAccumulator.clear();
+        }
+      };
+
+      while (!finished) {
+        arm(idleTimeoutMs, 'STREAM_STALLED', `No data from the model for ${Math.round(idleTimeoutMs / 1000)}s`);
+        const { done, value } = await reader.read();
+        disarm();
+
+        if (done) {
+          buffer += decoder.decode();
+          if (buffer.trim()) handleLine(buffer);
+          buffer = '';
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (finished) break;
+          handleLine(line);
+        }
+
+        const batch = events;
+        events = [];
+        for (const event of batch) yield event;
       }
+
+      // Flush anything produced by the final read / trailing buffer
+      const tail = events;
+      events = [];
+      for (const event of tail) yield event;
+
+      if (!finished) {
+        // Stream closed without [DONE]
+        if (lastFinishReason || contentChunks.length > 0 || toolCallAccumulator.size > 0) {
+          if (hasIncompleteToolCalls() && toolCallAccumulator.size > 0 && !lastFinishReason) {
+            throw new StreamError('Connection closed while the model was writing a tool call', 'STREAM_INTERRUPTED', { requestId });
+          }
+          finishStream(!lastFinishReason);
+          for (const event of events) yield event;
+        } else {
+          throw new StreamError('Connection closed before the model produced any output', 'STREAM_INTERRUPTED', { requestId });
+        }
+      }
+      completed = true;
     } catch (error) {
-      if (error.name === 'AbortError') {
+      disarm();
+      let failure = error;
+      if (timeoutError) {
+        failure = timeoutError;
+      } else if (error?.name === 'AbortError' || controller.signal.aborted) {
         throw new AbortError('Stream cancelled');
+      } else if (error instanceof TypeError && reader && /terminated|closed|socket|reset|aborted/i.test(error.message)) {
+        // undici surfaces mid-body socket drops as TypeError('terminated')
+        failure = new StreamError(`Connection lost mid-stream: ${error.message}`, 'STREAM_INTERRUPTED', { requestId, cause: error.cause?.code });
       }
-      throw error;
+
+      // Keep what we already have rather than discarding a nearly-finished answer
+      if (failure instanceof StreamError && reader && contentChunks.length > 0 && !hasIncompleteToolCalls()) {
+        fullContent = contentChunks.join('');
+        this.trackRequest(requestId, payload, { usage }, Date.now() - startTime);
+        yield { type: 'done', content: fullContent, usage, requestId, finishReason: lastFinishReason, interrupted: true, interruptReason: failure.code };
+        completed = true;
+        return;
+      }
+      throw failure;
     } finally {
-      if (signal && abortForwarder) {
-        signal.removeEventListener('abort', abortForwarder);
+      disarm();
+      if (reader) {
+        reader.cancel().catch(() => {});
+        try { reader.releaseLock(); } catch { /* pending read already rejected */ }
       }
-      cleanup();
+      if (!completed) controller.abort();
+      if (signal && abortForwarder) signal.removeEventListener('abort', abortForwarder);
+      this.activeControllers.delete(controller);
     }
   }
   

@@ -17,15 +17,16 @@ import {
   deduplicateResponse,
   responsesAreSimilar,
   normalizeResponseText,
-  formatTokens,
   formatCost
 } from './formatting.js';
 import { thinkingSpinner, respondingIndicator } from '../utils/spinners.js';
+import { frameAt, formatLiveElapsed, hideCursor, drawLine, eraseLine, syncFrame, isInteractive } from './animation.js';
 import { VERSION } from './state.js';
 import { CONFIG } from '../config.js';
+import gradient from 'gradient-string';
 import { getActiveSkin, getSkinTheme } from './themes.js';
+import { displayWidth, clipLine, indentBlock, termColumns } from './layout.js';
 
-const TOOL_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const DEFAULT_THEME = {
   accent: '#89b4fa',
   muted: '#6c7086',
@@ -60,22 +61,17 @@ function muted(cli, text) {
   return chalk.hex(t.muted || DEFAULT_THEME.muted)(text);
 }
 
-function lineRows(text) {
-  return String(text || '').split('\n');
-}
-
-function renderWithLeftBar(cli, content) {
-  const t = cli.theme;
-  const bar = chalk.hex(t.assistant || t.accent)('│');
-  const body = lineRows(content).map(line => `  ${bar} ${line}`).join('\n');
-  return body;
+function renderWithLeftBar(_cli, content) {
+  return indentBlock(content, '  ');
 }
 
 function renderWithRoleBar(cli, content, { role = 'assistant', prefix = '│' } = {}) {
   const t = cli.theme || DEFAULT_THEME;
   const color = t[role] || t.assistant || t.accent || DEFAULT_THEME.accent;
-  const marker = chalk.hex(color)(prefix);
-  return lineRows(content).map(line => `  ${marker} ${line}`).join('\n');
+  const marker = chalk.hex(color).bold(prefix);
+  const hang = ' '.repeat(2 + displayWidth(prefix) + 1);
+  const lines = indentBlock(String(content), '', termColumns() - hang.length + 1).split('\n');
+  return lines.map((line, i) => (i === 0 ? `  ${marker} ${line}` : `${hang}${line}`)).join('\n');
 }
 
 function getToolStore(cli) {
@@ -87,12 +83,13 @@ function activeToolStates(store) {
   return store.filter(state => !state.done);
 }
 
-function clearInline(width = 120) {
-  process.stdout.write('\r' + ' '.repeat(width) + '\r');
+function clearInline() {
+  if (isInteractive()) eraseLine();
 }
 
-function visibleLen(str) {
-  return String(str || '').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').length;
+function quietly(cli, fn) {
+  if (cli?._activity) cli._activity.around(fn);
+  else fn();
 }
 
 function markContentRendered(cli, content, { intermediate = false } = {}) {
@@ -261,56 +258,44 @@ function formatContextParts(cli) {
 export function getToolEmoji(toolName) {
   const skin = getActiveSkin();
   const emojis = skin.toolEmojis || {};
-  return emojis[toolName] || '⚡';
+  return emojis[toolName] || '';
+}
+
+function toolIcon(toolName) {
+  const icon = getToolEmoji(toolName);
+  return icon ? `${icon} ` : '';
 }
 
 /**
  * Print the OpenAgent startup banner
  */
+const BANNER_ART = [
+  '   ____                   ___                    __ ',
+  '  / __ \\____  ___  ____  /   | ____ ____  ____  / /_',
+  ' / / / / __ \\/ _ \\/ __ \\/ /| |/ __ `/ _ \\/ __ \\/ __/',
+  '/ /_/ / /_/ /  __/ / / / ___ / /_/ /  __/ / / / /_  ',
+  '\\____/ .___/\\___/_/ /_/_/  |_\\__, /\\___/_/ /_/\\__/  ',
+  '    /_/                     /____/                  ',
+];
+
 export function printBanner() {
   const skin = getActiveSkin();
   const t = getSkinTheme();
-  const agentName = CONFIG.AGENT_NAME || skin.branding.agentName || 'Luna';
-  const version = VERSION;
-
-  const moonArt = [
-    '  ██╗   ██╗██╗     ██╗   ██╗',
-    '  ██║   ██║██║     ╚██╗ ██╔╝',
-    '  ██║   ██║██║      ╚████╔╝ ',
-    '  ╚██╗ ██╔╝██║       ██╔╝  ',
-    '   ╚████╔╝ ███████╗  ██║   ',
-    '    ╚═══╝  ╚══════╝  ╚═╝   ',
-  ];
-
-  const width = Math.min(process.stdout.columns || 80, 72);
-  const topBorder = chalk.hex(t.accent)(`  ╭${'─'.repeat(width)}╮`);
-  const bottomBorder = chalk.hex(t.accent)(`  ╰${'─'.repeat(width)}╯`);
+  const agentName = CONFIG.AGENT_NAME || skin.branding.agentName || 'OpenAgent';
+  const columns = process.stdout.columns || 80;
+  const ruleWidth = Math.min(columns - 4, 54);
+  const artWidth = Math.max(...BANNER_ART.map(line => line.length));
 
   console.log('');
-  console.log(topBorder);
-
-  for (const line of moonArt) {
-    const pad = Math.max(0, width - line.length - 2);
-    console.log(`${chalk.hex(t.accent)('  │')}${chalk.hex(t.header || t.accent)(line)}${' '.repeat(pad)}${chalk.hex(t.accent)('│')}`);
+  if (columns >= artWidth + 4) {
+    const paint = gradient([t.accent, t.header || t.accent]).multiline(BANNER_ART.join('\n'));
+    console.log(paint.split('\n').map(line => `  ${line}`).join('\n'));
+  } else {
+    console.log(`  ${chalk.hex(t.accent).bold(agentName)}`);
   }
-
-  // Separator line
-  const sepLine = chalk.hex(t.muted)('─'.repeat(width - 2));
-  console.log(`${chalk.hex(t.accent)('  ├')}${sepLine}${chalk.hex(t.accent)('┤')}`);
-
-  // Agent name + version + model
-  const infoLine = `  ${agentName} v${version}`;
-  const modelLabel = chalk.hex(t.muted)(`  │`) + chalk.hex(t.text)(infoLine) +
-    chalk.hex(t.muted)(' '.repeat(Math.max(0, width - infoLine.length - 2))) +
-    chalk.hex(t.accent)('│');
-  console.log(modelLabel);
-
-  // Tips line
-  const tip = `Type ${chalk.hex(t.accent)('/help')} for commands`;
-  const tipPad = Math.max(0, width - visibleLen(`  ${tip}`) - 2);
-  console.log(`${chalk.hex(t.accent)('  │')}${chalk.hex(t.muted)('  ')}${tip}${' '.repeat(tipPad)}${chalk.hex(t.accent)('│')}`);
-
-  console.log(bottomBorder);
+  console.log('');
+  console.log(`  ${chalk.hex(t.text).bold(agentName)} ${chalk.hex(t.muted)(`v${VERSION}`)} ${chalk.hex(t.muted)('\u00b7')} ${chalk.hex(t.muted)(CONFIG.AGENT_TAGLINE || 'AI agent for your terminal')}`);
+  console.log(chalk.hex(t.muted)(`  ${'\u2500'.repeat(Math.max(10, ruleWidth))}`));
 }
 
 /**
@@ -350,7 +335,7 @@ export function buildPromptStatusLine(cli) {
   // Model name
   const modelShort = shortenModelLabel(cli.session?.agent?.model);
   const skin = getActiveSkin();
-  const agentName = CONFIG.AGENT_NAME || skin.branding.agentName || 'Luna';
+  const agentName = CONFIG.AGENT_NAME || skin.branding.agentName || 'OpenAgent';
   parts.push(chalk.hex(t.accent)(`${agentName} · ${modelShort}`));
 
   // Context usage
@@ -387,12 +372,14 @@ export function printIterationLabel(cli, iterationNum) {
   const t = cli.theme || DEFAULT_THEME;
   const raw = String(iterationNum || '').trim();
   const label = raw.startsWith('iteration') ? raw : `iteration ${raw}`;
-  console.log('');
-  console.log(
-    chalk.hex(t.muted)('  ── ') +
-    chalk.hex(t.accent || DEFAULT_THEME.accent)(label) +
-    chalk.hex(t.muted)(' ──')
-  );
+  quietly(cli, () => {
+    console.log('');
+    console.log(
+      chalk.hex(t.muted)('  ── ') +
+      chalk.hex(t.accent || DEFAULT_THEME.accent)(label) +
+      chalk.hex(t.muted)(' ──')
+    );
+  });
 }
 
 export function printSystemMessage(cli, content) {
@@ -401,43 +388,17 @@ export function printSystemMessage(cli, content) {
   return true;
 }
 
-export function printAssistantHeader(cli, { durationMs = null, toolCount = 0, usage = null } = {}) {
+export function printAssistantHeader(cli, _options = {}) {
   const t = cli.theme || DEFAULT_THEME;
-  if (cli._assistantHeaderPrintedForTask === cli.taskStartTime) return;
+  if (cli._assistantHeaderPrintedForTask === cli.taskStartTime && cli.taskStartTime) return false;
   cli._assistantHeaderPrintedForTask = cli.taskStartTime || Date.now();
   const model = shortenModelLabel(cli.session?.agent?.model || 'assistant');
-  const { contextStats, percent } = formatContextParts(cli);
-  const used = contextStats ? formatCompactNumber(contextStats.usedTokens) : '0';
-  const max = contextStats ? formatCompactNumber(contextStats.maxTokens) : '?';
-  const elapsed = durationMs == null && cli.taskStartTime ? Date.now() - cli.taskStartTime : durationMs;
-  const stats = [
-    elapsed != null ? formatDuration(elapsed) : null,
-    `${toolCount || 0} tools`,
-    `${used}/${max} ctx`,
-    `${percent}%`,
-  ].filter(Boolean);
-  // Add cost and token counts if available from usage
-  if (usage) {
-    const cost = usage.cost;
-    if (cost != null && cost > 0) {
-      stats.push(formatCompactCost(cost));
-    }
-    const inputT = usage.prompt_tokens || 0;
-    const outputT = usage.completion_tokens || 0;
-    if (inputT > 0 || outputT > 0) {
-      stats.push(`${formatCompactNumber(inputT)}→${formatCompactNumber(outputT)} tok`);
-    }
-  }
-  const statsStr = stats.join(' · ');
   const skin = getActiveSkin();
-  const label = skin.branding?.responseLabel || ` ${model} `;
-  const inner = ` ${chalk.hex(t.header || t.accent || DEFAULT_THEME.accent)(label)} ${chalk.hex(t.muted || DEFAULT_THEME.muted)(statsStr)} `;
-  const width = Math.min(Math.max(visibleLen(inner), 24), termWidth(96));
-  const pad = Math.max(0, width - visibleLen(inner));
-  const top = chalk.hex(t.accent || DEFAULT_THEME.accent)(`  ╭${'─'.repeat(width)}╮`);
-  const mid = `  ${chalk.hex(t.accent || DEFAULT_THEME.accent)('│')}${inner}${' '.repeat(pad)}${chalk.hex(t.accent || DEFAULT_THEME.accent)('│')}`;
-  const bottom = chalk.hex(t.accent || DEFAULT_THEME.accent)(`  ╰${'─'.repeat(width)}╯`);
-  console.log(`\n${top}\n${mid}\n${bottom}`);
+  const name = String(CONFIG.AGENT_NAME || skin.branding?.responseLabel || 'OpenAgent').trim();
+  const accent = chalk.hex(t.header || t.accent || DEFAULT_THEME.accent);
+  const line = `${accent.bold(`◆ ${name}`)}${chalk.hex(t.muted || DEFAULT_THEME.muted)(`  ${model}`)}`;
+  console.log(`\n  ${clipLine(line, termColumns() - 4)}`);
+  return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -483,10 +444,9 @@ export function printIntermediateContent(cli, content) {
   markContentRendered(cli, displayContent, { intermediate: true });
   // Truncate long intermediate content to keep the display clean
   const maxLen = 500;
-  const truncated = unrenderedContent.length > maxLen
-  ? unrenderedContent.substring(0, maxLen) + chalk.dim(' [...]')
-  : unrenderedContent;
-  console.log(muted(cli, `  │ ${truncated.trim()}`));
+  const text = unrenderedContent.trim();
+  const truncated = text.length > maxLen ? `${text.substring(0, maxLen)} …` : text;
+  console.log(muted(cli, indentBlock(truncated, '  ')));
   return true;
 }
 
@@ -504,144 +464,169 @@ export function showRespondingIndicator(cli = null) {
   return respondingIndicator(cli?.theme);
 }
 
+/**
+ * Index just past the last block boundary (a blank line, or a closing code
+ * fence) that is safe to render; 0 when nothing is complete yet.
+ */
+export function findCommitBoundary(text) {
+  let fence = null;
+  let boundary = 0;
+  let pos = 0;
+  while (pos < text.length) {
+    const nl = text.indexOf('\n', pos);
+    if (nl === -1) break;
+    const line = text.slice(pos, nl);
+    pos = nl + 1;
+    const marks = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      const close = line.trim();
+      if (close[0] === fence.ch && close.length >= fence.len && close === fence.ch.repeat(close.length)) {
+        fence = null;
+        boundary = pos;
+      }
+    } else if (marks) {
+      fence = { ch: marks[1][0], len: marks[1].length };
+    } else if (line.trim() === '') {
+      boundary = pos;
+    }
+  }
+  return boundary;
+}
+
+/**
+ * Append-only streaming renderer. Completed markdown blocks are rendered once
+ * and written permanently; the in-progress tail is shown on a single
+ * self-clearing status line, so no cursor math over wrapped rows is needed.
+ */
+const STALL_NOTE_MS = 8000;
+
 export function createStreamingRenderer(cli) {
-  const cursor = '▌';
+  const interactive = Boolean(process.stdout.isTTY);
   let active = false;
   let content = '';
-  let renderedLines = [];
-  let renderedLineCount = 0;
-  let scheduled = null;
-  let fallback = false;
+  let committedLen = 0;
   let rendered = false;
-  let lastWidth = process.stdout.columns || 80;
+  let wroteAny = false;
+  let liveShown = false;
+  let timer = null;
+  let releaseCursor = null;
+  let lastDeltaAt = Date.now();
+
+  const theme = () => cli.theme || DEFAULT_THEME;
+
+  const clearLive = () => {
+    if (!liveShown) return;
+    process.stdout.write('\r\x1b[2K');
+    liveShown = false;
+  };
+
+  const drawLive = () => {
+    if (!active || !interactive) return;
+    const t = theme();
+    const idleMs = Date.now() - lastDeltaAt;
+    const stallNote = idleMs >= STALL_NOTE_MS ? ` waiting for model ${Math.floor(idleMs / 1000)}s` : '';
+    const room = Math.max(10, termColumns() - 6 - stallNote.length);
+    let preview = content.slice(committedLen).replace(/\s+/g, ' ').trim();
+    if (preview.length > room) preview = preview.slice(-room);
+    while (preview && displayWidth(preview) > room) preview = preview.slice(1);
+    drawLine(`  ${chalk.hex(t.accent)(frameAt())} ${chalk.hex(t.muted)(preview)}${stallNote ? chalk.hex(t.warning || t.muted)(stallNote) : ''}`);
+    liveShown = true;
+  };
+
+  const startTimer = () => {
+    if (timer || !interactive) return;
+    releaseCursor = hideCursor();
+    timer = setInterval(drawLive, 80);
+    timer.unref?.();
+  };
+
+  const stopTimer = () => {
+    if (timer) clearInterval(timer);
+    timer = null;
+    clearLive();
+    releaseCursor?.();
+    releaseCursor = null;
+  };
+
+  const emit = (text) => {
+    clearLive();
+    if (!text || !text.trim()) return;
+    const body = cli.isMarkdownEnabled() ? renderMarkdown(text, cli.theme) : text.trim();
+    process.stdout.write(`${wroteAny ? '\n' : ''}${indentBlock(body, '  ')}\n`);
+    wroteAny = true;
+    rendered = true;
+  };
+
+  const commitReady = () => {
+    const boundary = findCommitBoundary(content.slice(committedLen));
+    if (boundary <= 0) return;
+    const chunk = content.slice(committedLen, committedLen + boundary);
+    committedLen += boundary;
+    emit(chunk);
+  };
+
+  const flush = (override = null) => {
+    const rest = override ?? content.slice(committedLen);
+    committedLen = content.length;
+    emit(deduplicateResponse(String(rest || '')));
+  };
+
+  const reset = () => {
+    active = false;
+    content = '';
+    committedLen = 0;
+    wroteAny = false;
+  };
 
   const begin = () => {
     if (active) return;
     active = true;
-    printAssistantHeader(cli, {
+    cli._activity?.pause();
+    const printed = printAssistantHeader(cli, {
       durationMs: cli.taskStartTime ? Date.now() - cli.taskStartTime : null,
       toolCount: cli._toolLineStates?.length || 0,
     });
-  };
-
-  const clearFromLine = (lineIndex = 0) => {
-    if (renderedLineCount <= 0) return;
-    const bounded = Math.max(0, Math.min(lineIndex, renderedLineCount - 1));
-    const up = renderedLineCount - 1 - bounded;
-    if (up > 0) process.stdout.write(`\x1b[${up}A`);
-    process.stdout.write('\r\x1b[J');
-  };
-
-  const addCursor = (lines) => {
-    if (lines.length === 0) return [chalk.hex(cli.theme?.accent || DEFAULT_THEME.accent)(cursor)];
-    const next = [...lines];
-    const cursorColor = chalk.hex(cli.theme?.accent || DEFAULT_THEME.accent);
-    next[next.length - 1] = `${next[next.length - 1]}${cursorColor(cursor)}`;
-    return next;
-  };
-
-  const renderFrame = (final = false) => {
-    if (!active && !final) return;
-    const started = performance.now?.() || Date.now();
-    try {
-      const source = content;
-      const currentWidth = process.stdout.columns || 80;
-      const widthChanged = currentWidth !== lastWidth;
-      const renderedOutput = cli.isMarkdownEnabled() ? renderMarkdown(source, cli.theme) : source;
-      let frame = renderWithLeftBar(cli, renderedOutput || '').split('\n');
-      if (!final) {
-        // Add progress indicator showing character count and line count
-        const charCount = content.length;
-        const lineCount = (content.match(/\n/g) || []).length + 1;
-        const progressText = chalk.hex(cli.theme?.muted || DEFAULT_THEME.muted)(
-          `  ╌╌ ${formatTokens(charCount)} chars · ${lineCount} lines ╌╌`
-        );
-        frame.push(progressText);
-        frame = addCursor(frame);
-      }
-
-      const commonLength = Math.min(renderedLineCount, frame.length);
-      let firstDiff = commonLength;
-      for (let i = 0; i < commonLength; i++) {
-        if (frame[i] !== renderedLines[i]) {
-          firstDiff = i;
-          break;
-        }
-      }
-      if (frame.length < renderedLineCount && firstDiff === frame.length) {
-        firstDiff = Math.max(0, frame.length - 1);
-      }
-      if (widthChanged) firstDiff = 0;
-
-      if (firstDiff === renderedLineCount && firstDiff === frame.length) return;
-
-      if (renderedLineCount > 0) clearFromLine(firstDiff);
-      process.stdout.write(frame.slice(firstDiff).join('\n'));
-      renderedLines = frame;
-      renderedLineCount = frame.length;
-      lastWidth = currentWidth;
-      cli._lastStreamRenderMs = (performance.now?.() || Date.now()) - started;
-      if (cli._lastStreamRenderMs > 5) {
-        cli._streamRenderSlowFrames = (cli._streamRenderSlowFrames || 0) + 1;
-      }
-    } catch {
-      fallback = true;
-      const plain = renderWithLeftBar(cli, content).split('\n');
-      const frame = addCursor(plain);
-      if (renderedLineCount > 0) clearFromLine(0);
-      process.stdout.write(frame.join('\n'));
-      renderedLines = frame;
-      renderedLineCount = frame.length;
-    }
-  };
-  const scheduleRender = () => {
-    if (scheduled || fallback) return;
-    scheduled = setTimeout(() => {
-      scheduled = null;
-      renderFrame(false);
-    }, content.length > 5000 ? 48 : 24);
-    scheduled.unref?.();
+    if (!printed) process.stdout.write('\n');
+    lastDeltaAt = Date.now();
+    startTimer();
   };
 
   return {
     get active() { return active; },
     get _rendered() { return rendered; },
+    clearLive,
     write(delta) {
       if (!delta) return;
       begin();
+      lastDeltaAt = Date.now();
       content += delta;
-      if (fallback) {
-        const frame = addCursor(renderWithLeftBar(cli, content).split('\n'));
-        if (renderedLineCount > 0) clearFromLine(0);
-        process.stdout.write(frame.join('\n'));
-        renderedLines = frame;
-        renderedLineCount = frame.length;
-        lastWidth = process.stdout.columns || 80;
-        return;
-      }
-      scheduleRender();
+      commitReady();
     },
-    commitIntermediate(intermediateContent = content) {
+    commitIntermediate(intermediateContent = '') {
       if (!active) return false;
-      if (scheduled) clearTimeout(scheduled);
-      scheduled = null;
-      if (renderedLineCount > 0) clearFromLine(0);
-      if (intermediateContent && String(intermediateContent).trim()) {
-        content = deduplicateResponse(String(intermediateContent));
+      stopTimer();
+      const hadStreamed = content.trim().length > 0;
+      const streamed = content;
+      flush();
+      let didRender = hadStreamed;
+      if (hadStreamed) {
+        markContentRendered(cli, streamed, { intermediate: true });
+      } else if (intermediateContent && String(intermediateContent).trim()) {
+        didRender = printIntermediateContent(cli, intermediateContent);
       }
-      const didRender = printIntermediateContent(cli, content);
       rendered = didRender || rendered;
-      active = false;
-      content = '';
-      renderedLineCount = 0;
-      renderedLines = [];
-      fallback = false;
-      lastWidth = process.stdout.columns || 80;
+      reset();
+      cli._activity?.resume('Thinking');
       return didRender;
     },
+    dispose() {
+      if (!active) return;
+      stopTimer();
+      flush();
+      reset();
+    },
     finish(finalContent = content, usage = null) {
-      if (scheduled) clearTimeout(scheduled);
-      scheduled = null;
+      stopTimer();
       const displayContent = deduplicateResponse(String(finalContent || content || ''));
       if (!active) {
         if (!displayContent || !displayContent.trim()) {
@@ -655,15 +640,12 @@ export function createStreamingRenderer(cli) {
         rendered = printAIResponse(cli, displayContent, usage) || rendered;
         return rendered ? 'rendered' : 'empty';
       }
-      content = displayContent;
-      renderFrame(true);
-      active = false;
-      rendered = true;
-      markContentRendered(cli, content);
-      process.stdout.write('\n');
-      // Show compact inline usage summary after stream completes
+      const streamedNothing = content.trim().length === 0;
+      flush(streamedNothing ? displayContent : null);
+      const full = streamedNothing ? displayContent : content;
+      reset();
+      markContentRendered(cli, full);
       if (usage) {
-        const t = cli.theme || DEFAULT_THEME;
         const parts = [];
         const cost = usage.cost;
         if (cost != null && cost > 0) parts.push(formatCompactCost(cost));
@@ -673,10 +655,10 @@ export function createStreamingRenderer(cli) {
         const cached = usage.prompt_tokens_details?.cached_tokens || 0;
         if (cached > 0) parts.push(`${formatCompactNumber(cached)} cached`);
         if (parts.length > 0) {
-          console.log(chalk.hex(t.muted)(`  └─ ${parts.join(' · ')}`));
+          console.log(chalk.hex(theme().muted)(`\n  ${parts.join(' · ')}`));
         }
       }
-      return 'rendered';
+      return rendered ? 'rendered' : 'empty';
     },
   };
 }
@@ -726,9 +708,15 @@ function smartTruncate(value, max = 80) {
 }
 
 function stopToolVisual(store, clear = true) {
-  if (store.visualState?.interval) clearInterval(store.visualState.interval);
-  if (clear && store.visualState) clearInline(store.visualState.width || 120);
-  if (store.visualState) store.visualState.interval = null;
+  const state = store.visualState;
+  if (!state) return;
+  if (state.interval) clearInterval(state.interval);
+  state.interval = null;
+  if (state.releaseCursor) {
+    if (clear) clearInline();
+    state.releaseCursor();
+    state.releaseCursor = null;
+  }
   store.visualState = null;
 }
 
@@ -736,15 +724,15 @@ function renderToolState(cli, store, state) {
   const t = cli.theme;
   stopToolVisual(store);
   store.visualState = state;
+  if (!isInteractive()) return;
+  cli._activity?.pause();
   const render = () => {
-    const elapsedStr = formatDuration(Date.now() - state.startedAt);
-    const frame = TOOL_FRAMES[state.frame % TOOL_FRAMES.length];
-    const emoji = getToolEmoji(state.toolName);
-    state.frame++;
-    state.text = `  ${chalk.hex(t.tool)(frame)} ${emoji} ${chalk.hex(t.tool)(state.toolName)}${state.argPreview ? ` ${state.argPreview}` : ''}${chalk.hex(t.muted)(` [${elapsedStr}]`)}`;
-    clearInline(state.width);
-    process.stdout.write(state.text);
+    const elapsed = formatLiveElapsed(Date.now() - state.startedAt);
+    const raw = `  ${chalk.hex(t.tool)(frameAt())} ${toolIcon(state.toolName)}${chalk.hex(t.tool)(state.toolName)}${state.argPreview ? ` ${state.argPreview}` : ''}${elapsed ? chalk.hex(t.muted)(` ${elapsed}`) : ''}`;
+    state.text = clipLine(raw, termColumns() - 1);
+    drawLine(state.text);
   };
+  state.releaseCursor = hideCursor();
   render();
   state.interval = setInterval(render, 80);
   state.interval.unref?.();
@@ -753,43 +741,43 @@ function renderToolState(cli, store, state) {
 function stopBatchVisual(store) {
   if (store.batchInterval) clearInterval(store.batchInterval);
   store.batchInterval = null;
-  if (store.batchMode) {
-    if (store.batchRows > 1) process.stdout.write(`\x1b[${store.batchRows - 1}A`);
-    process.stdout.write('\r\x1b[J');
+  if (store.batchMode && store.batchRelease) {
+    syncFrame(() => {
+      if (store.batchRows > 1) process.stdout.write(`\x1b[${store.batchRows - 1}A`);
+      process.stdout.write('\r\x1b[J');
+    });
   }
+  store.batchRelease?.();
+  store.batchRelease = null;
   store.batchRows = 0;
 }
 
 function renderToolBatch(cli, store) {
   const t = cli.theme;
   const active = activeToolStates(store);
-  if (active.length === 0) return;
+  if (active.length === 0 || !isInteractive()) return;
   const startedAt = Math.min(...active.map(state => state.startedAt));
-  const elapsedStr = formatDuration(Date.now() - startedAt);
-  const frame = TOOL_FRAMES[store.batchFrame % TOOL_FRAMES.length];
-  store.batchFrame++;
-  store.batchWidth = process.stdout.columns || 120;
-  if (store.batchRows) {
+  const elapsed = formatLiveElapsed(Date.now() - startedAt);
+  const maxCols = termColumns() - 1;
+  const lines = [
+    clipLine(`  ${chalk.hex(t.tool)(frameAt())} ${active.length} tools running${elapsed ? ` ${chalk.hex(t.muted)(elapsed)}` : ''}`, maxCols),
+    ...active.slice(0, 6).map(state => clipLine(`    ${toolIcon(state.toolName)}${chalk.hex(t.tool)(state.toolName)}${state.argPreview ? ` ${state.argPreview}` : ''}`, maxCols)),
+  ];
+  syncFrame(() => {
     if (store.batchRows > 1) process.stdout.write(`\x1b[${store.batchRows - 1}A`);
     process.stdout.write('\r\x1b[J');
-  } else {
-    clearInline(store.batchWidth);
-  }
-  const lines = [
-    `  ${chalk.hex(t.tool)(frame)} ${active.length} tools running... ${chalk.hex(t.muted)(elapsedStr)}`,
-    ...active.slice(0, 6).map(state => `    ${getToolEmoji(state.toolName)} ${chalk.hex(t.tool)(state.toolName)}${state.argPreview ? ` ${state.argPreview}` : ''}`),
-  ];
-  process.stdout.write(lines.join('\n'));
+    process.stdout.write(lines.join('\n'));
+  });
   store.batchRows = lines.length;
 }
 
 function enterToolBatch(cli, store) {
   stopToolVisual(store);
-  if (!store.batchMode) {
-    store.batchMode = true;
-    store.batchFrame = 0;
-  }
+  if (!store.batchMode) store.batchMode = true;
+  if (!isInteractive()) return;
+  cli._activity?.pause();
   if (store.batchInterval) clearInterval(store.batchInterval);
+  if (!store.batchRelease) store.batchRelease = hideCursor();
   renderToolBatch(cli, store);
   store.batchInterval = setInterval(() => renderToolBatch(cli, store), 80);
   store.batchInterval.unref?.();
@@ -804,9 +792,8 @@ function buildToolResultLine(cli, state, toolName, result, taskStartTime) {
   const ok = result.success !== false;
   const status = ok ? chalk.hex(t.success)('✓') : chalk.hex(t.error)('✗');
   const summary = ok ? summarizeToolResult(cli, toolName, resultData) : summarizeToolError(result, resultData);
-  const emoji = getToolEmoji(toolName);
   if (state) state.detailLines = buildToolDetailLines(cli, toolName, result, resultData);
-  return `  ${status} ${emoji} ${chalk.hex(t.tool)(toolName)}${argPreview ? ` ${argPreview}` : ''}${summary ? ` ${summary}` : ''}${chalk.hex(t.muted)(` [${elapsedStr}]`)}`;
+  return clipLine(`  ${status} ${toolIcon(toolName)}${chalk.hex(t.tool)(toolName)}${argPreview ? ` ${argPreview}` : ''}${summary ? ` ${summary}` : ''}${chalk.hex(t.muted)(` ${elapsedStr}`)}`, termColumns() - 1);
 }
 
 function printPendingToolResults(store) {
@@ -865,7 +852,12 @@ export function printEnhancedToolCallStart(cli, toolName, args, count, _taskStar
 /**
  * Enhanced tool call end with rich result display
  */
-export function printEnhancedToolCallEnd(cli, toolName, result, taskStartTime, _count) {
+export function printEnhancedToolCallEnd(cli, toolName, result, taskStartTime, count) {
+  finishToolCall(cli, toolName, result, taskStartTime, count);
+  if (activeToolStates(getToolStore(cli)).length === 0) cli._activity?.resume('Thinking');
+}
+
+function finishToolCall(cli, toolName, result, taskStartTime, _count) {
   const store = getToolStore(cli);
   const state = store.find(s => !s.done && s.toolName === toolName) || store.find(s => !s.done);
   if (state?.interval) clearInterval(state.interval);
@@ -921,7 +913,7 @@ function buildToolDetailLines(cli, toolName, result, resultData) {
     const notable = String(resultData.stdout).trim().split('\n').slice(-2);
     for (const line of notable) lines.push(dim(`    └─ ${truncateInline(line, 110)}`));
   }
-  return lines;
+  return lines.map(line => clipLine(line, termColumns() - 1));
 }
 
 function summarizeToolResult(cli, toolName, resultData) {
@@ -1059,58 +1051,35 @@ export function printTaskSummary(cli, result, duration) {
 }
 
 /**
- * Enhanced task summary with visual card style
+ * One-line task footer: status, duration, tools, cost, context.
  */
 export async function printEnhancedTaskSummary(cli, result, duration) {
   const modelId = cli.session.agent.model;
-  const modelShort = shortenModelLabel(modelId);
   cli.syncSessionModelState(modelId);
   const contextStats = cli.session.agent.getContextStats();
-  const contextUsed = contextStats.usedTokens;
-  const contextMax = contextStats.maxTokens;
   const contextPct = contextStats.percent;
   const t = cli.theme;
   const contextColor = contextPct > 70 ? chalk.hex(t.error) : contextPct > 40 ? chalk.hex(t.warning) : chalk.hex(t.success);
 
-  // Get per-task cost from client (snapshot-based diff)
   const clientStats = cli.session?.agent?.client?.getStats?.();
-  const costAtStart = cli._taskCostStart || 0;
-  const currentTotal = clientStats?.totalCost || 0;
-  const taskCost = currentTotal - costAtStart;
+  const taskCost = (clientStats?.totalCost || 0) - (cli._taskCostStart || 0);
 
   const failed = result.success === false || result.error;
-  const statusIcon = failed ? chalk.hex(t.error)('✗') : chalk.hex(t.success)('✓');
-  const statusLabel = failed ? 'Task failed' : 'Task complete';
-
-  const width = Math.min(process.stdout.columns || 80, 60);
-  const innerWidth = width - 4;
-
-  const row = (label, value) => {
-    const l = chalk.hex(t.muted)(label.padEnd(14));
-    const line = `  ${l}${value}`;
-    const pad = Math.max(0, innerWidth - visibleLen(line) + 2);
-    return `${chalk.hex(t.accent)('  │')}${line}${' '.repeat(pad)}${chalk.hex(t.accent)('│')}`;
-  };
+  const dim = chalk.hex(t.muted);
+  const dot = dim(' · ');
+  const parts = [
+    failed ? chalk.hex(t.error)('✗ failed') : chalk.hex(t.success)('✓ done'),
+    dim(formatDuration(duration)),
+  ];
+  const tools = result.stats?.toolExecutions || 0;
+  if (tools > 0) parts.push(dim(`${tools} tool${tools === 1 ? '' : 's'}`));
+  if ((result.iterations || 0) > 1) parts.push(dim(`${result.iterations} steps`));
+  if (taskCost > 0) parts.push(dim(formatCost(taskCost)));
+  parts.push(contextColor(`${contextPct}% ctx`));
+  if (result.performance?.totalRetries > 0) parts.push(chalk.hex(t.warning)(`${result.performance.totalRetries} retries`));
 
   console.log('');
-  console.log(chalk.hex(t.accent)(`  ╭${'─'.repeat(width)}╮`));
-  console.log(chalk.hex(t.accent)('  │') + `  ${statusIcon} ${chalk.bold(statusLabel)}`.padEnd(width + visibleLen(`  ${statusIcon} ${statusLabel}`) - 1) + chalk.hex(t.accent)('│'));
-  console.log(chalk.hex(t.accent)(`  ├${'─'.repeat(width)}┤`));
-  console.log(row('Model', chalk.hex(t.tool)(modelShort)));
-  console.log(row('Duration', chalk.hex(t.text)(formatDuration(duration))));
-  console.log(row('Iterations', chalk.hex(t.text)(`${result.iterations || 0}`)));
-  console.log(row('Tools called', chalk.hex(t.text)(`${result.stats?.toolExecutions || 0}`)));
-  if (taskCost > 0) {
-    console.log(row('Cost', chalk.hex(t.warning)(formatCost(taskCost))));
-  }
-  if (formatTokens(contextUsed) !== '0') {
-    console.log(row('Tokens used', chalk.hex(t.text)(formatTokens(contextUsed))));
-  }
-  console.log(row('Context', contextColor(`${formatCompactNumber(contextUsed)}/${formatCompactNumber(contextMax)} (${contextPct}%)`)));
-  if (result.performance && result.performance.totalRetries > 0) {
-    console.log(row('Retries', chalk.hex(t.warning)(`${result.performance.totalRetries}`)));
-  }
-  console.log(chalk.hex(t.accent)(`  ╰${'─'.repeat(width)}╯`));
+  console.log(clipLine(`  ${parts.join(dot)}`, termColumns() - 1));
 }
 
 /**

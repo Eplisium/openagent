@@ -65,6 +65,23 @@ export class OpenRouterError extends Error {
   }
 }
 
+const STREAM_ERROR_HINTS = {
+  STREAM_TIMEOUT: 'The model did not start responding in time.',
+  STREAM_STALLED: 'The response stopped arriving mid-stream.',
+  STREAM_INTERRUPTED: 'The connection closed before the response finished.',
+};
+
+export class StreamError extends OpenRouterError {
+  constructor(message, code = 'STREAM_INTERRUPTED', data = {}) {
+    super(message, code, {
+      ...data,
+      recoverable: true,
+      suggestion: STREAM_ERROR_HINTS[code] || 'Retry the request.',
+    });
+    this.name = 'StreamError';
+  }
+}
+
 export class RateLimitError extends OpenRouterError {
   constructor(message, retryAfter, data = {}) {
     super(message, 'RATE_LIMIT_ERROR', {

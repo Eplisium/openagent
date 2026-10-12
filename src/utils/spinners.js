@@ -7,6 +7,7 @@
 import { createSpinner as nsCreate } from 'nanospinner';
 import cliSpinners from 'cli-spinners';
 import chalk from './chalk-compat.js';
+import { clipLine } from '../cli/layout.js';
 
 const FALLBACK_THEME = {
   accent: '#89b4fa',
@@ -41,9 +42,7 @@ function clearCurrentLine() {
 }
 
 function fitInline(text) {
-  const width = Math.max(20, process.stdout.columns || 80);
-  const plain = String(text || '');
-  return plain.length > width - 1 ? plain.slice(0, width - 2) + '…' : plain;
+  return clipLine(String(text || ''), Math.max(20, process.stdout.columns || 80) - 1);
 }
 
 function formatSpinnerElapsed(ms) {
@@ -86,7 +85,7 @@ export class KawaiiSpinner {
   }
 
   start() {
-    if (this.active) return this;
+    if (this.active || !process.stdout.isTTY) return this;
     this.active = true;
     this.startTime = Date.now();
     this.frame = 0;
@@ -94,7 +93,7 @@ export class KawaiiSpinner {
     this.interval = setInterval(() => {
       this.frame++;
       this._render();
-    }, 200);
+    }, 120);
     this.interval.unref?.();
     return this;
   }
@@ -203,6 +202,7 @@ export function thinkingSpinner(message = 'Thinking', theme = null) {
   let elapsed = 0;
   const startTime = Date.now();
   const color = chalk.hex(theme?.muted || '#6c7086');
+  if (!process.stdout.isTTY) return { stop: () => {}, setMessage: () => {} };
 
   const interval = setInterval(() => {
     elapsed = formatSpinnerElapsed(Date.now() - startTime);
@@ -234,6 +234,7 @@ export function contextualSpinner(message = 'Working...', theme = null) {
   const toolColor = chalk.hex(theme?.tool || '#cba6f7');
   const mutedColor = chalk.hex(theme?.muted || '#6c7086');
   const textColor = chalk.hex(theme?.text || '#cdd6f4');
+  if (!process.stdout.isTTY) return { stop: () => {}, setMessage: () => {}, getElapsed: () => '' };
 
   const interval = setInterval(() => {
     elapsed = formatSpinnerElapsed(Date.now() - startTime);

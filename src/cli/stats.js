@@ -26,18 +26,6 @@ function formatSmartMoney(value) {
 }
 
 /**
- * Format compact cost (single-line, minimal)
- */
-function formatCompactCost(value) {
-  const v = Number(value || 0);
-  if (v === 0) return '$0.00';
-  if (v < 0.001) return '$' + v.toFixed(6);
-  if (v < 0.01) return '$' + v.toFixed(4);
-  if (v < 1) return '$' + v.toFixed(3);
-  return '$' + v.toFixed(2);
-}
-
-/**
  * Show session statistics (agent stats, tool stats, subagent stats).
  * @param {object} session - The current AgentSession
  */

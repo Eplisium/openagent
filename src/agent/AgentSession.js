@@ -213,7 +213,7 @@ export class AgentSession {
             durationMs: info.durationMs,
             error: info.error?.message || info.error || null,
           });
-        } catch {} // Don't let logging break the agent
+        } catch { /* logging must not break the agent */ }
         // Call user-provided onToolEnd if any
         if (options.onToolEnd) options.onToolEnd(info);
       },

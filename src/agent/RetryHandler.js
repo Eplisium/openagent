@@ -5,9 +5,8 @@
  * All methods read/write state on the owning Agent instance via `this.agent`.
  */
 
-import { AgentError } from '../errors.js';
+import { AgentError, ToolErrorType } from '../errors.js';
 import { logger } from '../logger.js';
-import { ToolErrorType } from '../errors.js';
 
 export class RetryHandler {
   /**
@@ -32,7 +31,7 @@ export class RetryHandler {
    * @param {Error|null} originalError – the first error in a retry chain
    * @returns {Promise<object>} The LLM response
    */
-  async getLLMResponseWithRetry(retryCount = 0, messages = null, fallbackCandidates = null, originalError = null) {
+  async getLLMResponseWithRetry(retryCount = 0, messages = null, fallbackCandidates = null, originalError = null, transientRetries = 0) {
     const a = this.agent;
     const maxRetries = a.maxRetries;
     const messagesToSend = messages || a.messages;
@@ -94,6 +93,20 @@ export class RetryHandler {
 
         // Retry — context was already compacted above
         return this.getLLMResponseWithRetry(retryCount + 1, messagesToSend, fallbackModels, originalError);
+      }
+
+      // Transient transport trouble (timeouts, dropped sockets, 5xx): retry the same model first
+      const isTransient = !a.aborted && error.name !== 'AbortError' &&
+        (error.code === 'TIMEOUT' || a.client.isRetryableStreamError?.(error));
+      if (isTransient && transientRetries < 2) {
+        a.performanceMetrics.totalRetries++;
+        const retryMessage = `Connection problem — retrying (${transientRetries + 1}/2)`;
+        if (!a.emitStatus('retry', retryMessage) && a.shouldEmitVerboseLogs()) {
+          logger.warn(retryMessage, { code: error.code });
+        }
+        await a.sleep(a.retryDelay * Math.pow(a.retryBackoff, transientRetries));
+        a.checkAborted?.();
+        return this.getLLMResponseWithRetry(retryCount, messagesToSend, fallbackModels, originalError, transientRetries + 1);
       }
 
       const statusCode = error.statusCode || error.details?.statusCode;

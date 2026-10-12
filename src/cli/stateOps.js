@@ -15,7 +15,8 @@ function applyPreferences(cli) {
   };
   cli.streaming = cli.prefs.streaming !== false;
   cli.verbose = cli.prefs.verbose !== false;
-  cli.currentTheme = cli.prefs.theme || cli.currentTheme || 'catppuccin';
+  const savedTheme = cli.prefs.theme === 'luna' ? 'openagent' : cli.prefs.theme;
+  cli.currentTheme = savedTheme || cli.currentTheme || 'openagent';
   cli.theme = getTheme(cli.currentTheme);
   cli.autoSave = cli.prefs.autoSave !== false;
   if (cli.screen) {
@@ -45,10 +46,6 @@ export async function loadState(cli) {
       });
       cli.history = Array.isArray(cli.state.history) ? cli.state.history.slice(-cli.maxHistorySize) : [];
       applyPreferences(cli);
-
-      if (cli.verbose) {
-        console.log(chalk.dim('  loaded local state'));
-      }
     } else {
       // First run
       cli.state = normalizeState({

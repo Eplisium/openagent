@@ -34,8 +34,8 @@ export const CONFIG = {
   API_KEY: process.env.OPENROUTER_API_KEY || '',
 
   // Agent Identity
-  AGENT_NAME: process.env.AGENT_NAME || 'Luna',
-  AGENT_TAGLINE: 'your AI companion',
+  AGENT_NAME: process.env.AGENT_NAME || 'OpenAgent',
+  AGENT_TAGLINE: 'AI agent for your terminal',
   
   // App Attribution Headers
   HEADERS: {
@@ -78,6 +78,11 @@ export const CONFIG = {
   
   // Streaming
   STREAM_KEEP_ALIVE: true,
+  STREAM_CONNECT_TIMEOUT_MS: parseInt(process.env.STREAM_CONNECT_TIMEOUT_MS, 10) || 45000, // no response headers
+  STREAM_IDLE_TIMEOUT_MS: parseInt(process.env.STREAM_IDLE_TIMEOUT_MS, 10) || 60000, // no bytes (keepalive comments count)
+  STREAM_MAX_RETRIES: process.env.STREAM_MAX_RETRIES !== undefined && Number.isFinite(parseInt(process.env.STREAM_MAX_RETRIES, 10))
+    ? Math.max(0, parseInt(process.env.STREAM_MAX_RETRIES, 10))
+    : 2,
   
   // Context Management
   MAX_CONTEXT_TOKENS: parseInt(process.env.MAX_CONTEXT_TOKENS, 10) || 800000,
