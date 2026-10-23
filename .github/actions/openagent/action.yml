@@ -1,0 +1,116 @@
+name: 'OpenAgent'
+description: 'Run the OpenAgent coding agent headlessly (openagent -p) and expose its JSON result.'
+author: 'Eplisium'
+branding:
+  icon: 'cpu'
+  color: 'purple'
+
+inputs:
+  prompt:
+    description: 'Prompt to send to the agent.'
+    required: true
+  model:
+    description: 'Model id (e.g. anthropic/claude-sonnet-4.5). Defaults to OPENAGENT_MODEL / last used model.'
+    required: false
+    default: ''
+  permission-mode:
+    description: 'read-only | plan | ask | accept-edits | auto ("ask" auto-denies in CI).'
+    required: false
+    default: 'accept-edits'
+  openrouter-api-key:
+    description: 'OpenRouter API key (pass via secrets).'
+    required: true
+  allowed-tools:
+    description: 'Comma-separated allow rules, e.g. "read_file,exec(npm test:*)".'
+    required: false
+    default: ''
+  disallowed-tools:
+    description: 'Comma-separated deny rules, e.g. "exec(git push:*)".'
+    required: false
+    default: ''
+  max-turns:
+    description: 'Maximum agent iterations.'
+    required: false
+    default: ''
+  working-directory:
+    description: 'Directory to run the agent in.'
+    required: false
+    default: '.'
+  openagent-version:
+    description: 'npm version/tag of openagent to run via npx.'
+    required: false
+    default: 'latest'
+  node-version:
+    description: 'Node.js version (>= 22).'
+    required: false
+    default: '22'
+
+outputs:
+  result:
+    description: 'Final answer text.'
+    value: ${{ steps.run.outputs.result }}
+  session-id:
+    description: 'Session id (usable with --resume).'
+    value: ${{ steps.run.outputs.session_id }}
+  is-error:
+    description: '"true" if the run failed.'
+    value: ${{ steps.run.outputs.is_error }}
+  cost-usd:
+    description: 'Total cost in USD.'
+    value: ${{ steps.run.outputs.total_cost_usd }}
+  json:
+    description: 'Path to the full JSON result file.'
+    value: ${{ steps.run.outputs.json_path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Run OpenAgent
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+        OA_PROMPT: ${{ inputs.prompt }}
+        OA_MODEL: ${{ inputs.model }}
+        OA_PERMISSION_MODE: ${{ inputs.permission-mode }}
+        OA_ALLOWED_TOOLS: ${{ inputs.allowed-tools }}
+        OA_DISALLOWED_TOOLS: ${{ inputs.disallowed-tools }}
+        OA_MAX_TURNS: ${{ inputs.max-turns }}
+        OA_VERSION: ${{ inputs.openagent-version }}
+      run: |
+        set -uo pipefail
+        args=(-p "$OA_PROMPT" --output-format json --permission-mode "$OA_PERMISSION_MODE")
+        [ -n "$OA_MODEL" ] && args+=(--model "$OA_MODEL")
+        [ -n "$OA_ALLOWED_TOOLS" ] && args+=(--allowed-tools "$OA_ALLOWED_TOOLS")
+        [ -n "$OA_DISALLOWED_TOOLS" ] && args+=(--disallowed-tools "$OA_DISALLOWED_TOOLS")
+        [ -n "$OA_MAX_TURNS" ] && args+=(--max-turns "$OA_MAX_TURNS")
+
+        json_path="${RUNNER_TEMP:-/tmp}/openagent-result.json"
+        npx --yes "openagent@${OA_VERSION}" "${args[@]}" < /dev/null > "$json_path"
+        status=$?
+
+        node -e '
+          const fs = require("fs");
+          let r = {};
+          try { r = JSON.parse(fs.readFileSync(process.argv[1], "utf8").trim().split("\n").pop()); } catch {}
+          const out = process.env.GITHUB_OUTPUT;
+          const delim = "OA_EOF_" + Math.random().toString(36).slice(2);
+          fs.appendFileSync(out, `result<<${delim}\n${r.result ?? r.error ?? ""}\n${delim}\n`);
+          fs.appendFileSync(out, `session_id=${r.session_id ?? ""}\n`);
+          fs.appendFileSync(out, `is_error=${r.is_error === false ? "false" : "true"}\n`);
+          fs.appendFileSync(out, `total_cost_usd=${r.total_cost_usd ?? 0}\n`);
+          fs.appendFileSync(out, `json_path=${process.argv[1]}\n`);
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              `### OpenAgent\n\n${r.result ?? r.error ?? "(no output)"}\n\n` +
+              `_turns: ${r.num_turns ?? 0} · cost: $${r.total_cost_usd ?? 0} · session: ${r.session_id ?? "-"}_\n`);
+          }
+        ' "$json_path"
+
+        exit $status
