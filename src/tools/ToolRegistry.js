@@ -47,6 +47,15 @@ export class ToolRegistry {
     
     // Per-tool execution metrics
     this.toolMetrics = {}; // { toolName: { calls, successes, failures, totalDuration, avgDuration, lastError } }
+
+    // Session-stable tool exposure (prompt-cache friendly).
+    // Non-core tools are "deferred" until activated via tool_search (or direct use).
+    // The activated list only ever grows, in activation order, so the serialized
+    // tool prefix sent to the LLM stays byte-identical between iterations.
+    this.activatedTools = [];
+    this._activatedSet = new Set();
+    this._cachedSessionDefs = null;
+    this._cachedSessionKey = null;
   }
 
   /**
@@ -85,6 +94,7 @@ export class ToolRegistry {
     // Invalidate cached definitions
     this._cachedFunctionDefs = null;
     this._cachedToolDefs = null;
+    this._cachedSessionDefs = null;
     
     // Initialize usage count
     if (!this.stats.toolUsageCount[tool.name]) {
@@ -203,6 +213,290 @@ export class ToolRegistry {
     return tool?.category || 'general';
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // 🔍 Session-stable tool set + tool_search meta-tool
+  // ═══════════════════════════════════════════════════════════════
+
+  /** Name of the meta-tool used to discover/activate deferred tools. */
+  static TOOL_SEARCH_NAME = 'tool_search';
+
+  /** Below this many enabled tools, every tool is sent and nothing is deferred. */
+  static FULL_TOOLSET_THRESHOLD = 40;
+
+  /**
+   * Convert a registered tool into the simplified definition format.
+   * @private
+   */
+  _toDefinition(tool) {
+    return {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters || { type: 'object', properties: {} },
+    };
+  }
+
+  /**
+   * Enabled tools, excluding the tool_search meta-tool, sorted by name.
+   * @private
+   */
+  _enabledToolsSorted() {
+    const list = [];
+    for (const tool of this.tools.values()) {
+      if (tool.enabled !== false && tool.name !== ToolRegistry.TOOL_SEARCH_NAME) list.push(tool);
+    }
+    return list.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  }
+
+  /**
+   * Whether a tool is core (always sent to the LLM).
+   * @param {string} toolName
+   * @returns {boolean}
+   */
+  isCoreTool(toolName) {
+    const tool = this.tools.get(toolName);
+    if (!tool) return false;
+    return tool.core === true || ToolRegistry.CORE_CATEGORIES.has(tool.category || 'general');
+  }
+
+  /**
+   * Enabled non-core tools that are only exposed after activation, sorted by name.
+   * @returns {Array<Object>} Registered tool objects
+   */
+  getDeferredTools() {
+    return this._enabledToolsSorted().filter(t => !this.isCoreTool(t.name));
+  }
+
+  /**
+   * Whether deferral is in effect for the current registry contents.
+   * @param {number} [threshold]
+   * @returns {boolean}
+   */
+  isDeferralActive(threshold = ToolRegistry.FULL_TOOLSET_THRESHOLD) {
+    const enabled = this._enabledToolsSorted();
+    if (enabled.length < threshold) return false;
+    return enabled.some(t => !this.isCoreTool(t.name));
+  }
+
+  /**
+   * Whether a tool has been activated for this session.
+   * @param {string} toolName
+   * @returns {boolean}
+   */
+  isToolActivated(toolName) {
+    return this._activatedSet.has(toolName);
+  }
+
+  /**
+   * Activate deferred tools for the rest of the session.
+   * Newly activated names are appended in sorted order within each call, so the
+   * resulting list is a deterministic function of the activation history.
+   *
+   * @param {Array<string>|string} names
+   * @returns {Array<string>} Names that were newly activated by this call
+   */
+  activateTools(names) {
+    const list = Array.isArray(names) ? names : [names];
+    const fresh = [...new Set(list)]
+      .filter(name => typeof name === 'string' && this.tools.has(name))
+      .filter(name => name !== ToolRegistry.TOOL_SEARCH_NAME)
+      .filter(name => !this.isCoreTool(name) && !this._activatedSet.has(name))
+      .sort();
+    for (const name of fresh) {
+      this._activatedSet.add(name);
+      this.activatedTools.push(name);
+    }
+    if (fresh.length > 0) this._cachedSessionDefs = null;
+    return fresh;
+  }
+
+  /**
+   * Reset session activation state (e.g. when the conversation is cleared).
+   */
+  resetActivatedTools() {
+    this.activatedTools = [];
+    this._activatedSet.clear();
+    this._cachedSessionDefs = null;
+  }
+
+  /**
+   * Keyword/category search over deferred (non-core) tools.
+   *
+   * @param {string} [query] - Space-separated keywords matched against name/description/category
+   * @param {Object} [options]
+   * @param {string} [options.category] - Restrict to one category
+   * @param {number} [options.limit=8] - Max results
+   * @returns {Array<{name: string, category: string, description: string, score: number}>}
+   */
+  searchTools(query = '', options = {}) {
+    const { category, limit = 8 } = options;
+    const terms = String(query || '')
+      .toLowerCase()
+      .split(/[\s,]+/)
+      .map(t => t.trim())
+      .filter(Boolean);
+    const wantedCategory = category ? String(category).toLowerCase() : null;
+
+    const results = [];
+    for (const tool of this.getDeferredTools()) {
+      const toolCategory = (tool.category || 'general').toLowerCase();
+      if (wantedCategory && toolCategory !== wantedCategory) continue;
+
+      const name = tool.name.toLowerCase();
+      const nameWords = name.replace(/[_-]+/g, ' ');
+      const description = String(tool.description || '').toLowerCase();
+      let score = 0;
+      for (const term of terms) {
+        if (name === term) score += 10;
+        else if (name.includes(term) || nameWords.includes(term)) score += 5;
+        if (toolCategory === term) score += 4;
+        if (description.includes(term)) score += 2;
+      }
+      // With no terms, a category filter alone lists that category
+      if (terms.length === 0 && wantedCategory) score = 1;
+      if (score > 0) {
+        results.push({ name: tool.name, category: tool.category || 'general', description: tool.description || '', score });
+      }
+    }
+
+    results.sort((a, b) => b.score - a.score || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const max = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 8;
+    return results.slice(0, max);
+  }
+
+  /**
+   * Build the tool_search meta-tool definition. Its description lists every
+   * deferred tool by category so the model knows what can be activated.
+   * @private
+   */
+  _buildToolSearchTool() {
+    const byCategory = new Map();
+    for (const tool of this.getDeferredTools()) {
+      const cat = tool.category || 'general';
+      if (!byCategory.has(cat)) byCategory.set(cat, []);
+      byCategory.get(cat).push(tool.name);
+    }
+    const catalog = [...byCategory.keys()].sort()
+      .map(cat => `${cat}: ${byCategory.get(cat).join(', ')}`)
+      .join('\n');
+
+    return {
+      name: ToolRegistry.TOOL_SEARCH_NAME,
+      category: 'meta',
+      description: 'Search additional (non-core) tools by keyword and/or category and activate the matches. ' +
+        'Activated tools become callable with full schemas from the next step on and stay available for the rest of the session. ' +
+        'Use this before calling any tool not already in your tool list. Deferred tools by category:\n' + catalog,
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Keywords to match against tool names and descriptions (e.g. "browser screenshot")' },
+          category: { type: 'string', description: 'Optional category filter (one of the categories listed above)' },
+          names: { type: 'array', items: { type: 'string' }, description: 'Exact tool names to activate directly' },
+          limit: { type: 'number', description: 'Max tools to activate from the search (default 8)' },
+        },
+      },
+      execute: async (args = {}) => this._executeToolSearch(args),
+    };
+  }
+
+  /**
+   * (Re)install the auto-generated tool_search tool so its catalog reflects the
+   * current deferred tool set. Set directly (not via register) to avoid
+   * recursive cache invalidation. A user-registered tool_search is left alone.
+   * @private
+   * @returns {Object} The tool_search tool entry
+   */
+  _ensureToolSearch() {
+    const existing = this.tools.get(ToolRegistry.TOOL_SEARCH_NAME);
+    if (existing && !existing._autoToolSearch) return existing;
+    const entry = {
+      ...this._buildToolSearchTool(),
+      enabled: true,
+      destructive: false,
+      permission: null,
+      timeout: this.defaultTimeout,
+      _autoToolSearch: true,
+    };
+    this.tools.set(ToolRegistry.TOOL_SEARCH_NAME, entry);
+    this._cachedFunctionDefs = null;
+    this._cachedToolDefs = null;
+    return entry;
+  }
+
+  /**
+   * tool_search implementation.
+   * @private
+   */
+  _executeToolSearch(args = {}) {
+    const { query = '', category, names, limit } = args;
+    const exactNames = Array.isArray(names) ? names.filter(n => typeof n === 'string') : [];
+    if (!query && !category && exactNames.length === 0) {
+      return { success: false, error: 'Provide a query, a category, or names to activate.' };
+    }
+
+    const matches = (query || category) ? this.searchTools(query, { category, limit }) : [];
+    const unknown = exactNames.filter(n => !this.tools.has(n));
+    const candidates = [...exactNames.filter(n => this.tools.has(n)), ...matches.map(m => m.name)];
+    const newlyActivated = this.activateTools(candidates);
+
+    const tools = [...new Set(candidates)].map(name => {
+      const tool = this.tools.get(name);
+      return {
+        name,
+        category: tool?.category || 'general',
+        description: tool?.description || '',
+        status: this.isCoreTool(name) ? 'core (already available)' : 'active',
+      };
+    });
+
+    return {
+      success: true,
+      activated: newlyActivated,
+      tools,
+      ...(unknown.length > 0 ? { unknown } : {}),
+      message: tools.length > 0
+        ? `Activated ${newlyActivated.length} new tool(s); ${tools.length} match(es) are now callable.`
+        : 'No matching tools found. Try different keywords or a category from the tool_search description.',
+    };
+  }
+
+  /**
+   * Get the cache-stable tool definitions for an LLM session.
+   *
+   * - Fewer than `threshold` enabled tools: every tool, sorted by name.
+   * - Otherwise: core tools (sorted by name) + tool_search + activated tools
+   *   in activation order. The list only grows within a session, so the
+   *   serialized prefix stays stable for provider prompt caching.
+   *
+   * @param {Object} [options]
+   * @param {number} [options.threshold]
+   * @returns {Array<Object>} Simplified tool definitions
+   */
+  getSessionToolDefinitions(options = {}) {
+    const threshold = Number.isFinite(options.threshold) && options.threshold > 0
+      ? options.threshold
+      : ToolRegistry.FULL_TOOLSET_THRESHOLD;
+    const key = `${threshold}:${this.activatedTools.length}`;
+    if (this._cachedSessionDefs && this._cachedSessionKey === key) return this._cachedSessionDefs;
+
+    const enabled = this._enabledToolsSorted();
+    let defs;
+    if (!this.isDeferralActive(threshold)) {
+      defs = enabled.map(t => this._toDefinition(t));
+    } else {
+      const searchTool = this._ensureToolSearch();
+      defs = enabled.filter(t => this.isCoreTool(t.name)).map(t => this._toDefinition(t));
+      defs.push(this._toDefinition(searchTool));
+      for (const name of this.activatedTools) {
+        const tool = this.tools.get(name);
+        if (tool && tool.enabled !== false) defs.push(this._toDefinition(tool));
+      }
+    }
+
+    this._cachedSessionDefs = defs;
+    this._cachedSessionKey = key;
+    return defs;
+  }
+
   /**
    * Execute a tool with permission checks, validation, and timeout
    */
@@ -210,6 +504,9 @@ export class ToolRegistry {
     const startTime = Date.now();
     this.stats.totalExecutions++;
     
+    if (toolName === ToolRegistry.TOOL_SEARCH_NAME && !this.tools.has(toolName) && this.isDeferralActive()) {
+      this._ensureToolSearch();
+    }
     const tool = this.tools.get(toolName);
     
     if (!tool) {
@@ -222,6 +519,11 @@ export class ToolRegistry {
       };
     }
     
+    // Direct use of a deferred tool activates it so its schema is sent from now on
+    if (toolName !== ToolRegistry.TOOL_SEARCH_NAME && tool.enabled && !this.isCoreTool(toolName) && !this._activatedSet.has(toolName)) {
+      this.activateTools([toolName]);
+    }
+
     if (!tool.enabled) {
       this.recordExecution(toolName, args, false, Date.now() - startTime, 'Tool disabled');
       return {
@@ -527,6 +829,9 @@ export class ToolRegistry {
     const tool = this.tools.get(toolName);
     if (tool) {
       tool.enabled = enabled;
+      this._cachedFunctionDefs = null;
+      this._cachedToolDefs = null;
+      this._cachedSessionDefs = null;
       return true;
     }
     return false;
@@ -645,6 +950,7 @@ export class ToolRegistry {
     };
     this._cachedFunctionDefs = null;
     this._cachedToolDefs = null;
+    this.resetActivatedTools();
   }
 }
 

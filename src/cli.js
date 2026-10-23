@@ -13,6 +13,21 @@
  *     cli/errorUtils.js  — error categorization & suggestions
  */
 
+// ── Optional V8 compile cache (Node >= 22.1) ──
+// ESM static imports are hoisted, so this call cannot affect the lightweight static imports
+// below — it applies to the heavy modules loaded later via dynamic import() in resolveImports().
+// Opt-in only: on Windows (Node 24) benchmarks the cache made startup ~120-150ms SLOWER
+// (cache read/verify overhead outweighed compile savings), so it's off by default.
+// Enable with OPENAGENT_COMPILE_CACHE=1 (or Node's own NODE_COMPILE_CACHE=<dir>).
+import nodeModule from 'node:module';
+if (process.env.OPENAGENT_COMPILE_CACHE === '1' || process.env.OPENAGENT_COMPILE_CACHE === 'true') {
+  try {
+    nodeModule.enableCompileCache?.();
+  } catch {
+    // Compile cache is a best-effort optimization; ignore unsupported runtimes.
+  }
+}
+
 // ── Lightweight imports (always loaded — small, fast) ──
 import chalk from './utils/chalk-compat.js';
 import fs from './utils/fs-compat.js';

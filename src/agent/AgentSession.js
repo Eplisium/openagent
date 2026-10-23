@@ -28,15 +28,57 @@ import { createSessionHistoryTools } from '../tools/sessionHistoryTools.js';
 import { createSkillTools } from '../tools/skillTools.js';
 import { createMcpTools, autoConnectServers } from '../tools/mcpTools.js';
 import chalk from '../utils/chalk-compat.js';
+// Protocol tool factories stay static: their definitions must be registered synchronously
+// in the constructor. Their heavy protocol servers/clients (protocols/a2a.js, protocols/agui.js)
+// are lazy-loaded inside each tool's execute().
 import { createA2ATools } from '../tools/a2aTools.js';
 import { createAGUITools } from '../tools/aguiTools.js';
+// graphTools has zero imports (pure definitions) — kept static so tools register synchronously.
 import { createGraphTools } from '../tools/graphTools.js';
+// AutoGenBridge owns its tool schemas (registerTools) and its tools must be listed
+// synchronously (startup tool count, /tools). Kept static to preserve that behavior.
 import { AutoGenBridge } from '../autogen/AutoGenBridge.js';
-import { WorkflowGraph } from '../graph/index.js';
-import { FileCheckpointer as GraphFileCheckpointer } from '../graph/checkpointers/FileCheckpointer.js';
-import { OutcomeTracker } from './OutcomeTracker.js';
-import { PromptEvolutionEngine } from './PromptEvolutionEngine.js';
 import { fileURLToPath } from 'url';
+
+// ── Lazy-loaded subsystems (not needed until a workflow or task actually runs) ──
+// WorkflowGraph (graph/index.js), the graph FileCheckpointer, OutcomeTracker and
+// PromptEvolutionEngine are imported on demand to keep them off the startup path.
+const loadOutcomeTracker = () => import('./OutcomeTracker.js');
+const loadPromptEvolutionEngine = () => import('./PromptEvolutionEngine.js');
+const loadGraphFileCheckpointer = () => import('../graph/checkpointers/FileCheckpointer.js');
+
+/**
+ * Checkpointer facade that defers loading graph/checkpointers/FileCheckpointer.js
+ * until the first checkpoint operation. FileCheckpointer's methods are all async,
+ * so delegating through an awaited import preserves the same Promise-based contract.
+ */
+class LazyGraphCheckpointer {
+  constructor(options = {}) {
+    this._options = options;
+    this._implPromise = null;
+  }
+
+  _impl() {
+    this._implPromise ||= loadGraphFileCheckpointer()
+      .then(({ FileCheckpointer }) => new FileCheckpointer(this._options));
+    return this._implPromise;
+  }
+
+  async save(threadId, snapshot) { return (await this._impl()).save(threadId, snapshot); }
+  async load(threadId) { return (await this._impl()).load(threadId); }
+  async list(threadId) { return (await this._impl()).list(threadId); }
+  async delete(threadId) { return (await this._impl()).delete(threadId); }
+}
+
+/**
+ * Structural check for a WorkflowGraph builder. Avoids eagerly importing graph/index.js
+ * just for an instanceof check — any caller holding a graph already loaded that module.
+ */
+function isWorkflowGraph(graph) {
+  return Boolean(graph)
+    && typeof graph.compile === 'function'
+    && graph._nodes instanceof Map;
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -150,12 +192,14 @@ export class AgentSession {
     this.toolRegistry.registerAll(createA2ATools());
     this.toolRegistry.registerAll(createAGUITools());
 
-    // Auto-connect saved MCP servers (non-blocking)
+    // Auto-connect saved MCP servers (non-blocking — never awaited by the constructor)
     autoConnectServers().then(({ connected, total }) => {
       if (connected > 0) {
         console.log(chalk.cyan(`[MCP] Auto-connected ${connected}/${total} servers`));
       }
-    }).catch(() => {});
+    }).catch((err) => {
+      console.warn(chalk.yellow(`[MCP] Auto-connect failed: ${err?.message || err}`));
+    });
 
     // Initialize memory manager
     this.memoryManager = new MemoryManager({
@@ -226,13 +270,13 @@ export class AgentSession {
 
     // ─── Graph Workflow Engine ─────────────────────────────────────
     // Registry of named workflow graphs that can be invoked by the agent
-    /** @type {Map<string, {graph: WorkflowGraph, compiled: CompiledGraph, stateSchema: object}>} */
+    /** @type {Map<string, {graph: import('../graph/index.js').WorkflowGraph, compiled: import('../graph/index.js').CompiledGraph, stateSchema: object}>} */
     this.workflowRegistry = new Map();
     // Track active running graph executions by threadId
-    /** @type {Map<string, CompiledGraph>} */
+    /** @type {Map<string, import('../graph/index.js').CompiledGraph>} */
     this.activeGraphs = new Map();
-    // Graph checkpointer for persistence across sessions
-    this.graphCheckpointer = new GraphFileCheckpointer({
+    // Graph checkpointer for persistence across sessions (FileCheckpointer loaded on first use)
+    this.graphCheckpointer = new LazyGraphCheckpointer({
       dir: path.join(this.workspaceManager.openAgentDir, 'graph-checkpoints'),
     });
 
@@ -245,17 +289,38 @@ export class AgentSession {
     this.autoGenBridge.registerTools(this.toolRegistry);
 
     // ─── Self-Improvement Layer (Outcome Tracking + Prompt Evolution) ──
-    this.outcomeTracker = new OutcomeTracker({
-      outcomesDir: this.workspaceManager.openAgentDir,
-    });
-    this.promptEvolution = new PromptEvolutionEngine(this.outcomeTracker, {
-      evolutionsDir: path.join(this.workspaceManager.openAgentDir, 'evolutions'),
-    });
-    // Load persisted data (async — don't block constructor)
-    this._initPromise = Promise.all([
-      this.outcomeTracker.load(),
-      this.promptEvolution.load(),
-    ]).catch(err => console.warn('[AgentSession] Self-improvement init warning:', err.message));
+    // Modules are lazy-loaded and data is loaded async (don't block constructor).
+    // run()/runStream() await _initPromise before touching these.
+    /** @type {import('./OutcomeTracker.js').OutcomeTracker|null} */
+    this.outcomeTracker = null;
+    /** @type {import('./PromptEvolutionEngine.js').PromptEvolutionEngine|null} */
+    this.promptEvolution = null;
+    this._initPromise = this._initSelfImprovement();
+  }
+
+  /**
+   * Lazy-load and initialize the self-improvement layer.
+   * @private
+   */
+  async _initSelfImprovement() {
+    try {
+      const [{ OutcomeTracker }, { PromptEvolutionEngine }] = await Promise.all([
+        loadOutcomeTracker(),
+        loadPromptEvolutionEngine(),
+      ]);
+      this.outcomeTracker = new OutcomeTracker({
+        outcomesDir: this.workspaceManager.openAgentDir,
+      });
+      this.promptEvolution = new PromptEvolutionEngine(this.outcomeTracker, {
+        evolutionsDir: path.join(this.workspaceManager.openAgentDir, 'evolutions'),
+      });
+      await Promise.all([
+        this.outcomeTracker.load(),
+        this.promptEvolution.load(),
+      ]);
+    } catch (err) {
+      console.warn('[AgentSession] Self-improvement init warning:', err.message);
+    }
   }
 
   /**
@@ -288,12 +353,12 @@ export class AgentSession {
   /**
    * Register a workflow graph by name so the agent can invoke it.
    * @param {string} name - Unique workflow name (e.g., 'code-review', 'research')
-   * @param {WorkflowGraph} graph - The workflow graph builder instance
+   * @param {import('../graph/index.js').WorkflowGraph} graph - The workflow graph builder instance
    * @param {object} [options] - Compilation options
    * @returns {{ graph, compiled, stateSchema }} The compiled graph ready for use
    */
   registerWorkflow(name, graph, options = {}) {
-    if (!(graph instanceof WorkflowGraph)) {
+    if (!isWorkflowGraph(graph)) {
       throw new TypeError('registerWorkflow requires a WorkflowGraph instance');
     }
     const compiled = graph.compile({
@@ -565,7 +630,7 @@ export class AgentSession {
       this.createCheckpoint('after_task');
 
       // Record successful outcome
-      await this.outcomeTracker.record({
+      await this.outcomeTracker?.record({
         skill: this._activeSkill || 'none',
         specialization: this._activeSpecialization || 'general',
         taskType,
@@ -573,7 +638,7 @@ export class AgentSession {
         durationMs: Date.now() - startTime,
         taskSummary: task.substring(0, 200),
       });
-      await this.outcomeTracker.flush();
+      await this.outcomeTracker?.flush();
       
       return result;
     } catch (error) {
@@ -581,7 +646,7 @@ export class AgentSession {
       await this.hookManager.runStop({ reason: 'error', error: error.message });
 
       // Record failed outcome
-      await this.outcomeTracker.record({
+      await this.outcomeTracker?.record({
         skill: this._activeSkill || 'none',
         specialization: this._activeSpecialization || 'general',
         taskType,
@@ -591,10 +656,10 @@ export class AgentSession {
         errorMessage: error.message,
         taskSummary: task.substring(0, 200),
       });
-      await this.outcomeTracker.flush();
+      await this.outcomeTracker?.flush();
 
       // Learn from the failure
-      await this.promptEvolution.learn({
+      await this.promptEvolution?.learn({
         skill: this._activeSkill,
         specialization: this._activeSpecialization,
         taskType,
@@ -640,7 +705,7 @@ export class AgentSession {
       this.agent.injectSystemMessage(completionDirective);
     }
 
-    const evolutionGuidance = this.promptEvolution.analyze({
+    const evolutionGuidance = this.promptEvolution?.analyze({
       skill: this._activeSkill || 'none',
       specialization: this._activeSpecialization || 'general',
       taskType,

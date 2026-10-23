@@ -4,7 +4,10 @@
  */
 
 import chalk from '../utils/chalk-compat.js';
-import { A2AAgent, A2AClient } from '../protocols/a2a.js';
+
+// Lazy-load the A2A protocol (http server/client) only when a tool actually executes.
+let a2aModulePromise = null;
+const loadA2A = () => (a2aModulePromise ||= import('../protocols/a2a.js'));
 
 // Store active A2A server instance
 let a2aServer = null;
@@ -53,6 +56,7 @@ export function createA2ATools(_options = {}) {
           };
         }
 
+        const { A2AAgent } = await loadA2A();
         a2aServer = new A2AAgent({
           agentCard: {
             url: url || `http://localhost:${port}`,
@@ -128,6 +132,7 @@ export function createA2ATools(_options = {}) {
     },
     async execute({ url }) {
       try {
+        const { A2AClient } = await loadA2A();
         const client = new A2AClient(url);
         const agentCard = await client.discover();
         
@@ -180,6 +185,7 @@ export function createA2ATools(_options = {}) {
     },
     async execute({ url, taskId, message, token }) {
       try {
+        const { A2AClient } = await loadA2A();
         const client = new A2AClient(url, { token });
         const result = await client.sendTask(taskId, {
           message: {
@@ -218,6 +224,7 @@ export function createA2ATools(_options = {}) {
     },
     async execute({ url, taskId }) {
       try {
+        const { A2AClient } = await loadA2A();
         const client = new A2AClient(url);
         const result = await client.getTaskStatus(taskId);
 
@@ -256,6 +263,7 @@ export function createA2ATools(_options = {}) {
       try {
         if (url) {
           // Remote tasks
+          const { A2AClient } = await loadA2A();
           const client = new A2AClient(url);
           const result = await client.listTasks({ state, limit });
           return result;
@@ -301,6 +309,7 @@ export function createA2ATools(_options = {}) {
     },
     async execute({ url, taskId }) {
       try {
+        const { A2AClient } = await loadA2A();
         const client = new A2AClient(url);
         const result = await client.cancelTask(taskId);
 

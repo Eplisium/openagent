@@ -36,6 +36,8 @@ export class Agent {
       lastPromptTokens: 0,
       lastCompletionTokens: 0,
       lastTotalTokens: 0,
+      lastCachedTokens: 0,
+      totalCachedTokens: 0,
     };
     this.maxIterations = normalizeOptionalLimit(options.maxIterations, CONFIG.AGENT_MAX_ITERATIONS);
     this.maxRuntimeMs = normalizeOptionalLimit(options.maxRuntimeMs, CONFIG.AGENT_MAX_RUNTIME_MS);
@@ -510,35 +512,18 @@ When done, provide a clear summary: what changed, why, what was verified, and an
   }
 
   /**
-   * Get relevant tool definitions for the current request.
-   * Sends only core + recently-used tool categories to reduce prompt token overhead.
-   * First iteration sends all tools; subsequent iterations use category filtering.
+   * Get tool definitions for the current request.
+   *
+   * Cache-stable strategy: the tool list must not vary between iterations, or the
+   * provider prompt cache (system prompt + tools prefix) is invalidated. We send
+   * core tools (sorted) + a `tool_search` meta-tool + session-activated tools
+   * appended in activation order. Small registries (< threshold) send everything.
    */
   getRelevantToolDefinitions() {
-    // First iteration: send all tools (model needs to see the full toolkit)
-    if (this.iterationCount <= 1) {
-      return this.tools.getToolDefinitions();
+    if (typeof this.tools.getSessionToolDefinitions === 'function') {
+      return this.tools.getSessionToolDefinitions();
     }
-
-    // Track which categories were used in the last 3 iterations
-    const recentCategories = new Set();
-    const recentHistory = this.history.slice(-3);
-    for (const entry of recentHistory) {
-      for (const toolName of entry.toolCalls || []) {
-        const category = this.tools.getToolCategory(toolName);
-        recentCategories.add(category);
-      }
-    }
-
-    // If no recent history, send all tools
-    if (recentCategories.size === 0) {
-      return this.tools.getToolDefinitions();
-    }
-
-    // Always include 'general' category so models can request unexpected tools
-    recentCategories.add('general');
-    
-    return this.tools.getToolDefinitionsForCategories(recentCategories);
+    return this.tools.getToolDefinitions();
   }
 
   recordToolRound(toolCalls) {
@@ -690,6 +675,9 @@ When done, provide a clear summary: what changed, why, what was verified, and an
     this.contextStats.lastPromptTokens = usage.prompt_tokens || 0;
     this.contextStats.lastCompletionTokens = usage.completion_tokens || 0;
     this.contextStats.lastTotalTokens = usage.total_tokens || 0;
+    const cachedTokens = OpenRouterClient.getCachedTokens(usage);
+    this.contextStats.lastCachedTokens = cachedTokens;
+    this.contextStats.totalCachedTokens = (this.contextStats.totalCachedTokens || 0) + cachedTokens;
 
     // Calibration: learn actual/estimated ratio from API-reported prompt_tokens
     if (usage.prompt_tokens && usage.prompt_tokens > 0) {
@@ -993,88 +981,6 @@ Use list_directory for deeper exploration of specific directories.`;
       if (this.shouldEmitVerboseLogs()) {
         logger.debug('Project structure discovery skipped', { error: err.message });
       }
-    }
-  }
-
-  /**
-   * Determine if a task is complex enough to warrant planning
-   */
-  isComplexTask(userInput) {
-    if (!userInput || typeof userInput !== 'string') return false;
-    const input = userInput.toLowerCase();
-    if (input.length <= 50) return false;
-    const complexityWords = ['implement', 'create', 'fix', 'build', 'refactor', 'add', 'design', 'migrate', 'integrate', 'optimize', 'rewrite', 'setup', 'configure', 'debug', 'resolve', 'develop', 'construct', 'modify', 'overhaul', 'restructure'];
-    return complexityWords.some(word => input.includes(word));
-  }
-
-  /**
-   * Plan the execution for complex tasks using a planning LLM call
-   */
-  async plan(userInput, messages) {
-    const planningPrompt = `Analyze this task and create an execution plan. Return ONLY valid JSON array.
-Each element: {"step": 1, "action": "description", "tool": "tool_name", "confidence": 0.9}
-Do not include any text outside the JSON. Keep the plan concise (3-7 steps).
-Task: ${userInput}`;
-
-    try {
-      const result = await this.client.chat(
-        [...messages, { role: 'user', content: planningPrompt }],
-        {
-          model: this.model,
-          temperature: 0.2,
-          max_tokens: 2048,
-        }
-      );
-
-      this.updateUsageStats(result.usage);
-
-      if (!result.content) return null;
-
-      // Parse JSON from response - handle markdown code blocks
-      let jsonStr = result.content.trim();
-      const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (codeBlockMatch) {
-        jsonStr = codeBlockMatch[1].trim();
-      }
-
-      // Ensure it looks like a JSON array
-      if (!jsonStr.startsWith('[')) {
-        const arrayStart = jsonStr.indexOf('[');
-        const arrayEnd = jsonStr.lastIndexOf(']');
-        if (arrayStart >= 0 && arrayEnd > arrayStart) {
-          jsonStr = jsonStr.substring(arrayStart, arrayEnd + 1);
-        } else {
-          return null;
-        }
-      }
-
-      let plan;
-      try {
-        plan = JSON.parse(jsonStr);
-      } catch (e) {
-        logger.warn('Failed to parse plan JSON:', e.message);
-        return null;
-      }
-
-      if (!Array.isArray(plan) || plan.length === 0) return null;
-
-      const planSummary = plan
-        .map(p => `  ${p.step}. [${p.tool || 'general'}] ${p.action} (confidence: ${p.confidence || 'N/A'})`)
-        .join('\n');
-
-      const planMessage = `[System] Execution plan generated:\n${planSummary}\n\nExecute this plan step by step. Adapt if steps don't apply.`;
-
-      if (this.shouldEmitVerboseLogs()) {
-        logger.debug('Plan generated', { steps: plan.length });
-      }
-
-      return planMessage;
-    } catch (error) {
-      // Planning failure is non-fatal - proceed without plan
-      if (this.shouldEmitVerboseLogs()) {
-        logger.debug('Planning failed, proceeding without plan', { error: error.message });
-      }
-      return null;
     }
   }
 
@@ -2900,6 +2806,9 @@ Task: ${userInput}`;
       estimatedTokens: contextStats.usedTokens,
       contextUsage: `${contextStats.percent}%`,
       contextCompactions: contextStats.compactions,
+      lastCachedTokens: this.contextStats.lastCachedTokens || 0,
+      totalCachedTokens: this.contextStats.totalCachedTokens || 0,
+      activatedTools: Array.isArray(this.tools.activatedTools) ? [...this.tools.activatedTools] : [],
     };
   }
 
@@ -2938,6 +2847,10 @@ Task: ${userInput}`;
     this.contextStats.lastPromptTokens = 0;
     this.contextStats.lastCompletionTokens = 0;
     this.contextStats.lastTotalTokens = 0;
+    this.contextStats.lastCachedTokens = 0;
+    this.contextStats.totalCachedTokens = 0;
+    // New conversation = new cache prefix; drop session tool activations
+    this.tools.resetActivatedTools?.();
   }
 
   /**

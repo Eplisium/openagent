@@ -103,6 +103,8 @@ export const CONFIG = {
   // Performance
   MIN_REQUEST_INTERVAL_MS: parseInt(process.env.MIN_REQUEST_INTERVAL_MS, 10) || 50, // Reduced from 100ms
   CACHE_TTL_MS: parseInt(process.env.CACHE_TTL_MS, 10) || 10 * 60 * 1000, // 10 minutes (increased — cache hits save full API roundtrip)
+  // Provider prompt caching: adds Anthropic cache_control breakpoints (other providers cache stable prefixes automatically)
+  PROMPT_CACHING_ENABLED: process.env.PROMPT_CACHING_ENABLED !== 'false',
   
   // Logging
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',

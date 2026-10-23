@@ -15,33 +15,73 @@
 import TurndownService from 'turndown';
 import { tables } from 'turndown-plugin-gfm';
 
-// Lazy-loaded heavy dependencies (loaded on first use)
+// Lazy-loaded heavy dependencies, split so each path only pays for what it uses:
+// - HTML extraction loads Readability + linkedom (lightweight DOM, ~5x faster than jsdom)
+// - PDF extraction loads pdf-parse
 let Readability = null;
-let JSDOM = null;
-let pdfParse = null;
-let _depsLoaded = false;
+let parseHTML = null;
+let _htmlDepsPromise = null;
 
-async function ensureDeps() {
-  if (_depsLoaded) return;
-  try {
-    const readabilityModule = await import('@mozilla/readability');
-    Readability = readabilityModule.Readability;
-  } catch {
-    // Fallback: will use regex extraction only
+let PDFParse = null;
+let _pdfDepsPromise = null;
+
+function ensureHtmlDeps() {
+  if (!_htmlDepsPromise) {
+    _htmlDepsPromise = (async () => {
+      try {
+        const [readabilityModule, linkedomModule] = await Promise.all([
+          import('@mozilla/readability'),
+          import('linkedom'),
+        ]);
+        Readability = readabilityModule.Readability;
+        parseHTML = linkedomModule.parseHTML;
+      } catch {
+        // Fallback: regex extraction only
+        Readability = null;
+        parseHTML = null;
+      }
+    })();
   }
-  try {
-    const jsdomModule = await import('jsdom');
-    JSDOM = jsdomModule.JSDOM;
-  } catch {
-    // Fallback: Readability won't work without JSDOM
+  return _htmlDepsPromise;
+}
+
+function ensurePdfDeps() {
+  if (!_pdfDepsPromise) {
+    _pdfDepsPromise = (async () => {
+      try {
+        const pdfModule = await import('pdf-parse');
+        PDFParse = pdfModule.PDFParse || pdfModule.default?.PDFParse || null;
+      } catch {
+        // PDF extraction unavailable
+        PDFParse = null;
+      }
+    })();
   }
+  return _pdfDepsPromise;
+}
+
+/**
+ * Make relative links resolvable by Readability. linkedom has no `url` option, so
+ * inject a <base href> (unless the page already declares one).
+ */
+function applyBaseUrl(document, url) {
+  if (!url || !document) return;
   try {
-    const pdfModule = await import('pdf-parse');
-    pdfParse = pdfModule.default || pdfModule;
+    const absolute = new URL(url).href;
+    if (document.querySelector('base[href]')) return;
+    let head = document.head;
+    if (!head) {
+      head = document.createElement('head');
+      const root = document.documentElement;
+      if (!root) return;
+      root.insertBefore(head, root.firstChild);
+    }
+    const base = document.createElement('base');
+    base.setAttribute('href', absolute);
+    head.insertBefore(base, head.firstChild);
   } catch {
-    // PDF extraction unavailable
+    // Invalid URL — leave links relative
   }
-  _depsLoaded = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,13 +185,13 @@ function precleanHtml(html) {
  * Returns { title, content (HTML), textContent, author, siteName, publishedDate } or null.
  */
 async function extractWithReadability(html, url) {
-  await ensureDeps();
-  if (!Readability || !JSDOM) return null;
+  await ensureHtmlDeps();
+  if (!Readability || !parseHTML) return null;
 
   try {
     const cleaned = precleanHtml(html);
-    const dom = new JSDOM(cleaned, { url: url || 'https://example.com' });
-    const doc = dom.window.document;
+    const { document: doc } = parseHTML(cleaned);
+    applyBaseUrl(doc, url);
 
     const reader = new Readability(doc, {
       charThreshold: 200,
@@ -184,7 +224,7 @@ async function extractWithReadability(html, url) {
 
 /**
  * Fallback content extraction using regex patterns.
- * Less accurate than Readability but works without JSDOM.
+ * Less accurate than Readability but needs no DOM implementation.
  */
 function extractWithRegex(html) {
   let content = precleanHtml(html);
@@ -339,18 +379,24 @@ export function extractMetadata(html) {
  * Returns { text, pages, info } or null on failure.
  */
 export async function extractPdfContent(buffer) {
-  await ensureDeps();
-  if (!pdfParse) {
+  await ensurePdfDeps();
+  if (!PDFParse) {
     return { error: 'PDF extraction unavailable. Install pdf-parse: npm install pdf-parse' };
   }
 
+  let parser = null;
   try {
-    const data = await pdfParse(buffer, {
-      // Only parse first 50 pages to avoid huge PDFs
-      max: 50,
-    });
+    parser = new PDFParse({ data: new Uint8Array(buffer) });
+    // Only parse first 50 pages to avoid huge PDFs
+    const textResult = await parser.getText({ first: 50 });
+    let infoResult = null;
+    try {
+      infoResult = await parser.getInfo();
+    } catch {
+      // Metadata is optional
+    }
 
-    let text = data.text || '';
+    let text = textResult.text || '';
 
     // Clean up common PDF extraction artifacts
     text = text
@@ -362,12 +408,20 @@ export async function extractPdfContent(buffer) {
 
     return {
       text,
-      pages: data.numpages || 0,
-      info: data.info || {},
-      metadata: data.metadata || null,
+      pages: textResult.total || infoResult?.total || 0,
+      info: infoResult?.info || {},
+      metadata: infoResult?.metadata || null,
     };
   } catch (error) {
     return { error: `PDF extraction failed: ${error.message}` };
+  } finally {
+    if (parser) {
+      try {
+        await parser.destroy();
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
   }
 }
 

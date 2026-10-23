@@ -93,9 +93,13 @@ export class OpenRouterClient {
     this.totalInputTokens = 0;
     this.totalOutputTokens = 0;
     this.totalCachedTokens = 0;
+    this.totalCacheWriteTokens = 0;
     this.totalUpstreamCost = 0;
     this._hasActualCost = false;
     this.requestHistory = [];
+
+    // Provider prompt caching (Anthropic cache_control breakpoints)
+    this.promptCachingEnabled = options.promptCaching ?? (CONFIG.PROMPT_CACHING_ENABLED !== false);
     
     // Response cache for identical requests (content-hashed keys) — LRU eviction
     this.cache = new Map();
@@ -1273,6 +1277,10 @@ export class OpenRouterClient {
       presence_penalty: presence_penalty ?? CONFIG.DEFAULT_PARAMS.presence_penalty,
     };
     
+    if (this.promptCachingEnabled && OpenRouterClient.supportsCacheControl(payload.model)) {
+      payload.messages = OpenRouterClient.applyCacheControl(payload.messages);
+    }
+    
     if (reasoning_effort) payload.reasoning_effort = reasoning_effort;
     if (tools || tool_choice) {
       // Detect provider once and reuse for both tools and tool_choice
@@ -1305,8 +1313,137 @@ export class OpenRouterClient {
     return payload;
   }
   
+  // ═══════════════════════════════════════════════════════════════
+  // 🧊 Prompt Caching
+  // ═══════════════════════════════════════════════════════════════
+
+  /** Anthropic allows at most 4 cache_control breakpoints per request. */
+  static MAX_CACHE_BREAKPOINTS = 4;
+
   /**
-   * Normalize messages to array format
+   * Whether the model needs explicit cache_control breakpoints.
+   * OpenAI, Gemini, DeepSeek, Grok etc. cache stable prefixes automatically.
+   * @param {string} model
+   * @returns {boolean}
+   */
+  static supportsCacheControl(model) {
+    return typeof model === 'string' && model.toLowerCase().startsWith('anthropic/');
+  }
+
+  /**
+   * Count cache_control markers already present in a message's content parts.
+   * @private
+   */
+  static _countBreakpoints(message) {
+    if (!message || !Array.isArray(message.content)) return 0;
+    return message.content.reduce((n, part) => n + (part && typeof part === 'object' && part.cache_control ? 1 : 0), 0);
+  }
+
+  /**
+   * Return a copy of `message` with cache_control on its last content part,
+   * or null if the message cannot carry a breakpoint (empty / non-text content).
+   * @private
+   */
+  static _withCacheControl(message) {
+    const marker = { type: 'ephemeral' };
+    const { content } = message;
+    if (typeof content === 'string') {
+      if (content.length === 0) return null;
+      return { ...message, content: [{ type: 'text', text: content, cache_control: marker }] };
+    }
+    if (Array.isArray(content) && content.length > 0) {
+      // Prefer the last non-empty text part; fall back to the last part
+      let idx = -1;
+      for (let i = content.length - 1; i >= 0; i--) {
+        const part = content[i];
+        if (part && part.type === 'text' && typeof part.text === 'string' && part.text.length > 0) { idx = i; break; }
+      }
+      if (idx === -1) idx = content.length - 1;
+      const part = content[idx];
+      if (!part || typeof part !== 'object') return null;
+      if (part.cache_control) return message;
+      const parts = content.slice();
+      parts[idx] = { ...part, cache_control: marker };
+      return { ...message, content: parts };
+    }
+    return null;
+  }
+
+  /**
+   * Inject Anthropic cache_control breakpoints without mutating the input:
+   * - the system message (caches tools + system prompt prefix)
+   * - the last 1-2 eligible conversation messages (caches growing history)
+   * Never exceeds MAX_CACHE_BREAKPOINTS including any pre-existing markers.
+   *
+   * @param {Array<Object>} messages
+   * @param {Object} [options]
+   * @param {number} [options.historyBreakpoints=2]
+   * @returns {Array<Object>} New messages array
+   */
+  static applyCacheControl(messages, options = {}) {
+    if (!Array.isArray(messages) || messages.length === 0) return messages;
+    const historyBreakpoints = Number.isInteger(options.historyBreakpoints) ? options.historyBreakpoints : 2;
+
+    const out = messages.slice();
+    let budget = OpenRouterClient.MAX_CACHE_BREAKPOINTS -
+      out.reduce((n, m) => n + OpenRouterClient._countBreakpoints(m), 0);
+    if (budget <= 0) return out;
+
+    // 1) System message (first system message — it is the stable prefix)
+    const sysIdx = out.findIndex(m => m && m.role === 'system');
+    if (sysIdx >= 0 && OpenRouterClient._countBreakpoints(out[sysIdx]) === 0) {
+      const marked = OpenRouterClient._withCacheControl(out[sysIdx]);
+      if (marked) { out[sysIdx] = marked; budget--; }
+    }
+
+    // 2) Last N eligible non-system messages, walking backwards
+    let placed = 0;
+    for (let i = out.length - 1; i >= 0 && placed < historyBreakpoints && budget > 0; i--) {
+      const msg = out[i];
+      if (!msg || i === sysIdx || msg.role === 'system') continue;
+      if (!['user', 'assistant', 'tool'].includes(msg.role)) continue;
+      if (OpenRouterClient._countBreakpoints(msg) > 0) { placed++; continue; }
+      const marked = OpenRouterClient._withCacheControl(msg);
+      if (!marked) continue;
+      out[i] = marked;
+      placed++;
+      budget--;
+    }
+    return out;
+  }
+
+  /**
+   * Extract cache-read token count from a usage object across provider shapes.
+   * @param {Object} usage
+   * @returns {number}
+   */
+  static getCachedTokens(usage) {
+    if (!usage || typeof usage !== 'object') return 0;
+    const value = usage.prompt_tokens_details?.cached_tokens
+      ?? usage.cache_read_input_tokens
+      ?? usage.prompt_tokens_details?.cache_read_input_tokens
+      ?? 0;
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  /**
+   * Extract cache-write token count from a usage object across provider shapes.
+   * @param {Object} usage
+   * @returns {number}
+   */
+  static getCacheWriteTokens(usage) {
+    if (!usage || typeof usage !== 'object') return 0;
+    const value = usage.prompt_tokens_details?.cache_write_tokens
+      ?? usage.cache_creation_input_tokens
+      ?? 0;
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  /**
+   * Normalize messages to array format.
+   * Content may be a string or an array of content parts
+   * ({type:'text'|'image_url', ...}); both are passed through unchanged.
+   * Bare strings inside a content array are converted to text parts.
    */
   normalizeMessages(messages) {
     if (typeof messages === 'string') {
@@ -1319,10 +1456,19 @@ export class OpenRouterClient {
     // This avoids O(n) .map() on every request for the common case
     let needsMapping = false;
     for (let i = 0; i < messages.length; i++) {
-      if (typeof messages[i] === 'string') { needsMapping = true; break; }
+      const m = messages[i];
+      if (typeof m === 'string' || (Array.isArray(m?.content) && m.content.some(p => typeof p === 'string'))) {
+        needsMapping = true; break;
+      }
     }
     if (!needsMapping) return messages;
-    return messages.map(m => typeof m === 'string' ? { role: 'user', content: m } : m);
+    return messages.map(m => {
+      if (typeof m === 'string') return { role: 'user', content: m };
+      if (Array.isArray(m?.content) && m.content.some(p => typeof p === 'string')) {
+        return { ...m, content: m.content.map(p => (typeof p === 'string' ? { type: 'text', text: p } : p)) };
+      }
+      return m;
+    });
   }
   
   // ═══════════════════════════════════════════════════════════════
@@ -1423,6 +1569,7 @@ export class OpenRouterClient {
       finishReason: choice?.finish_reason,
       model: data.model,
       usage: data.usage,
+      cachedTokens: OpenRouterClient.getCachedTokens(data.usage),
       duration,
       created: data.created,
       systemFingerprint: data.system_fingerprint,
@@ -1437,6 +1584,7 @@ export class OpenRouterClient {
     
     let perRequestCost = 0;
     let cachedTokens = 0;
+    let cacheWriteTokens = 0;
     let upstreamCost = null;
     
     // Use actual usage data from API response
@@ -1448,8 +1596,10 @@ export class OpenRouterClient {
       this.totalOutputTokens += outputTokens;
       
       // Track cached tokens for transparency
-      cachedTokens = result.usage.prompt_tokens_details?.cached_tokens || 0;
+      cachedTokens = OpenRouterClient.getCachedTokens(result.usage);
       this.totalCachedTokens += cachedTokens;
+      cacheWriteTokens = OpenRouterClient.getCacheWriteTokens(result.usage);
+      this.totalCacheWriteTokens += cacheWriteTokens;
       
       // Track upstream cost (what the provider actually charged)
       if (result.usage.cost_details?.upstream_inference_cost != null) {
@@ -1480,6 +1630,7 @@ export class OpenRouterClient {
       inputTokens: result.usage?.prompt_tokens || 0,
       outputTokens: result.usage?.completion_tokens || 0,
       cachedTokens,
+      cacheWriteTokens,
       upstreamCost,
       cost: perRequestCost,
     });
@@ -1559,6 +1710,8 @@ export class OpenRouterClient {
       totalOutputTokens: this.totalOutputTokens,
       totalTokens,
       totalCachedTokens: this.totalCachedTokens,
+      totalCacheWriteTokens: this.totalCacheWriteTokens,
+      promptCachingEnabled: this.promptCachingEnabled,
       totalUpstreamCost: this.totalUpstreamCost,
       hasActualCost: this._hasActualCost,
       lastRequestCost: lastRequest?.cost || 0,
@@ -1592,6 +1745,7 @@ export class OpenRouterClient {
     this.totalInputTokens = 0;
     this.totalOutputTokens = 0;
     this.totalCachedTokens = 0;
+    this.totalCacheWriteTokens = 0;
     this.totalUpstreamCost = 0;
     this._hasActualCost = false;
     this.budgetUsed = 0;

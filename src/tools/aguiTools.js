@@ -4,7 +4,10 @@
  */
 
 import chalk from '../utils/chalk-compat.js';
-import { AGUIServer, EventType } from '../protocols/agui.js';
+
+// Lazy-load the AG-UI protocol (http/SSE server) only when a tool actually executes.
+let aguiModulePromise = null;
+const loadAGUI = () => (aguiModulePromise ||= import('../protocols/agui.js'));
 
 // Store active AG-UI server
 let aguiServer = null;
@@ -41,6 +44,7 @@ export function createAGUITools(_options = {}) {
           };
         }
 
+        const { AGUIServer } = await loadAGUI();
         aguiServer = new AGUIServer();
         await aguiServer.start(port);
         
@@ -121,7 +125,8 @@ export function createAGUITools(_options = {}) {
           return { success: false, error: 'AG-UI server not running' };
         }
 
-        aguiServer.emit(new (await import('../protocols/agui.js')).AGUIEvent(type, data), channel);
+        const { AGUIEvent } = await loadAGUI();
+        aguiServer.emit(new AGUIEvent(type, data), channel);
 
         return {
           success: true,
@@ -266,7 +271,7 @@ export function createAGUITools(_options = {}) {
 
         return {
           success: true,
-          type: EventType.RUN_STARTED,
+          type: (await loadAGUI()).EventType.RUN_STARTED,
           channel,
           message: 'Run started event emitted',
         };
@@ -310,7 +315,7 @@ export function createAGUITools(_options = {}) {
 
         return {
           success: true,
-          type: EventType.RUN_ENDED,
+          type: (await loadAGUI()).EventType.RUN_ENDED,
           channel,
           message: 'Run ended event emitted',
         };
@@ -355,7 +360,7 @@ export function createAGUITools(_options = {}) {
 
         return {
           success: true,
-          type: EventType.RUN_ERROR,
+          type: (await loadAGUI()).EventType.RUN_ERROR,
           channel,
           message: 'Run error event emitted',
         };
