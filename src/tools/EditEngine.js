@@ -16,6 +16,7 @@
  */
 
 import difflib from '../utils/difflib.js';
+import { capture as checkpointCapture } from '../agent/TurnCheckpointer.js';
 // Platform not needed in this module
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -777,7 +778,8 @@ export async function applyMultiFileEdits(fileEdits, readFileFn, writeFileFn) {
         newSize: content.length,
       });
 
-      // Write the modified content
+      // Write the modified content (snapshot first for /rewind)
+      await checkpointCapture(fileEdit.path);
       await writeFileFn(fileEdit.path, content);
     }
 

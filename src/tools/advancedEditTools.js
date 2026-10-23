@@ -11,7 +11,9 @@
 
 import fs from '../utils/fs-compat.js';
 import path from 'path';
+import os from 'os';
 import { createPathContext } from '../paths.js';
+import { capture as checkpointCapture } from '../agent/TurnCheckpointer.js';
 // Platform not needed in this module
 import {
   parsePatch,
@@ -34,7 +36,7 @@ export function createAdvancedEditTools(options = {}) {
     const baseDir = pathContext.getBaseDir();
     const workspaceDir = pathContext.getWorkspaceDir();
     const canonicalPath = path.resolve(resolvedPath);
-    const allowedDirs = [baseDir, workspaceDir, pathContext.getOpenAgentDir?.(), require('os').homedir(), require('os').tmpdir()].filter(Boolean).map(d => path.resolve(d));
+    const allowedDirs = [baseDir, workspaceDir, pathContext.getOpenAgentDir?.(), os.homedir(), os.tmpdir()].filter(Boolean).map(d => path.resolve(d));
 
     const isAllowed = allowFullAccess || allowedDirs.some(allowed => {
       const relative = path.relative(allowed, canonicalPath);
@@ -121,6 +123,7 @@ Best for:
             await fs.ensureDir(path.dirname(resolvedPath));
             // Extract content from hunks
             const newContent = patchOp.hunks.flatMap(h => h.lines.filter(l => l.type === 'add').map(l => l.content)).join('\n');
+            await checkpointCapture(resolvedPath);
             await fs.writeFile(resolvedPath, newContent, 'utf-8');
             results.push({ file: patchOp.file, operation: 'add', success: true });
             totalApplied++;
@@ -137,6 +140,7 @@ Best for:
               results.push({ file: patchOp.file, operation: 'delete', success: true, dryRun: true });
               continue;
             }
+            await checkpointCapture(resolvedPath);
             await fs.remove(resolvedPath);
             results.push({ file: patchOp.file, operation: 'delete', success: true });
             totalApplied++;
@@ -179,6 +183,7 @@ Best for:
             continue;
           }
 
+          await checkpointCapture(resolvedPath);
           await fs.writeFile(resolvedPath, patchResult.content, 'utf-8');
           results.push({
             file: patchOp.file,
@@ -349,6 +354,7 @@ Best for:
           }
 
           if (allSucceeded) {
+            await checkpointCapture(resolvedPath);
             await fs.writeFile(resolvedPath, content, 'utf-8');
             totalApplied++;
           }
@@ -562,6 +568,7 @@ Best for:
         // Write all files
         for (const [, fileInfo] of fileContents) {
           if (fileInfo.current) {
+            await checkpointCapture(fileInfo.resolvedPath);
             await fs.writeFile(fileInfo.resolvedPath, fileInfo.current, 'utf-8');
           }
         }

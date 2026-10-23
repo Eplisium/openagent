@@ -14,6 +14,7 @@ import { CONFIG } from '../config.js';
 import { Platform } from '../utils/platform.js';
 import { getCachedFile } from './fileCache.js';
 import { fuzzyFind, detectIndentation, reindentBlock } from './EditEngine.js';
+import { capture as checkpointCapture } from '../agent/TurnCheckpointer.js';
 
 const PATH_PREFIX_NOTE = 'Supports absolute paths plus the special prefixes project:, workdir:, workspace:, and openagent:.';
 
@@ -264,6 +265,7 @@ export function createFileTools(options = {}) {
         await fs.ensureDir(path.dirname(resolvedPath));
 
         const existed = await fs.pathExists(resolvedPath);
+        await checkpointCapture(resolvedPath);
         await fs.writeFile(resolvedPath, content, 'utf-8');
 
         const stat = await fs.stat(resolvedPath);
@@ -365,6 +367,7 @@ export function createFileTools(options = {}) {
             return { success: false, error: `No backup file found: ${bakPath}` };
           }
           const backupContent = await fs.readFile(bakPath, 'utf-8');
+          await checkpointCapture(resolvedPath);
           await fs.writeFile(resolvedPath, backupContent, 'utf-8');
           await fs.remove(bakPath);
           return {
@@ -520,6 +523,7 @@ export function createFileTools(options = {}) {
           }
 
           if (shouldBackup) await fs.writeFile(bakPath, originalContent, 'utf-8');
+          await checkpointCapture(resolvedPath);
           await fs.writeFile(resolvedPath, content, 'utf-8');
 
           return {
@@ -581,6 +585,7 @@ export function createFileTools(options = {}) {
 
           // Create backup before writing (only when undo mode active)
           if (shouldBackup) await fs.writeFile(bakPath, originalContent, 'utf-8');
+          await checkpointCapture(resolvedPath);
           await fs.writeFile(resolvedPath, content, 'utf-8');
 
           return {
@@ -622,6 +627,7 @@ export function createFileTools(options = {}) {
 
           // Create backup before writing (only when undo mode active)
           if (shouldBackup) await fs.writeFile(bakPath, originalContent, 'utf-8');
+          await checkpointCapture(resolvedPath);
           await fs.writeFile(resolvedPath, content, 'utf-8');
 
           return {
@@ -1148,6 +1154,7 @@ export function createFileTools(options = {}) {
           };
         }
 
+        await checkpointCapture(resolvedPath);
         await fs.remove(resolvedPath);
 
         return {
@@ -1200,7 +1207,20 @@ export function createFileTools(options = {}) {
         }
 
         await fs.ensureDir(path.dirname(resolvedDestination));
-        await fs.move(resolvedSource, resolvedDestination, { overwrite: true });
+        // Snapshot both ends: restoring recreates the source and removes/restores the destination.
+        await checkpointCapture(resolvedSource);
+        await checkpointCapture(resolvedDestination);
+        // fs-compat has no fs-extra style move(); emulate move with overwrite.
+        if (await fs.pathExists(resolvedDestination)) {
+          await fs.remove(resolvedDestination);
+        }
+        try {
+          await fs.rename(resolvedSource, resolvedDestination);
+        } catch (renameError) {
+          if (renameError.code !== 'EXDEV') throw renameError;
+          await fs.copy(resolvedSource, resolvedDestination);
+          await fs.remove(resolvedSource);
+        }
 
         const stat = await fs.stat(resolvedDestination);
 
@@ -1631,6 +1651,7 @@ export function createFileTools(options = {}) {
             message: `Would replace ${matchCount} occurrence(s) in ${changes.length} line(s)`,
           };
         }
+        await checkpointCapture(resolvedPath);
         await fs.writeFile(resolvedPath, newContent, 'utf-8');
         return {
           success: true,
