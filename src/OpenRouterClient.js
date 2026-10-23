@@ -21,6 +21,9 @@ import { OpenRouterError, RateLimitError, AuthenticationError, AbortError, Strea
 import { parseXmlToolCalls, hasXmlToolCalls } from './tools/xmlToolParser.js';
 import { ToolFormatAdapter } from './tools/ToolFormatAdapter.js';
 import { Agent as UndiciAgent } from 'undici';
+import { resolveModel, getProvider, getApiKey, DEFAULT_PROVIDER_ID } from './providers/registry.js';
+import { buildProviderHeaders, chatPathFor } from './providers/models.js';
+import { toAnthropicRequest, fromAnthropicResponse, AnthropicStreamTranslator } from './providers/anthropicAdapter.js';
 
 // Shared HTTP connection pool for keep-alive reuse across all client instances
 export const httpAgent = new UndiciAgent({ keepAliveTimeout: 60000, connections: 6, connectTimeout: 5000 });
@@ -83,6 +86,16 @@ export class OpenRouterClient {
       ...CONFIG.HEADERS,
       ...options.headers,
     };
+
+    // Multi-provider routing (see docs/PROVIDERS.md).
+    // - options.baseURL (different from the OpenRouter default) pins every request to that
+    //   OpenAI-compatible endpoint (legacy behaviour, no per-model routing).
+    // - options.providerId pins every request to a registry provider (model ids sent unchanged).
+    // - otherwise each request is routed from its model id.
+    this._userHeaders = { ...(options.headers || {}) };
+    this._explicitApiKey = Boolean(options.apiKey);
+    this._pinnedEndpoint = Boolean(options.baseURL) && options.baseURL !== CONFIG.BASE_URL;
+    this.providerId = options.providerId || null;
     this.defaultModel = options.defaultModel || null;
     this.maxRetries = options.maxRetries || CONFIG.MAX_RETRIES;
     this.timeout = options.timeout || CONFIG.TIMEOUT_MS;
@@ -451,7 +464,7 @@ export class OpenRouterClient {
 
     try {
       const response = await this.executeWithRetry(
-        () => this.postJSON('/chat/completions', payload),
+        () => this.postChat(payload),
         this.maxRetries
       );
 
@@ -567,6 +580,8 @@ export class OpenRouterClient {
     const requestId = this.generateRequestId();
     const startTime = Date.now();
     const payload = this.buildPayload(messages, { ...streamOptions, stream: true });
+    const prepared = this.prepareRequest(payload);
+    const anthropicStream = prepared.route.kind === 'anthropic' ? new AnthropicStreamTranslator() : null;
     const connectTimeoutMs = CONFIG.STREAM_CONNECT_TIMEOUT_MS || 45000;
     const idleTimeoutMs = CONFIG.STREAM_IDLE_TIMEOUT_MS || 60000;
 
@@ -617,15 +632,10 @@ export class OpenRouterClient {
       this.lastRequestTime = Date.now();
 
       arm(connectTimeoutMs, 'STREAM_TIMEOUT', `No response from the model within ${Math.round(connectTimeoutMs / 1000)}s`);
-      const response = await fetch(`${this.baseURL}/chat/completions`, {
+      const response = await fetch(prepared.url, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json',
-          'Connection': 'keep-alive',
-          ...this.headers,
-        },
-        body: JSON.stringify(payload),
+        headers: prepared.headers,
+        body: JSON.stringify(prepared.body),
         signal: controller.signal,
         dispatcher: httpAgent,
       });
@@ -674,13 +684,26 @@ export class OpenRouterClient {
           return;
         }
 
-        let parsed;
+        let parsedRaw;
         try {
-          parsed = JSON.parse(data);
+          parsedRaw = JSON.parse(data);
         } catch {
           return; // malformed chunk
         }
 
+        if (!anthropicStream) {
+          handleChunk(parsedRaw);
+          return;
+        }
+        // Anthropic Messages SSE → OpenAI-style chunks
+        for (const translated of anthropicStream.push(parsedRaw)) {
+          if (finished) break;
+          if (translated.done) finishStream();
+          else handleChunk(translated);
+        }
+      };
+
+      const handleChunk = (parsed) => {
         if (parsed.error) {
           const code = Number(parsed.error.code);
           if (!ctx.produced && contentChunks.length === 0 && toolCallAccumulator.size === 0 && (code >= 500 || code === 408)) {
@@ -984,7 +1007,7 @@ export class OpenRouterClient {
     });
     
     const response = await this.executeWithRetry(
-      () => this.postJSON('/chat/completions', payload),
+      () => this.postChat(payload),
       options.retries || this.maxRetries
     );
     
@@ -1040,7 +1063,7 @@ export class OpenRouterClient {
       },
     });
     
-    const response = await this.postJSON('/chat/completions', payload);
+    const response = await this.postChat(payload);
     const content = response.choices?.[0]?.message?.content;
     
     try {
@@ -1138,8 +1161,199 @@ export class OpenRouterClient {
   // 🔧 HTTP Methods (native fetch)
   // ═══════════════════════════════════════════════════════════════
   
+  // ═══════════════════════════════════════════════════════════════
+  // 🔀 Multi-provider routing
+  // ═══════════════════════════════════════════════════════════════
+
+  /** resolveRoute() that never throws (used while building payloads). @private */
+  _safeRoute(model) {
+    try {
+      return this.resolveRoute(model);
+    } catch (_e) {
+      return null;
+    }
+  }
+
   /**
-   * POST JSON with timeout and error handling
+   * Provider id that would serve `model` (e.g. 'openrouter', 'ollama', 'anthropic').
+   * @param {string} [model]
+   * @returns {string|null}
+   */
+  getProviderForModel(model) {
+    return this._safeRoute(model)?.providerId || null;
+  }
+
+  /**
+   * Resolve which provider/endpoint serves a model id.
+   * @param {string} [model]
+   * @returns {{ providerId: string, provider: object|null, kind: string, model: string, originalModel: string,
+   *            baseURL: string, apiKey: string, isOpenRouter: boolean, local: boolean, explicit: boolean, configured: boolean }}
+   */
+  resolveRoute(model) {
+    const original = model || this.defaultModel || '';
+    if (this._pinnedEndpoint) {
+      return {
+        providerId: 'custom-endpoint', provider: null, kind: 'openai-compatible', model: original, originalModel: original,
+        baseURL: this.baseURL, apiKey: this.apiKey, isOpenRouter: true, local: false, explicit: false, configured: true,
+      };
+    }
+
+    let resolved;
+    if (this.providerId) {
+      const provider = getProvider(this.providerId);
+      if (!provider) {
+        throw new OpenRouterError(`Unknown provider "${this.providerId}"`, 'UNKNOWN_PROVIDER', { providerId: this.providerId });
+      }
+      resolved = { provider, model: original, originalModel: original, explicit: true, configured: true };
+    } else {
+      resolved = resolveModel(original);
+    }
+
+    const { provider } = resolved;
+    if (provider.id === DEFAULT_PROVIDER_ID) {
+      return {
+        providerId: DEFAULT_PROVIDER_ID, provider, kind: 'openai-compatible', model: original, originalModel: original,
+        baseURL: this.baseURL, apiKey: this.apiKey, isOpenRouter: true, local: false, explicit: false, configured: Boolean(this.apiKey),
+      };
+    }
+    const apiKey = getApiKey(provider);
+    return {
+      providerId: provider.id,
+      provider,
+      kind: provider.kind,
+      model: resolved.model,
+      originalModel: original,
+      baseURL: provider.baseURL,
+      apiKey,
+      isOpenRouter: false,
+      local: Boolean(provider.local),
+      explicit: Boolean(resolved.explicit),
+      configured: Boolean(provider.local || !provider.apiKeyEnv || apiKey),
+    };
+  }
+
+  /**
+   * Request headers for a resolved route. OpenRouter keeps its attribution headers;
+   * direct providers get only their own auth/provider headers plus caller-supplied headers.
+   */
+  getRouteHeaders(route, extra = {}) {
+    if (route.isOpenRouter) {
+      return {
+        'Authorization': `Bearer ${route.apiKey}`,
+        ...extra,
+        ...this.headers,
+      };
+    }
+    return buildProviderHeaders(route.provider, route.apiKey, { ...extra, ...this._userHeaders });
+  }
+
+  /**
+   * Turn a logical (OpenAI-style, original model id) payload into the provider wire request.
+   * @returns {{ route: object, url: string, headers: object, body: object }}
+   */
+  prepareRequest(payload) {
+    const route = this.resolveRoute(payload.model);
+    if (!route.configured && !route.isOpenRouter) {
+      const envName = route.provider?.apiKeyEnv;
+      throw new AuthenticationError(
+        `Provider "${route.providerId}" is not configured${envName ? ` — set ${envName}` : ''}`,
+        { error: { message: 'missing provider API key' }, providerId: route.providerId, apiKeyEnv: envName },
+      );
+    }
+    const headers = this.getRouteHeaders(route, { 'Content-Type': 'application/json', 'Connection': 'keep-alive' });
+    const url = `${route.baseURL}${route.isOpenRouter ? '/chat/completions' : chatPathFor(route.provider)}`;
+
+    if (route.kind === 'anthropic') {
+      return { route, url, headers, body: toAnthropicRequest({ ...payload, model: route.model }) };
+    }
+    if (route.isOpenRouter) {
+      return { route, url, headers, body: payload };
+    }
+    return { route, url, headers, body: OpenRouterClient.toDirectOpenAIBody(payload, route) };
+  }
+
+  /**
+   * Adapt a payload for a direct OpenAI-compatible provider: native model id,
+   * no OpenRouter-only fields, provider quirks (OpenAI reasoning models, usage in streams).
+   */
+  static toDirectOpenAIBody(payload, route) {
+    const {
+      plugins: _plugins, provider: _provider, transforms: _transforms, route: _route, models: _models,
+      ...body
+    } = payload;
+    body.model = route.model;
+    // Strip cache_control markers: only Anthropic understands them
+    if (Array.isArray(body.messages) && body.messages.some(m => OpenRouterClient._countBreakpoints(m) > 0)) {
+      body.messages = body.messages.map(m => (OpenRouterClient._countBreakpoints(m) > 0
+        ? { ...m, content: m.content.map(p => {
+          if (!p || typeof p !== 'object' || !p.cache_control) return p;
+          const { cache_control: _cc, ...rest } = p;
+          return rest;
+        }) }
+        : m));
+    }
+    // Zero penalties are defaults; several OpenAI-compatible servers reject the fields outright
+    if (!body.frequency_penalty) delete body.frequency_penalty;
+    if (!body.presence_penalty) delete body.presence_penalty;
+    if (route.providerId === 'openai') {
+      if (body.max_tokens != null) {
+        body.max_completion_tokens = body.max_tokens;
+        delete body.max_tokens;
+      }
+      if (/^(o\d|gpt-5)/i.test(route.model)) {
+        delete body.temperature;
+        delete body.top_p;
+        delete body.frequency_penalty;
+        delete body.presence_penalty;
+      }
+    }
+    if (body.stream && route.provider?.streamUsage) {
+      body.stream_options = { include_usage: true, ...(body.stream_options || {}) };
+    }
+    return body;
+  }
+
+  /**
+   * POST a chat completion to whichever provider serves payload.model and return
+   * an OpenAI-style chat completion object.
+   */
+  async postChat(payload, timeoutMs = this.timeout) {
+    const { route, url, headers, body } = this.prepareRequest(payload);
+    const data = await this._requestJSON(url, { method: 'POST', headers, body: JSON.stringify(body) }, timeoutMs, route.isOpenRouter);
+    return route.kind === 'anthropic' ? fromAnthropicResponse(data) : data;
+  }
+
+  /**
+   * Shared fetch → JSON helper with timeout, rate limiting and typed errors.
+   * @private
+   */
+  async _requestJSON(url, init, timeoutMs = this.timeout, trackRateLimit = false) {
+    const { controller, cleanup } = this.createController(timeoutMs);
+    try {
+      await this.waitForRateLimit();
+      this.lastRequestTime = Date.now();
+      const response = await fetch(url, { ...init, signal: controller.signal, dispatcher: httpAgent });
+      if (trackRateLimit) {
+        this.rateLimitRemaining = parseInt(response.headers.get('x-ratelimit-remaining')) || null;
+        this.rateLimitReset = parseInt(response.headers.get('x-ratelimit-reset')) || null;
+      }
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw this.handleHTTPError(response.status, errorData, response);
+      }
+      return await response.json();
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        throw new OpenRouterError('Request timeout', 'TIMEOUT');
+      }
+      throw error;
+    } finally {
+      cleanup();
+    }
+  }
+
+  /**
+   * POST JSON with timeout and error handling (OpenRouter / configured baseURL)
    */
   async postJSON(path, body, timeoutMs = this.timeout) {
     const { controller, cleanup } = this.createController(timeoutMs);
@@ -1277,14 +1491,21 @@ export class OpenRouterClient {
       presence_penalty: presence_penalty ?? CONFIG.DEFAULT_PARAMS.presence_penalty,
     };
     
-    if (this.promptCachingEnabled && OpenRouterClient.supportsCacheControl(payload.model)) {
+    // Direct (non-OpenRouter) routes always speak OpenAI-style tools on the wire;
+    // the Anthropic adapter converts them itself.
+    const resolvedRoute = this._safeRoute(payload.model);
+    const isDirect = Boolean(resolvedRoute && !resolvedRoute.isOpenRouter);
+    const wantsCacheControl = isDirect
+      ? resolvedRoute.kind === 'anthropic'
+      : OpenRouterClient.supportsCacheControl(payload.model);
+    if (this.promptCachingEnabled && wantsCacheControl) {
       payload.messages = OpenRouterClient.applyCacheControl(payload.messages);
     }
     
     if (reasoning_effort) payload.reasoning_effort = reasoning_effort;
     if (tools || tool_choice) {
       // Detect provider once and reuse for both tools and tool_choice
-      const detectedProvider = ToolFormatAdapter.detectProvider(model || this.defaultModel);
+      const detectedProvider = isDirect ? 'openai' : ToolFormatAdapter.detectProvider(model || this.defaultModel);
       if (tools) {
         payload.tools = ToolFormatAdapter.formatToolDefinitions(tools, detectedProvider);
       }

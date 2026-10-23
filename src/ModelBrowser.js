@@ -28,6 +28,62 @@ export class ModelBrowser {
     this.ownsClient = false;
     this.lastLoadSource = 'uninitialized';
     this.refreshPromise = null;
+    // Models from direct/local providers (ollama, lmstudio, openai, ...) — ids carry a routing prefix
+    this.directModels = [];
+  }
+
+  /**
+   * Fetch models from configured direct/local providers. Never throws; results are
+   * cached in memory by src/providers/models.js and not written to the disk cache.
+   */
+  async loadDirectModels(options = {}) {
+    try {
+      const { fetchDirectProviderModels } = await import('./providers/models.js');
+      const raw = await fetchDirectProviderModels(options);
+      this.directModels = raw.map(m => this.toDirectModel(m));
+    } catch (_e) {
+      this.directModels = [];
+    }
+    return this.directModels;
+  }
+
+  /**
+   * Map a provider /models entry onto the browser's model shape.
+   */
+  toDirectModel(m) {
+    const providerLabel = m.name && m.name.includes(':') ? m.name.split(':')[0].trim() : m.providerId;
+    return {
+      id: m.id,
+      name: m.name || m.id,
+      provider: providerLabel,
+      providerId: m.providerId,
+      local: Boolean(m.local),
+      contextLength: m.contextLength || 0,
+      maxOutput: 4096,
+      inputPrice: 0,
+      outputPrice: 0,
+      modality: 'text->text',
+      inputModalities: ['text'],
+      supportsTools: true,
+      supportsVision: false,
+      created: m.created,
+    };
+  }
+
+  /**
+   * Merge direct-provider models into this.models (replacing previously merged ones).
+   */
+  mergeDirectModels() {
+    if (!this.directModels.length) return this.models;
+    const directIds = new Set(this.directModels.map(m => m.id));
+    const base = this.models.filter(m => !m.providerId && !directIds.has(m.id));
+    this.models = [...base, ...this.directModels];
+    this.models.sort((a, b) => {
+      const providerCompare = String(a.provider).localeCompare(String(b.provider));
+      if (providerCompare !== 0) return providerCompare;
+      return String(a.name).localeCompare(String(b.name));
+    });
+    return this.models;
   }
 
   /**
@@ -48,7 +104,11 @@ export class ModelBrowser {
   async init() {
     await this.loadFavorites();
     await this.loadRecents();
+    const directPromise = this.loadDirectModels();
     await this.loadModels();
+    await directPromise;
+    this.mergeDirectModels();
+    if (this.models.length > 0 && this.lastLoadSource === 'empty') this.lastLoadSource = 'providers';
     this.loaded = true;
   }
 
@@ -125,6 +185,8 @@ export class ModelBrowser {
       models: this.models,
     });
 
+    // Background refreshes replace this.models; keep direct-provider models merged in
+    this.mergeDirectModels();
     this.lastLoadSource = 'api';
     return this.models;
   }

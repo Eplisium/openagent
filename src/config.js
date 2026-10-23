@@ -30,7 +30,11 @@ dotenv.config({ path: path.join(__dirname, '../.env') });
  */
 export const CONFIG = {
   // API Settings
-  BASE_URL: 'https://openrouter.ai/api/v1',
+  // OpenRouter endpoint (default provider). Other providers live in src/providers/registry.js;
+  // see docs/PROVIDERS.md for model-id routing (`ollama/llama3.2`, `anthropic-direct/claude-...`).
+  BASE_URL: (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/+$/, ''),
+  // Provider used for model ids without a recognised provider prefix
+  DEFAULT_PROVIDER: (process.env.OPENAGENT_DEFAULT_PROVIDER || 'openrouter').toLowerCase(),
   API_KEY: process.env.OPENROUTER_API_KEY || '',
 
   // Agent Identity
@@ -336,7 +340,7 @@ export default { CONFIG, PLUGINS, UI };
  */
 export function validateConfig(cfg = CONFIG) {
   const warnings = [];
-  if (!cfg.API_KEY) warnings.push('OPENROUTER_API_KEY is not set');
+  if (!cfg.API_KEY && (cfg.DEFAULT_PROVIDER || 'openrouter') === 'openrouter') warnings.push('OPENROUTER_API_KEY is not set');
   if (cfg.MAX_RETRIES < 0 || cfg.MAX_RETRIES > 10) warnings.push(`MAX_RETRIES (${cfg.MAX_RETRIES}) is outside recommended range 0-10`);
   if (cfg.TIMEOUT_MS < 5000) warnings.push(`TIMEOUT_MS (${cfg.TIMEOUT_MS}) is very low — requests may fail`);
   if (cfg.MAX_CONTEXT_TOKENS < 1000) warnings.push(`MAX_CONTEXT_TOKENS (${cfg.MAX_CONTEXT_TOKENS}) seems too low`);
