@@ -10,6 +10,8 @@
  * - Clearer error recovery instructions
  */
 
+import { loadMarkdownAgents, normalizeAgentId } from '../../commands/markdownLoader.js';
+
 const SUBAGENT_SPECIALIZATIONS = {
   coder: {
     name: '💻 Coder',
@@ -292,6 +294,72 @@ You are a SUBAGENT — complete your specific task and return results. Do not as
     maxIterations: 25,
   },
 };
+
+// ─── Markdown subagents (.openagent/agents, ~/.openagent/agents, .claude/agents) ───
+
+/**
+ * Claude-Code-style tool names → OpenAgent tool names. Unknown names pass through
+ * unchanged, so OpenAgent-native names (read_file, exec, ...) work directly.
+ */
+const TOOL_ALIASES = {
+  read: ['read_file', 'read_files', 'read_image'],
+  write: ['write_file'],
+  edit: ['edit_file', 'search_and_replace', 'preview_edit'],
+  multiedit: ['edit_file', 'search_and_replace'],
+  bash: ['exec', 'exec_background', 'process_status'],
+  grep: ['search_in_files'],
+  glob: ['find_files'],
+  ls: ['list_directory', 'file_tree'],
+  webfetch: ['fetch_url', 'read_webpage'],
+  websearch: ['web_search'],
+};
+
+/**
+ * Expand a markdown agent's `tools` list into concrete OpenAgent tool names.
+ * @param {string[]|null} tools - null means "all tools"
+ * @returns {string[]|null}
+ */
+export function resolveToolNames(tools) {
+  if (!Array.isArray(tools)) return null;
+  const out = new Set();
+  for (const raw of tools) {
+    const name = String(raw).trim();
+    if (!name) continue;
+    // Strip Claude-Code permission patterns like "Bash(git diff:*)".
+    const base = name.replace(/\(.*\)$/, '');
+    const alias = TOOL_ALIASES[base.toLowerCase()];
+    if (alias) alias.forEach((t) => out.add(t));
+    else out.add(base);
+  }
+  return [...out];
+}
+
+/**
+ * Built-in specializations merged with markdown subagents. Markdown definitions
+ * override built-ins with the same id. Cached by the loader (mtime-checked).
+ * @param {{cwd?: string, homeDir?: string}} [options]
+ * @returns {Record<string, object>}
+ */
+export function getAllSpecializations(options = {}) {
+  let markdown = {};
+  try {
+    markdown = loadMarkdownAgents(options);
+  } catch {
+    markdown = {};
+  }
+  return { ...SUBAGENT_SPECIALIZATIONS, ...markdown };
+}
+
+/**
+ * Look up a specialization by id (falls back to `general`).
+ * @param {string} id
+ * @param {{cwd?: string, homeDir?: string}} [options]
+ */
+export function getSpecialization(id, options = {}) {
+  const all = getAllSpecializations(options);
+  const key = normalizeAgentId(id || 'general');
+  return all[id] || all[key] || all.general;
+}
 
 export { SUBAGENT_SPECIALIZATIONS };
 export default SUBAGENT_SPECIALIZATIONS;
