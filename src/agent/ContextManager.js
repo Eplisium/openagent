@@ -191,6 +191,11 @@ export class ContextManager {
       logger.warn(triggerMessage, { estimatedTokens, messageCount: a.messages.length });
     }
 
+    // PreCompact hooks (wired by AgentSession) observe; they never block compaction.
+    if (typeof a.onPreCompact === 'function') {
+      try { await a.onPreCompact({ trigger: 'auto', estimatedTokens }); } catch { /* non-fatal */ }
+    }
+
     this._fallbackCompactContext(estimatedTokens);
   }
 

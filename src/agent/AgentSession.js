@@ -23,6 +23,7 @@ import { SessionHistory } from '../sessionHistory.js';
 
 import { SkillManager } from '../skills/SkillManager.js';
 import { HookManager } from '../hooks/HookManager.js';
+import { PermissionEngine, createExitPlanModeTool, normalizePermissionMode } from '../permissions/PermissionEngine.js';
 import { createMemoryTools } from '../tools/memoryTools.js';
 import { createSessionHistoryTools } from '../tools/sessionHistoryTools.js';
 import { createSkillTools } from '../tools/skillTools.js';
@@ -234,8 +235,30 @@ export class AgentSession {
     this.hookManager = new HookManager({
       workingDir: this.workingDir,
       openAgentDir: this.workspaceManager.openAgentDir,
+      sessionId: this.sessionId,
       verbose: options.verbose !== false,
     });
+
+    // Permission engine: modes + allow/deny/ask rules gate every tool call,
+    // including those made by subagents.
+    this.onApprovalRequest = typeof options.onApprovalRequest === 'function' ? options.onApprovalRequest : null;
+    this._permissionModeExplicit = Boolean(options.permissionMode);
+    this.permissionEngine = new PermissionEngine({
+      workingDir: this.workingDir,
+      allowedTools: options.allowedTools,
+      disallowedTools: options.disallowedTools,
+      onApprovalRequest: this.onApprovalRequest,
+      onNotification: (notice) => this.hookManager.runNotification(notice),
+      ...(options.permissionSettings || {}),
+    });
+    this.permissionEngine.setMode(options.permissionMode || this._defaultPermissionMode());
+    this.toolRegistry.register(createExitPlanModeTool(this.permissionEngine));
+    this.toolRegistry.setPermissionEngine(this.permissionEngine);
+    this.toolRegistry.setHookManager(this.hookManager);
+    this.subagentManager.setPermissionEngine(this.permissionEngine);
+    this.subagentManager.setHookManager(this.hookManager);
+    this._sessionStartFired = false;
+    this._resumed = false;
 
     // Create agent (basic system prompt — memory/skills loaded on first run)
     this.agent = new Agent({
@@ -246,24 +269,10 @@ export class AgentSession {
       streaming: options.streaming !== false,
       systemPrompt: options.systemPrompt || this.buildSystemPrompt(),
       
-      // Wire up tool execution logging to session history
-      onToolEnd: (info) => {
-        try {
-          this.sessionHistory.logToolExecution({
-            toolName: info.name || info.toolName,
-            args: info.arguments || info.args,
-            result: typeof info.result === 'string' ? info.result.slice(0, 500) : '',
-            success: !info.error,
-            durationMs: info.durationMs,
-            error: info.error?.message || info.error || null,
-          });
-        } catch { /* logging must not break the agent */ }
-        // Call user-provided onToolEnd if any
-        if (options.onToolEnd) options.onToolEnd(info);
-      },
       workspaceDir: this.activeWorkspace?.workspaceDir || this.workingDir,
     });
     this.agent.sessionHistory = this.sessionHistory;
+    this.agent.onPreCompact = (context) => this.hookManager.runPreCompact(context);
     
     // Set parent agent reference for subagents to inherit model
     this.subagentManager.parentAgent = this.agent;
@@ -320,6 +329,78 @@ export class AgentSession {
       ]);
     } catch (err) {
       console.warn('[AgentSession] Self-improvement init warning:', err.message);
+    }
+  }
+
+  // ─── Permissions ─────────────────────────────────────────────────
+
+  /**
+   * Mode used when none was chosen explicitly: settings.json defaultMode, then
+   * auto for full-access sessions, ask when someone can answer prompts, and
+   * auto for programmatic sessions without an approval handler (the pre-engine
+   * behavior; guard-rules hard denies still apply).
+   * @private
+   */
+  _defaultPermissionMode() {
+    const fromSettings = normalizePermissionMode(this.permissionEngine?.settingsRules?.defaultMode);
+    if (fromSettings) return fromSettings;
+    if (this.allowFullAccess) return 'auto';
+    return this.onApprovalRequest ? 'ask' : 'auto';
+  }
+
+  getPermissionMode() {
+    return this.permissionEngine.getMode();
+  }
+
+  /**
+   * @param {string} mode - read-only | plan | ask | accept-edits | auto (Claude Code aliases accepted)
+   * @returns {string} canonical mode now in effect
+   */
+  setPermissionMode(mode) {
+    const next = this.permissionEngine.setMode(mode);
+    this._permissionModeExplicit = true;
+    return next;
+  }
+
+  setAllowedTools(rules) {
+    for (const rule of [].concat(rules || [])) this.permissionEngine.addRule('allow', rule);
+  }
+
+  setDisallowedTools(rules) {
+    for (const rule of [].concat(rules || [])) this.permissionEngine.addRule('deny', rule);
+  }
+
+  /**
+   * Attach the interactive approval handler. Sessions restored via load() get
+   * theirs after construction, so re-derive the default mode when none was set.
+   */
+  setOnApprovalRequest(fn) {
+    this.onApprovalRequest = typeof fn === 'function' ? fn : null;
+    this.permissionEngine.setApprovalHandler(this.onApprovalRequest);
+    if (!this._permissionModeExplicit) this.permissionEngine.setMode(this._defaultPermissionMode());
+  }
+
+  /**
+   * SessionStart (once per session) and UserPromptSubmit hooks.
+   * Hook context is injected for the model; a blocking hook rejects the prompt.
+   * @private
+   */
+  async _runPromptHooks(task) {
+    const context = [];
+    if (!this._sessionStartFired) {
+      this._sessionStartFired = true;
+      const start = await this.hookManager.runSessionStart({ source: this._resumed ? 'resume' : 'startup' });
+      context.push(...start.additionalContext);
+    }
+    const submit = await this.hookManager.runUserPromptSubmit(task);
+    if (submit.blocked) {
+      const error = new Error(`Prompt blocked by UserPromptSubmit hook: ${submit.reason || 'no reason given'}`);
+      error.code = 'PROMPT_BLOCKED';
+      throw error;
+    }
+    context.push(...submit.additionalContext);
+    if (context.length > 0) {
+      await this.agent.injectSystemMessage(`Context from hooks:\n${context.join('\n\n')}`);
     }
   }
 
@@ -609,6 +690,7 @@ export class AgentSession {
     
     // Load hooks
     await this.hookManager.load();
+    await this._runPromptHooks(task);
     
     // Inject evolved prompt guidance from past outcomes
     const runContext = await this._prepareRunContext(task);
@@ -682,10 +764,17 @@ export class AgentSession {
     this.metadata.lastTask = task.substring(0, 100);
 
     await this.hookManager.load();
+    await this._runPromptHooks(task);
     await this._prepareRunContext(task);
 
-    for await (const chunk of this.agent.runStream(task)) {
-      yield chunk;
+    try {
+      for await (const chunk of this.agent.runStream(task)) {
+        yield chunk;
+      }
+      await this.hookManager.runStop({ reason: 'task_complete', task });
+    } catch (error) {
+      await this.hookManager.runStop({ reason: 'error', error: error.message });
+      throw error;
     }
   }
 
@@ -1162,6 +1251,7 @@ export class AgentSession {
     });
     
     session.agent.import(data.agent);
+    session._resumed = true;
     session.checkpoints = data.checkpoints || [];
     session.metadata = data.metadata || session.metadata;
     session.activeWorkspace = data.activeWorkspace || null;

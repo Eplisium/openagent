@@ -1,11 +1,17 @@
 /**
  * 🛡️ ToolGuard - Interactive Approval System for Dangerous Tool Operations
+ *
+ * Used by src/permissions/PermissionEngine.js:
+ *   - checkHardDeny(): catastrophic operations refused in every mode
+ *   - checkGuarded(): risky operations that need approval unless mode is 'auto'
  */
 
 import {
   DEFAULT_PATTERNS,
   matchesAny,
-  getDangerReason
+  getDangerReason,
+  checkHardDeny as checkHardDenyRule,
+  checkGuarded as checkGuardedRule,
 } from './guard-rules.js';
 
 export class ToolGuard {
@@ -17,6 +23,32 @@ export class ToolGuard {
     this.approvedThisSession = new Set();
     this.operationHistory = [];
     this.maxHistorySize = 50;
+  }
+
+  /**
+   * Hard deny check (guard-rules). Extra user patterns added via
+   * addGuardRule(pattern, 'hardDeny') are honored too.
+   * @returns {{denied: boolean, reason: string}}
+   */
+  checkHardDeny(toolName, args, ctx = {}) {
+    const base = checkHardDenyRule(toolName, args, ctx);
+    if (base.denied) return base;
+    const extra = this.dangerousPatterns.hardDeny;
+    if (extra && extra.length > 0) {
+      const argsStr = typeof args === 'string' ? args : JSON.stringify(args || '');
+      if (matchesAny(toolName, extra) || matchesAny(argsStr, extra)) {
+        return { denied: true, reason: 'Operation matches a custom hard-deny guard rule' };
+      }
+    }
+    return { denied: false, reason: '' };
+  }
+
+  /**
+   * Guarded (needs approval) check.
+   * @returns {{guarded: boolean, reason: string}}
+   */
+  checkGuarded(toolName, args) {
+    return checkGuardedRule(toolName, args);
   }
 
   shouldGuard(toolName, args) {

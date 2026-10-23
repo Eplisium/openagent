@@ -30,6 +30,9 @@ export const COMMAND_ALIASES = {
   'ctx': 'context',
   'ct': 'context',
   'ss': 'session',
+  'rw': 'rewind',
+  'cp': 'checkpoints',
+  'cmds': 'commands',
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -58,6 +61,7 @@ export function resolveCommand(input) {
  * @returns {{ name: string, args: string }}
  */
 export function parseCommand(command) {
+  // Custom markdown commands may be namespaced ("/git:commit"); ':' is kept in the name.
   const parts = command.slice(1).split(' ');
   const name = parts[0].toLowerCase();
   const args = parts.slice(1).join(' ');

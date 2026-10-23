@@ -6,10 +6,122 @@
 import chalk from '../utils/chalk-compat.js';
 import fs from '../utils/fs-compat.js';
 import path from 'path';
-import { spinner } from '../utils/spinners.js';
 import { AgentSession } from '../agent/AgentSession.js';
-import { promptWithTerminalReset } from './terminal.js';
 import { truncateInline, shortenModelLabel } from './formatting.js';
+
+// UI-only helpers are loaded lazily so headless callers (resumeSavedSession)
+// don't pay for the interactive prompt / spinner stack.
+async function promptWithTerminalReset(...args) {
+  const mod = await import('./terminal.js');
+  return mod.promptWithTerminalReset(...args);
+}
+
+async function spinner(...args) {
+  const mod = await import('../utils/spinners.js');
+  return mod.spinner(...args);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ⏯️ Resume (shared by --continue / --resume / headless)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Load a saved session without any UI. Used by `--continue`, `--resume [id]`
+ * and headless mode.
+ *
+ * @param {object} opts
+ * @param {string} opts.workingDir - Project directory (selects the sessions dir)
+ * @param {string|null} [opts.sessionId] - Specific id; when omitted, the most recent session is loaded
+ * @param {object} [opts.sessionOptions] - Extra AgentSession options applied after load
+ *   (permissionMode, allowedTools, disallowedTools, onApprovalRequest, permissions, allowFullAccess)
+ * @param {string} [opts.saveDir]
+ * @returns {Promise<AgentSession|null>}
+ */
+export async function resumeSavedSession({ workingDir, sessionId = null, sessionOptions = {}, saveDir } = {}) {
+  const loadOptions = {
+    workingDir,
+    permissions: sessionOptions.permissions,
+    allowFullAccess: sessionOptions.allowFullAccess,
+  };
+
+  let session = null;
+  if (sessionId) {
+    session = await AgentSession.load(sessionId, saveDir, loadOptions);
+    if (!session) {
+      // Allow unique prefix / suffix matches (e.g. the random suffix shown in listings)
+      const sessions = await AgentSession.listSessions(saveDir, { workingDir });
+      const matches = sessions.filter(s => s.sessionId?.startsWith(sessionId) || s.sessionId?.endsWith(sessionId));
+      if (matches.length === 1) session = await AgentSession.load(matches[0].sessionId, saveDir, loadOptions);
+    }
+  } else {
+    session = await AgentSession.recoverLastSession(workingDir, { ...loadOptions, saveDir });
+  }
+
+  if (session) applySessionOptions(session, sessionOptions);
+  return session;
+}
+
+/**
+ * Apply permission-related options to an already-constructed session.
+ * AgentSession.load() does not forward these, so set them after the fact.
+ * Every hook is optional — guards keep this working while AgentSession evolves.
+ */
+export function applySessionOptions(session, options = {}) {
+  if (!session) return session;
+  if (options.permissionMode && typeof session.setPermissionMode === 'function') {
+    try { session.setPermissionMode(options.permissionMode); } catch { /* unsupported mode on this build */ }
+  }
+  for (const key of ['allowedTools', 'disallowedTools', 'onApprovalRequest']) {
+    if (options[key] === undefined) continue;
+    const setter = `set${key[0].toUpperCase()}${key.slice(1)}`;
+    if (typeof session[setter] === 'function') {
+      try { session[setter](options[key]); continue; } catch { /* fall back to assignment */ }
+    }
+    session.options = { ...(session.options || {}), [key]: options[key] };
+    if (key === 'onApprovalRequest') session.onApprovalRequest = options[key];
+  }
+  if (options.verbose === false && session.agent) session.agent.verbose = false;
+  return session;
+}
+
+/**
+ * Interactive `/resume [id]` — resumes by id, or opens the picker when no id given.
+ */
+export async function resumeSessionCommand(cli, idArg = '') {
+  const id = String(idArg || '').trim();
+  if (!id) {
+    await loadSession(cli);
+    return;
+  }
+  const loaded = await resumeSavedSession({
+    workingDir: cli.workingDir,
+    sessionId: id,
+    sessionOptions: cli.getSessionPermissionOptions?.() || {
+      permissions: cli.permissions,
+      allowFullAccess: cli.allowFullAccess,
+    },
+  });
+  if (!loaded) {
+    console.log(chalk.red(`✗ Session not found: ${id}`));
+    return;
+  }
+  adoptLoadedSession(cli, loaded);
+  console.log(chalk.green(`✓ Resumed ${loaded.sessionId}`));
+}
+
+/**
+ * Swap a loaded session into the CLI and restore CLI-level tracking.
+ */
+export function adoptLoadedSession(cli, loaded) {
+  cli.session = loaded;
+  cli.syncSessionModelState?.(cli.session.agent.model);
+  if (loaded._cliSessionMeta) {
+    const meta = loaded._cliSessionMeta;
+    if (meta.sessionStartTime) cli.sessionStartTime = meta.sessionStartTime;
+    if (meta.taskCount != null) cli.taskCount = meta.taskCount;
+  }
+  return loaded;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // 💾 Save & Load
@@ -61,22 +173,17 @@ export async function loadSession(cli) {
     choices,
   }]);
 
-  const loaded = await AgentSession.load(sessionId, undefined, {
+  const loaded = await resumeSavedSession({
     workingDir: cli.workingDir,
-    permissions: cli.permissions,
-    allowFullAccess: cli.allowFullAccess,
+    sessionId,
+    sessionOptions: cli.getSessionPermissionOptions?.() || {
+      permissions: cli.permissions,
+      allowFullAccess: cli.allowFullAccess,
+    },
   });
 
   if (loaded) {
-    cli.session = loaded;
-    cli.syncSessionModelState(cli.session.agent.model);
-
-    // Restore CLI-level session tracking from loaded session
-    if (loaded._cliSessionMeta) {
-      const meta = loaded._cliSessionMeta;
-      if (meta.sessionStartTime) cli.sessionStartTime = meta.sessionStartTime;
-      if (meta.taskCount != null) cli.taskCount = meta.taskCount;
-    }
+    adoptLoadedSession(cli, loaded);
 
     console.log(chalk.green(`✓ Loaded ${sessionId}`));
     console.log(chalk.gray(`  Model: ${chalk.cyan(cli.session.agent.model)}`));
@@ -412,7 +519,7 @@ export async function resetSession(cli) {
  * Run a shell command and display results
  */
 export async function runShellCommand(cli, command) {
-  const s = spinner(chalk.gray(`Running: ${command}`));
+  const s = await spinner(chalk.gray(`Running: ${command}`));
 
   try {
     const result = await cli.session.toolRegistry.execute('exec', { command });

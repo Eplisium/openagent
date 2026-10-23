@@ -128,6 +128,9 @@ import {
 import {
   saveSession,
   loadSession,
+  resumeSavedSession,
+  resumeSessionCommand,
+  adoptLoadedSession,
   handleSessionCommand,
   handleUndo,
   handleDiff,
@@ -138,6 +141,13 @@ import {
 
 import { loadState, saveState } from './cli/stateOps.js';
 import { handleSkillsCommand, handleShellSkillsCommand } from './cli/skills-handler.js';
+import {
+  createApprovalHandler,
+  nextPermissionMode,
+  describePermissionMode,
+  PERMISSION_MODE_CYCLE,
+} from './cli/approvalPrompt.js';
+import { parseCliArgs, resolvePermissionMode, EXIT_BAD_ARGS } from './cli/headless.js';
 import { ProcessManager } from './tools/ProcessManager.js';
 
 import {
@@ -181,6 +191,17 @@ export class CLI {
     };
     this.history = [];
     this.mode = 'agent';
+
+    // Permission / approval settings (forwarded to AgentSession)
+    this.permissionMode = options.permissionMode || (this.allowFullAccess ? 'auto' : null);
+    this.allowedTools = Array.isArray(options.allowedTools) ? options.allowedTools : [];
+    this.disallowedTools = Array.isArray(options.disallowedTools) ? options.disallowedTools : [];
+    this._approvalHandler = null;
+
+    // Startup options: --resume [id] / --continue / --model
+    this.resumeTarget = options.resume ?? null;
+    this.continueSession = options.continueSession === true;
+    this.initialModel = options.model || null;
 
     this.maxHistorySize = 100;
 
@@ -258,14 +279,26 @@ export class CLI {
     if (this.state.firstRun) {
       await runOnboarding(this.state, () => this.saveState(), this.modelBrowser);
     }
-    const selectedModel = await this.selectModel();
-    const initSpinner = spinner(chalk.gray('Initializing session...'), { color: 'cyan' });
-    try {
-      this.createSession({ modelId: selectedModel });
-      initSpinner.success(chalk.hex(this.theme.success)('Session initialized'));
-    } catch (error) {
-      initSpinner.error(chalk.red(`Failed to initialize session: ${error.message}`));
-      process.exit(1);
+    let resumedSession = null;
+    if (this.resumeTarget || this.continueSession) {
+      resumedSession = await this._resumeAtStartup();
+    }
+
+    let selectedModel;
+    if (resumedSession) {
+      selectedModel = this.initialModel || resumedSession.agent.model;
+      if (this.initialModel) this.syncSessionModelState(this.initialModel);
+    } else {
+      selectedModel = this.initialModel || await this.selectModel();
+      if (this.initialModel) await this.modelBrowser.addRecent?.(this.initialModel);
+      const initSpinner = spinner(chalk.gray('Initializing session...'), { color: 'cyan' });
+      try {
+        this.createSession({ modelId: selectedModel });
+        initSpinner.success(chalk.hex(this.theme.success)('Session initialized'));
+      } catch (error) {
+        initSpinner.error(chalk.red(`Failed to initialize session: ${error.message}`));
+        process.exit(1);
+      }
     }
 
     // Session info — Hermes-style summary
@@ -286,6 +319,10 @@ export class CLI {
       console.log(chalk.hex(this.theme.muted)('  Run OpenAgent from a project directory to allow writes.'));
     }
 
+    if (this.permissionMode) {
+      console.log(chalk.hex(this.theme.muted)(`  mode: ${this.permissionMode} · ${describePermissionMode(this.permissionMode)} · /mode to change`));
+    }
+
     if (this.autoSave) this.startAutoSave();
 
     console.log('');
@@ -295,6 +332,38 @@ export class CLI {
     console.log('');
 
     await this.mainLoop();
+  }
+
+  /**
+   * Handle `--resume [id]` / `--continue` at startup. With `--resume` and no id,
+   * shows the session picker. Returns the loaded session or null.
+   */
+  async _resumeAtStartup() {
+    try {
+      if (this.resumeTarget === true) {
+        await loadSession(this);
+        return this.session || null;
+      }
+      const loaded = await resumeSavedSession({
+        workingDir: this.workingDir,
+        sessionId: typeof this.resumeTarget === 'string' ? this.resumeTarget : null,
+        sessionOptions: this.getSessionPermissionOptions(),
+      });
+      if (!loaded) {
+        const what = typeof this.resumeTarget === 'string' ? `session ${this.resumeTarget}` : 'a previous session';
+        console.log(chalk.hex(this.theme.warning)(`  ⚠ Could not find ${what}; starting a new one.`));
+        return null;
+      }
+      adoptLoadedSession(this, loaded);
+      console.log(chalk.hex(this.theme.success)(`  ✓ resumed ${loaded.sessionId}`));
+      if (loaded.metadata?.lastTask) {
+        console.log(chalk.hex(this.theme.muted)(`  last task: ${loaded.metadata.lastTask}`));
+      }
+      return loaded;
+    } catch (error) {
+      console.log(chalk.red(`  ✗ Resume failed: ${error.message}`));
+      return null;
+    }
   }
 
   // ── Main Loop ────────────────────────────────────────────────
@@ -557,8 +626,7 @@ export class CLI {
       verbose: this.verbose,
       streaming: this.streaming,
       perfLogging: this.perfLogging,
-      permissions: this.permissions,
-      allowFullAccess: this.allowFullAccess,
+      ...this.getSessionPermissionOptions(),
       sessionId,
       activeWorkspace,
       openAgentDir,
@@ -570,6 +638,90 @@ export class CLI {
     this.syncSessionModelState(modelId);
     this.lastSaveTime = Date.now();
     return nextSession;
+  }
+
+  /**
+   * Permission-related AgentSession options shared by new + resumed sessions.
+   */
+  getSessionPermissionOptions() {
+    if (!this._approvalHandler) this._approvalHandler = createApprovalHandler(this);
+    return {
+      permissions: this.permissions,
+      allowFullAccess: this.allowFullAccess,
+      ...(this.permissionMode && { permissionMode: this.permissionMode }),
+      allowedTools: this.allowedTools,
+      disallowedTools: this.disallowedTools,
+      onApprovalRequest: this._approvalHandler,
+    };
+  }
+
+  /**
+   * Change permission mode for the live session (`/mode`).
+   * @param {string} [mode] - explicit mode, or omit to cycle
+   */
+  setPermissionMode(mode) {
+    const current = this.session?.getPermissionMode?.() || this.permissionMode || 'ask';
+    const next = mode || nextPermissionMode(current);
+    if (!PERMISSION_MODE_CYCLE.includes(next)) {
+      console.log(chalk.yellow(`⚠ Unknown mode: ${next}. Options: ${PERMISSION_MODE_CYCLE.join(', ')}`));
+      return false;
+    }
+    if (typeof this.session?.setPermissionMode !== 'function') {
+      console.log(chalk.yellow('⚠ This build of AgentSession does not support permission modes yet.'));
+      return false;
+    }
+    try {
+      this.session.setPermissionMode(next);
+    } catch (error) {
+      console.log(chalk.red(`✗ Could not set mode: ${error.message}`));
+      return false;
+    }
+    this.permissionMode = next;
+    console.log(chalk.hex(this.theme.accent)(`  mode: ${next}`) + chalk.hex(this.theme.muted)(` · ${describePermissionMode(next)}`));
+    return true;
+  }
+
+  async _beginTurnCheckpoint(userInput) {
+    try {
+      const mod = await import('./agent/TurnCheckpointer.js').catch(() => null);
+      await mod?.beginTurn?.(userInput);
+    } catch {
+      // Turn checkpointing is best-effort.
+    }
+  }
+
+  async _handleExtendedCommand(name, argsString) {
+    let mod;
+    try {
+      mod = await import('./cli/extendedCommands.js');
+    } catch {
+      return false; // Optional module not present
+    }
+    if (typeof mod?.handleExtendedCommand !== 'function') return false;
+    const outcome = await mod.handleExtendedCommand(name, argsString, {
+      session: this.session,
+      cli: this,
+      print: (...args) => console.log(...args),
+    });
+    if (!outcome) return false;
+    // Custom markdown commands expand to a prompt for the agent.
+    if (typeof outcome === 'object' && typeof outcome.prompt === 'string' && outcome.prompt.trim()) {
+      this.taskCount++;
+      await this.runAgentTask(outcome.prompt);
+    }
+    return true;
+  }
+
+  async _listExtendedCommands() {
+    try {
+      const mod = await import('./cli/extendedCommands.js');
+      const list = typeof mod?.listExtendedCommands === 'function'
+        ? await mod.listExtendedCommands({ cwd: this.workingDir })
+        : [];
+      return Array.isArray(list) ? list : [];
+    } catch {
+      return [];
+    }
   }
 
   isMarkdownEnabled() {
@@ -662,6 +814,7 @@ export class CLI {
     const abortHandlerState = this._setupTaskAbortHandler();
 
     try {
+      await this._beginTurnCheckpoint(task);
       const result = await this.session.run(task);
       this._activity?.dispose();
       this._activity = null;
@@ -799,6 +952,7 @@ export class CLI {
     const abortHandlerState = this._setupTaskAbortHandler();
 
     try {
+      await this._beginTurnCheckpoint(this.currentTask);
       this.session.agent.pushMessage(multimodalMsg);
       const result = await this.session.agent.run();
       this._activity?.dispose();
@@ -1076,6 +1230,20 @@ export class CLI {
     }
   }
 
+  /** Temporarily detach the Ctrl+C / '/stop' stdin listener (used by the approval prompt). */
+  _suspendTaskAbortHandler() {
+    const handlers = process.stdin.listeners('data');
+    for (const handler of handlers) process.stdin.removeListener('data', handler);
+    return { handlers };
+  }
+
+  _resumeTaskAbortHandler(state) {
+    if (!state?.handlers) return;
+    for (const handler of state.handlers) {
+      if (!process.stdin.listeners('data').includes(handler)) process.stdin.on('data', handler);
+    }
+  }
+
   _printAbortSummary() {
     if (this._abortSummaryPrinted) return;
     this._abortSummaryPrinted = true;
@@ -1160,6 +1328,19 @@ export class CLI {
       case 'new': case 'reset': await resetSession(this); break;
       case 'save': await saveSession(this); break;
       case 'load': await loadSession(this); break;
+      case 'resume': await resumeSessionCommand(this, argStr); break;
+      case 'mode': case 'permissions': {
+        const requested = argStr.trim();
+        if (requested === 'list' || requested === '?') {
+          for (const m of PERMISSION_MODE_CYCLE) {
+            const marker = m === (this.permissionMode || 'ask') ? chalk.hex(this.theme.accent)('●') : ' ';
+            console.log(`  ${marker} ${m.padEnd(13)}${chalk.hex(this.theme.muted)(describePermissionMode(m))}`);
+          }
+        } else {
+          this.setPermissionMode(requested || undefined);
+        }
+        break;
+      }
       case 'history': showHistory(this); break;
       case 'cost': showCost(this); break;
       case 'context': showContext(this); break;
@@ -1170,9 +1351,10 @@ export class CLI {
       case 'paste': await this.handlePaste(); break;
       case 'doctor': await this.runDoctor(); break;
       case 'templates': await this.showTemplates(); break;
-      case 'help': showHelp(this); break;
+      case 'help': showHelp(this, await this._listExtendedCommands()); break;
       case 'skills': await handleSkillsCommand(this.workingDir, argStr); break;
       default:
+        if (await this._handleExtendedCommand(command, argStr)) break;
         console.log(chalk.yellow(`⚠ Unknown: /${command}. Type /help`));
     }
 
@@ -1395,55 +1577,119 @@ try { if (fs.existsSync(__filename)) resolvedFilename = fs.realpathSync(__filena
 try { if (argvPath && fs.existsSync(argvPath)) resolvedArgv = fs.realpathSync(argvPath); } catch { /* realpath may fail on broken symlinks */ }
 
 const args = process.argv.slice(2);
-const allowFullAccess = args.includes('--full-access') || process.env.OPENAGENT_FULL_ACCESS === 'true';
-const perfLogging = args.includes('--perf') || process.env.OPENAGENT_PERF === 'true';
+const parsedArgs = parseCliArgs(args);
+const startupPermissionMode = resolvePermissionMode(parsedArgs, { headless: parsedArgs.print });
+const allowFullAccess = startupPermissionMode === 'auto' || process.env.OPENAGENT_FULL_ACCESS === 'true';
+const perfLogging = parsedArgs.perf || process.env.OPENAGENT_PERF === 'true';
 const permissions = { allowFileDelete: true, allowFullAccess };
 
 // Handle --help / -h
-if (args.includes('--help') || args.includes('-h')) {
+if (parsedArgs.help) {
   console.log(`
   \x1b[1mOpenAgent\x1b[0m v0.1.20 — AI agent with 400+ models & tool support
 
   \x1b[1mUsage:\x1b[0m
     openagent [options]              Start interactive CLI
+    openagent -p "<prompt>" [opts]   Run headless (non-interactive) and exit
     openagent skills <command>       Manage skills
 
-  \x1b[1mOptions:\x1b[0m
-    --full-access                    Allow full filesystem access (no sandbox)
+  \x1b[1mHeadless:\x1b[0m
+    -p, --print <prompt>             Run one prompt non-interactively (stdin is prepended as context)
+    --output-format <fmt>            text | json | stream-json (default: text)
+    --max-turns <n>                  Cap agent iterations
+    --quiet, -q                      Suppress progress logs on stderr
+
+  \x1b[1mSession & model:\x1b[0m
+    -c, --continue                   Resume the most recent session in this directory
+    -r, --resume [id]                Resume a session by id (no id: interactive picker)
+    -m, --model <id>                 Model id (e.g. anthropic/claude-sonnet-4.5, ollama/qwen3)
+    --cwd <dir>                      Working directory (default: current directory)
+
+  \x1b[1mPermissions:\x1b[0m
+    --permission-mode <mode>         read-only | plan | ask | accept-edits | auto
+                                     (headless default: accept-edits; "ask" auto-denies headless)
+    --allowed-tools <rules>          Comma-separated allow rules, e.g. "read_file,exec(npm test:*)"
+    --disallowed-tools <rules>       Comma-separated deny rules, e.g. "exec(git push:*)"
+    --full-access                    Alias for --permission-mode auto
+
+  \x1b[1mServers:\x1b[0m
     --daemon                         Run as headless gateway server
     --companion                      Start companion WebSocket server alongside CLI
-    --perf                           Enable per-iteration performance logging
     --port <number>                  Port for daemon/companion (default: daemon=auto, companion=3200)
     --channels <list>                Daemon channels (comma-separated)
+    --perf                           Enable per-iteration performance logging
     -h, --help                       Show this help message
 
   \x1b[1mEnvironment:\x1b[0m
+    OPENROUTER_API_KEY               Your OpenRouter API key
+    OPENAGENT_MODEL                  Default model for headless runs
     OPENAGENT_FULL_ACCESS=true       Same as --full-access
     OPENAGENT_PERF=true              Same as --perf
-    OPENROUTER_API_KEY               Your OpenRouter API key
 
   \x1b[1mExamples:\x1b[0m
-    openagent                        Start interactive session
-    openagent --full-access          Start with unrestricted file access
-    openagent --daemon --port 8080   Run as gateway on port 8080
-    openagent skills list            List available skills
+    openagent                                    Start interactive session
+    openagent -c                                 Continue the last session
+    openagent -p "explain src/cli.js"            One-shot answer on stdout
+    git diff | openagent -p "review this" --output-format json
+    openagent -p "fix failing tests" --allowed-tools "exec(npm test:*)" --max-turns 20
+    openagent --daemon --port 8080               Run as gateway on port 8080
+    openagent skills list                        List available skills
+
+  Exit codes: 0 success · 1 error · 2 bad arguments. See docs/HEADLESS.md.
 `);
   process.exit(0);
 }
 
 if (resolvedArgv && resolvedFilename === resolvedArgv) {
+  const cliOptions = {
+    allowFullAccess,
+    perfLogging,
+    permissions,
+    permissionMode: startupPermissionMode,
+    allowedTools: parsedArgs.allowedTools,
+    disallowedTools: parsedArgs.disallowedTools,
+    model: parsedArgs.model,
+    resume: parsedArgs.resume,
+    continueSession: parsedArgs.continue,
+    ...(parsedArgs.cwd && { workingDir: path.resolve(parsedArgs.cwd) }),
+  };
+
+  if (parsedArgs.print) {
+    // Headless mode: no banner, spinners or ANSI UI. Exit code reflects the outcome.
+    import('./cli/headless.js')
+      .then(({ runHeadless }) => runHeadless(parsedArgs))
+      .then((code) => { process.exitCode = code; })
+      .catch((error) => {
+        process.stderr.write(`openagent: ${error?.message || error}\n`);
+        process.exitCode = 1;
+      })
+      .finally(() => {
+        // Lingering handles (MCP connections, timers) must not keep a headless run alive.
+        setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref?.();
+      });
+
+  } else if (parsedArgs.errors.length > 0) {
+    process.stderr.write(`openagent: ${parsedArgs.errors.join('; ')}\nRun "openagent --help" for usage.\n`);
+    process.exit(EXIT_BAD_ARGS);
+
+  } else if (parsedArgs.cwd && !fs.existsSync(path.resolve(parsedArgs.cwd))) {
+    process.stderr.write(`openagent: --cwd directory does not exist: ${path.resolve(parsedArgs.cwd)}\n`);
+    process.exit(EXIT_BAD_ARGS);
+
   // Handle --daemon flag: run as headless gateway server
-  if (args.includes('--daemon')) {
-    const daemonPort = parseInt(args[args.indexOf('--port') + 1], 10) || undefined;
-    const daemonChannels = args.includes('--channels')
-      ? args[args.indexOf('--channels') + 1]
-      : undefined;
+  } else if (parsedArgs.daemon) {
+    const daemonPort = parseInt(parsedArgs.port, 10) || undefined;
+    const daemonChannels = parsedArgs.channels || undefined;
 
     import('./gateway/GatewayDaemon.js').then(({ GatewayDaemon }) => {
       const daemon = new GatewayDaemon({
         ...(daemonPort && { port: daemonPort }),
         ...(daemonChannels && { channels: daemonChannels.split(',').map(s => s.trim()) }),
-        sessionDefaults: { allowFullAccess, permissions },
+        sessionDefaults: {
+          allowFullAccess,
+          permissions,
+          ...(startupPermissionMode && { permissionMode: startupPermissionMode }),
+        },
       });
       return daemon.start();
     }).catch((error) => {
@@ -1452,13 +1698,13 @@ if (resolvedArgv && resolvedFilename === resolvedArgv) {
     });
 
   // Handle --companion flag: start companion WebSocket server alongside CLI
-  } else if (args.includes('--companion')) {
-    const companionPort = parseInt(args[args.indexOf('--port') + 1], 10) || 3200;
+  } else if (parsedArgs.companion) {
+    const companionPort = parseInt(parsedArgs.port, 10) || 3200;
 
     import('./gateway/CompanionServer.js').then(async ({ CompanionServer }) => {
       const companion = new CompanionServer({ port: companionPort });
       await companion.start();
-      const cli = await runCLI({ allowFullAccess, perfLogging, permissions });
+      const cli = await runCLI(cliOptions);
       if (cli?.session) {
         companion.attachSession(cli.session);
       }
@@ -1468,13 +1714,13 @@ if (resolvedArgv && resolvedFilename === resolvedArgv) {
     });
 
   // Handle shell subcommands (e.g., openagent skills list)
-  } else if (args[0] === 'skills') {
-    handleShellSkillsCommand(process.cwd(), args.slice(1)).catch((error) => {
+  } else if (parsedArgs.subcommand === 'skills') {
+    handleShellSkillsCommand(process.cwd(), parsedArgs.subcommandArgs).catch((error) => {
       logger.error('Fatal error', { message: error.message });
       process.exit(1);
     });
   } else {
-    runCLI({ allowFullAccess, perfLogging, permissions }).catch((error) => {
+    runCLI(cliOptions).catch((error) => {
       logger.error('Fatal error', { message: error.message });
       process.exit(1);
     });

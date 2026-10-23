@@ -2333,6 +2333,7 @@ Use list_directory for deeper exploration of specific directories.`;
           continue;
         }
         
+        this._logToolExecution(toolName, args, result);
         if (this.onToolEnd) {
           this.onToolEnd(toolName, result);
         }
@@ -2375,11 +2376,12 @@ Use list_directory for deeper exploration of specific directories.`;
       logger.error(`Tool failed after ${this.maxRetries} retries`, { tool: toolName, error: lastError.message });
     }
     
+    const failResult = { success: false, error: lastError.message };
+    this._logToolExecution(toolName, args, failResult);
     if (this.onToolEnd) {
-      this.onToolEnd(toolName, { success: false, error: lastError.message });
+      this.onToolEnd(toolName, failResult);
     }
     
-    const failResult = { success: false, error: lastError.message };
     return {
       toolCallId: toolCall.id,
       toolName,
@@ -2387,6 +2389,29 @@ Use list_directory for deeper exploration of specific directories.`;
       result: failResult,
       _serializedContent: JSON.stringify(failResult),
     };
+  }
+
+  /**
+   * Record a finished tool call in the SQLite session history (set by AgentSession).
+   * Lives here rather than in an onToolEnd callback because frontends replace onToolEnd.
+   * @private
+   */
+  _logToolExecution(toolName, args, result) {
+    if (!this.sessionHistory) return;
+    try {
+      const failed = result?.success === false;
+      const loggedArgs = args && typeof args === 'object' && !Array.isArray(args)
+        ? Object.fromEntries(Object.entries(args).filter(([key]) => !key.startsWith('_')))
+        : args;
+      this.sessionHistory.logToolExecution({
+        toolName,
+        args: loggedArgs,
+        result: failed ? '' : JSON.stringify(result ?? ''),
+        success: !failed,
+        durationMs: result?._meta?.duration,
+        error: failed ? (result?.error || 'failed') : null,
+      });
+    } catch { /* logging must not break the agent */ }
   }
 
   /**

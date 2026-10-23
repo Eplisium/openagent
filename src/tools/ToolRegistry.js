@@ -14,8 +14,15 @@
 import chalk from '../utils/chalk-compat.js';
 import { ToolErrorType } from '../errors.js';
 import { ToolFormatAdapter } from './ToolFormatAdapter.js';
+import { classifyTool, normalizePermissionClass } from '../permissions/classify.js';
 
 export { ToolErrorType } from '../errors.js';
+
+/** Drop private (underscore-prefixed) keys such as _abortSignal before handing args to hooks. */
+function publicArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args || {};
+  return Object.fromEntries(Object.entries(args).filter(([key]) => !key.startsWith('_')));
+}
 
 export class ToolRegistry {
   constructor(options = {}) {
@@ -56,6 +63,61 @@ export class ToolRegistry {
     this._activatedSet = new Set();
     this._cachedSessionDefs = null;
     this._cachedSessionKey = null;
+
+    // Permission gate (src/permissions/PermissionEngine.js). When set, every
+    // execute() call is checked before the tool runs.
+    this.permissionEngine = options.permissionEngine || null;
+
+    // Lifecycle hooks (src/hooks/HookManager.js). When set, PreToolUse runs
+    // before the permission check and PostToolUse after the tool returns.
+    this.hookManager = options.hookManager || null;
+  }
+
+  /**
+   * Attach (or detach with null) a PermissionEngine that gates execute().
+   * @param {import('../permissions/PermissionEngine.js').PermissionEngine|null} engine
+   */
+  setPermissionEngine(engine) {
+    this.permissionEngine = engine || null;
+  }
+
+  /**
+   * Attach (or detach with null) a HookManager whose PreToolUse/PostToolUse
+   * hooks wrap execute().
+   * @param {import('../hooks/HookManager.js').HookManager|null} hookManager
+   */
+  setHookManager(hookManager) {
+    this.hookManager = hookManager || null;
+  }
+
+  /**
+   * Run a tool hook event; hook failures never break tool execution.
+   * @private
+   */
+  async _runToolHook(event, toolName, args, result) {
+    const hooks = this.hookManager;
+    if (!hooks) return null;
+    try {
+      await hooks.ensureLoaded();
+      if (!hooks.hasHooks(event)) return null;
+      const input = publicArgs(args);
+      return event === 'PreToolUse'
+        ? await hooks.runPreToolUse(toolName, input)
+        : await hooks.runPostToolUse(toolName, input, result);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Permission class of a tool call: read | write | execute | network | destructive.
+   * Uses the tool's declared `permission` attribute, else name/category defaults.
+   * @param {string} toolName
+   * @param {Object} [args]
+   * @returns {string}
+   */
+  getPermissionClass(toolName, args = {}) {
+    return classifyTool(toolName, this.tools.get(toolName) || null, args);
   }
 
   /**
@@ -82,14 +144,18 @@ export class ToolRegistry {
       }
     }
     
-    this.tools.set(tool.name, {
+    const entry = {
       ...tool,
       enabled: tool.enabled !== false,
       category: tool.category || 'general',
       destructive: tool.destructive || false,
       permission: tool.permission || null,
       timeout: tool.timeout || this.defaultTimeout,
-    });
+    };
+    // Default permission class from name/category when the tool doesn't declare one
+    // (argument-dependent tools are still re-classified per call by classifyTool).
+    if (!entry.permission) entry.permission = classifyTool(entry.name, entry, {});
+    this.tools.set(tool.name, entry);
     
     // Invalidate cached definitions
     this._cachedFunctionDefs = null;
@@ -412,7 +478,7 @@ export class ToolRegistry {
       ...this._buildToolSearchTool(),
       enabled: true,
       destructive: false,
-      permission: null,
+      permission: 'read',
       timeout: this.defaultTimeout,
       _autoToolSearch: true,
     };
@@ -500,7 +566,7 @@ export class ToolRegistry {
   /**
    * Execute a tool with permission checks, validation, and timeout
    */
-  async execute(toolName, args = {}) {
+  async execute(toolName, args = {}, options = {}) {
     const startTime = Date.now();
     this.stats.totalExecutions++;
     
@@ -543,7 +609,10 @@ export class ToolRegistry {
       };
     }
     if (tool.category === 'file') {
-      const filePermission = tool.permission || (tool.destructive ? 'delete' : 'read');
+      const declared = normalizePermissionClass(typeof tool.permission === 'string' ? tool.permission : null);
+      const filePermission = declared === 'destructive'
+        ? 'delete'
+        : (declared || (tool.destructive ? 'delete' : 'read'));
 
       if (filePermission === 'write' && !this.permissions.allowFileWrite) {
         this.recordExecution(toolName, args, false, Date.now() - startTime, 'File write access disabled');
@@ -593,8 +662,46 @@ export class ToolRegistry {
       }
     }
 
-    // Confirm destructive operations
-    if (tool.destructive && this.permissions.confirmDestructive) {
+    // PreToolUse hooks: may block the call, rewrite its input, or pre-approve it
+    let hookOptions = options;
+    const preHook = options.skipHooks ? null : await this._runToolHook('PreToolUse', toolName, args);
+    if (preHook?.blocked) {
+      const message = `Blocked by PreToolUse hook: ${preHook.reason || 'no reason given'}`;
+      this.recordExecution(toolName, args, false, Date.now() - startTime, message);
+      this.stats.failedExecutions++;
+      return {
+        success: false,
+        error: message,
+        errorType: ToolErrorType.PERMISSION_DENIED,
+        _meta: { tool: toolName, duration: Date.now() - startTime },
+      };
+    }
+    if (preHook?.updatedInput) args = { ...args, ...preHook.updatedInput };
+    if (preHook?.permissionDecision === 'allow') {
+      hookOptions = { ...options, preApproved: true, preApprovedReason: preHook.reason || undefined };
+    }
+
+    // Permission engine gate (modes, allow/deny/ask rules, guard-rules hard denies)
+    if (this.permissionEngine && !options.skipPermissionCheck) {
+      const decision = await this._checkPermission(toolName, tool, args, hookOptions);
+      if (!decision.allowed) {
+        const message = decision.message || `Permission denied: ${decision.reason}`;
+        this.recordExecution(toolName, args, false, Date.now() - startTime, message);
+        this.stats.failedExecutions++;
+        return {
+          success: false,
+          error: message,
+          errorType: ToolErrorType.PERMISSION_DENIED,
+          permission: {
+            decision: decision.decision,
+            mode: decision.mode,
+            rule: decision.rule || null,
+            permissionClass: decision.permissionClass,
+          },
+          _meta: { tool: toolName, duration: Date.now() - startTime },
+        };
+      }
+    } else if (tool.destructive && this.permissions.confirmDestructive) {
       console.log(chalk.yellow(`⚠️  Destructive operation: ${toolName}`));
     }
 
@@ -626,8 +733,13 @@ export class ToolRegistry {
         };
       }
       
+      // PostToolUse hooks: feedback is surfaced to the model alongside the result
+      const postHook = options.skipHooks ? null : await this._runToolHook('PostToolUse', toolName, args, safeResult);
+      const hookFeedback = [...(preHook?.additionalContext || []), ...(postHook?.additionalContext || [])];
+
       return {
         ...safeResult,
+        ...(hookFeedback.length > 0 && { hook_feedback: hookFeedback.join('\n') }),
         _meta: { tool: toolName, duration },
       };
     } catch (error) {
@@ -647,6 +759,40 @@ export class ToolRegistry {
     }
   }
   
+  /**
+   * Ask the permission engine. A PreToolUse hook 'approve' (options.preApproved)
+   * skips the interactive prompt but never overrides a deny.
+   * @private
+   */
+  async _checkPermission(toolName, tool, args, options = {}) {
+    const engine = this.permissionEngine;
+    if (options.preApproved) {
+      const evaluation = engine.evaluate(toolName, args, tool);
+      if (evaluation.decision !== 'deny') {
+        return { ...evaluation, allowed: true, decision: 'allow', reason: options.preApprovedReason || 'Approved by PreToolUse hook' };
+      }
+      return {
+        ...evaluation,
+        allowed: false,
+        message: evaluation.source === 'rule'
+          ? `Permission denied by rule ${evaluation.rule}: ${toolName} was not run.`
+          : `Permission denied: ${evaluation.reason}`,
+      };
+    }
+    try {
+      return await engine.check(toolName, args, tool);
+    } catch (err) {
+      return {
+        allowed: false,
+        decision: 'deny',
+        reason: err.message,
+        message: `Permission check failed: ${err.message}`,
+        mode: engine.getMode?.(),
+        permissionClass: this.getPermissionClass(toolName, args),
+      };
+    }
+  }
+
   /**
    * Execute tool with timeout — uses AbortController when tool supports it
    */

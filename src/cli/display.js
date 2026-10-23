@@ -1249,16 +1249,41 @@ export function showHistory(cli) {
 /**
  * Show help panel
  */
-export function showHelp(_cli) {
+/** Session/permission commands handled directly in cli.js (not part of COMMAND_ENTRIES). */
+export const SESSION_CONTROL_ENTRIES = Object.freeze([
+  ['/mode [mode|list]', 'Cycle or set permission mode (read-only, plan, ask, accept-edits, auto)'],
+  ['/resume [id]', 'Resume a saved session by id (no id: picker)'],
+]);
+
+/**
+ * Show help. `extendedCommands` is the optional listExtendedCommands() output
+ * ({ name, description, source }[]) from cli/extendedCommands.js.
+ */
+export function showHelp(_cli, extendedCommands = []) {
   const cli = _cli;
   const skin = getActiveSkin();
   const helpHeader = skin.branding?.helpHeader || 'help';
+  const knownNames = new Set(COMMAND_ENTRIES.map(entry => entry[0].split(' ')[0]));
+  for (const [cmd] of SESSION_CONTROL_ENTRIES) knownNames.add(cmd.split(' ')[0]);
+  const sessionEntries = SESSION_CONTROL_ENTRIES.filter(([cmd]) => !COMMAND_ENTRIES.some(e => e[0].split(' ')[0] === cmd.split(' ')[0]));
   console.log('');
   console.log(divider(cli, helpHeader));
-  console.log(formatCommandList([...COMMAND_ENTRIES.slice(0, -1), ['/reset', 'Alias for /new'], COMMAND_ENTRIES.at(-1)], cli.theme)
+  console.log(formatCommandList([...COMMAND_ENTRIES.slice(0, -1), ['/reset', 'Alias for /new'], ...sessionEntries, COMMAND_ENTRIES.at(-1)], cli.theme)
     .split('\n')
     .map(line => `  ${line}`)
     .join('\n'));
+  const extended = (Array.isArray(extendedCommands) ? extendedCommands : [])
+    .filter(c => c && typeof c.name === 'string' && c.name)
+    .map(c => [`/${c.name.replace(/^\//, '')}`, `${c.description || ''}${c.source && c.source !== 'builtin' ? ` (${c.source})` : ''}`])
+    .filter(([cmd]) => !knownNames.has(cmd));
+  if (extended.length > 0) {
+    console.log('');
+    console.log(`  ${label(cli, 'Extended')}`);
+    console.log(formatCommandList(extended, cli.theme)
+      .split('\n')
+      .map(line => `  ${line}`)
+      .join('\n'));
+  }
   console.log('');
   console.log(`  ${label(cli, 'Aliases')} ${SHORTCUT_ENTRIES.map((entry) => {
     const [alias, target] = entry.split('=');

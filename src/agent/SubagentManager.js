@@ -36,7 +36,7 @@ import { createMcpTools } from '../tools/mcpTools.js';
 import { createA2ATools } from '../tools/a2aTools.js';
 import { createAGUITools } from '../tools/aguiTools.js';
 import chalk from '../utils/chalk-compat.js';
-import { SUBAGENT_SPECIALIZATIONS } from './subagents/specializations.js';
+import { getAllSpecializations, getSpecialization, resolveToolNames } from './subagents/specializations.js';
 import { UI } from './subagents/subagentUI.js';
 import { SubagentTask, TaskState } from './subagents/SubagentTask.js';
 
@@ -331,10 +331,87 @@ export class SubagentManager {
 
   // ─── Subagent Factory ──────────────────────────────────────────
 
+  /**
+   * Resolve a specialization (built-in or markdown agent) for this manager's project.
+   * @param {string} id
+   */
+  getSpecialization(id) {
+    return getSpecialization(id || 'general', { cwd: this.workingDir });
+  }
+
+  /**
+   * Build the tool registry for a specialization. Markdown agents with a `tools`
+   * list get a restricted registry containing only those tools; everyone else
+   * shares the full registry.
+   * @param {object} spec
+   * @returns {ToolRegistry}
+   */
+  getToolsForSpec(spec) {
+    const allowed = resolveToolNames(spec?.tools);
+    if (!allowed) return this.sharedTools;
+    if (!this._restrictedRegistries) this._restrictedRegistries = new Map();
+    const cacheKey = allowed.slice().sort().join(',');
+    const cached = this._restrictedRegistries.get(cacheKey);
+    if (cached) return cached;
+    const registry = new ToolRegistry({
+      permissions: this.permissions,
+      permissionEngine: this.permissionEngine,
+      hookManager: this.hookManager,
+    });
+    const picked = [];
+    for (const name of allowed) {
+      const tool = this.sharedTools.get(name);
+      if (tool) picked.push(tool);
+    }
+    registry.registerAll(picked);
+    this._restrictedRegistries.set(cacheKey, registry);
+    return registry;
+  }
+
+  /**
+   * Gate every subagent tool call with the parent session's PermissionEngine,
+   * so delegating work never bypasses the user's permission mode or rules.
+   * @param {import('../permissions/PermissionEngine.js').PermissionEngine|null} engine
+   */
+  setPermissionEngine(engine) {
+    this.permissionEngine = engine || null;
+    for (const registry of this._allRegistries()) registry.setPermissionEngine(this.permissionEngine);
+  }
+
+  /**
+   * Share the parent session's HookManager (tool hooks + SubagentStop).
+   * @param {import('../hooks/HookManager.js').HookManager|null} hookManager
+   */
+  setHookManager(hookManager) {
+    this.hookManager = hookManager || null;
+    for (const registry of this._allRegistries()) registry.setHookManager(this.hookManager);
+  }
+
+  /** @private */
+  _allRegistries() {
+    return [this.sharedTools, ...(this._restrictedRegistries?.values() || [])];
+  }
+
+  /**
+   * Fire SubagentStop hooks. Failures are swallowed: hooks observe, never break, delegation.
+   * @private
+   */
+  async _runSubagentStopHook(subagentTask, success, error = null) {
+    if (!this.hookManager) return;
+    try {
+      await this.hookManager.runSubagentStop({
+        taskId: subagentTask.id,
+        specialization: subagentTask.specialization,
+        success,
+        error: error?.message || error || undefined,
+      });
+    } catch { /* non-fatal */ }
+  }
+
   createSubagent(specialization = 'general', customOptions = {}) {
-    const spec = SUBAGENT_SPECIALIZATIONS[specialization] || SUBAGENT_SPECIALIZATIONS.general;
+    const spec = this.getSpecialization(specialization);
     
-    const model = customOptions.model || this.parentAgent?.model;
+    const model = customOptions.model || spec.model || this.parentAgent?.model;
     const workspaceDir = this.getWorkspaceDir();
     
     if (!model) {
@@ -370,7 +447,7 @@ ${tree}
 - Be thorough but focused. Do exactly what was asked, nothing more.${projectContext}`;
     
     const agent = new Agent({
-      tools: this.sharedTools,
+      tools: this.getToolsForSpec(spec),
       model: model,
       systemPrompt: enhancedPrompt,
       verbose: false, // Subagents are quiet - we handle their output
@@ -425,7 +502,7 @@ ${tree}
     }
     this.stats.bySpecialization[specialization].total++;
     
-    const spec = SUBAGENT_SPECIALIZATIONS[specialization] || SUBAGENT_SPECIALIZATIONS.general;
+    const spec = this.getSpecialization(specialization);
     
     if (this.verbose) {
       console.log(UI.header(spec.name, task.substring(0, 100)));
@@ -570,6 +647,7 @@ ${tree}
         // Cleanup on success
         this.runningTasks.delete(subagentTask.id);
         this.completedTasks.push(subagentTask);
+        await this._runSubagentStopHook(subagentTask, true);
         
         return {
           success: true,
@@ -631,6 +709,7 @@ ${tree}
     if (subagentTask.subagent) {
       this.activeSubagents.delete(subagentTask.subagent);
     }
+    await this._runSubagentStopHook(subagentTask, false, lastError);
     return {
       success: false,
       taskId: subagentTask.id,
@@ -660,7 +739,7 @@ ${tree}
         const task = typeof taskSpec === 'string' 
           ? { task: taskSpec, specialization: 'general' }
           : taskSpec;
-        const spec = SUBAGENT_SPECIALIZATIONS[task.specialization || 'general'] || SUBAGENT_SPECIALIZATIONS.general;
+        const spec = this.getSpecialization(task.specialization || 'general');
         console.log(UI.taskRow(iteration, spec.name, TaskState.QUEUED, task.task.substring(0, 60)));
       });
       console.log(chalk.dim('  ╠' + '═'.repeat(58) + '╣'));
@@ -1139,13 +1218,25 @@ Please synthesize these results into a single coherent, well-organized response.
 
   // ─── Static Helpers ────────────────────────────────────────────
 
-  static listSpecializations() {
-    return Object.entries(SUBAGENT_SPECIALIZATIONS).map(([key, spec]) => ({
+  /**
+   * List built-in + markdown specializations.
+   * @param {{cwd?: string, homeDir?: string}} [options]
+   */
+  static listSpecializations(options = {}) {
+    return Object.entries(getAllSpecializations(options)).map(([key, spec]) => ({
       id: key,
       name: spec.name,
       description: spec.description,
       maxIterations: spec.maxIterations,
+      source: spec.source || 'builtin',
+      tools: spec.tools || null,
+      model: spec.model || null,
     }));
+  }
+
+  /** Instance variant scoped to this manager's working directory. */
+  listSpecializations() {
+    return SubagentManager.listSpecializations({ cwd: this.workingDir });
   }
 
   // ─── Stale Subagent Cleanup ─────────────────────────────────────
