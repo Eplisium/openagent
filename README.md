@@ -426,7 +426,6 @@ openagent/
 ├── prompts/                      # Prompt templates
 │   └── agent-system.md           # System prompt template
 ├── fonts/                        # ASCII art fonts
-├── express-jwt-api/              # Example JWT API project
 ├── package.json
 ├── vitest.config.js
 ├── eslint.config.js

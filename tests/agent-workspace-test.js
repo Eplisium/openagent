@@ -107,6 +107,9 @@ async function main() {
       verbose: false,
       streaming: false,
       maxIterations: 0,
+      // The stub repeats one tool on purpose; keep the stall detectors out of the way.
+      maxStallIterations: 1000,
+      maxPatternStall: 1000,
     });
 
     const result = await agent.run('Keep going until the work is done.');

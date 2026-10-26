@@ -241,8 +241,7 @@ openagent --models
 
 - **GitHub**: https://github.com/Eplisium/openagent
 - **OpenRouter**: https://openrouter.ai
-- **Documentation**: `/a0/usr/workdir/openagent/README.md`
-- **API Reference**: `/a0/usr/workdir/openagent/openapi.json`
+- **Documentation**: the `README.md` in the repo root
 
 ---
 
